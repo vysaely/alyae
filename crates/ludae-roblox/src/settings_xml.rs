@@ -122,14 +122,186 @@ pub fn apply(path: &Path, props: &[Prop]) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
-/// The graphics level properties for level `n` (1-10), set manually as Roblox's menu does.
+/// Roblox's menu level (1-10) on its internal scale (1-21), as Roblox itself pairs them
+/// (a file at menu level 10 holds 21).
+const INTERNAL_LEVEL: [u32; 10] = [1, 3, 5, 7, 9, 11, 14, 16, 18, 21];
+
+/// Graphics level `n` (1-10) chosen in the menu: manual mode, both scales.
 pub fn quality(n: u32) -> Vec<Prop> {
     vec![
         prop("token", "GraphicsOptimizationMode", 1),
-        prop("int", "GraphicsQualityLevel", n),
-        prop("token", "SavedQualityLevel", n),
+        prop(
+            "int",
+            "GraphicsQualityLevel",
+            INTERNAL_LEVEL[(n.clamp(1, 10) - 1) as usize],
+        ),
+        prop("token", "SavedQualityLevel", n.clamp(1, 10)),
         prop("bool", "MaxQualityEnabled", false),
     ]
+}
+
+/// One input of the Graphics form: its key, the file entry it sets and how its text becomes the
+/// value. "keep" (or empty) leaves the entry alone.
+struct Setting {
+    key: &'static str,
+    tag: &'static str,
+    name: &'static str,
+    value: fn(&str) -> Option<String>,
+}
+
+fn on_off(v: &str) -> Option<String> {
+    match v {
+        "on" => Some("true".into()),
+        "off" => Some("false".into()),
+        _ => None,
+    }
+}
+
+/// 0-10 as Roblox's 0-1 volume.
+fn tenths(v: &str) -> Option<String> {
+    v.parse::<u32>()
+        .ok()
+        .filter(|n| *n <= 10)
+        .map(|n| (n as f32 / 10.0).to_string())
+}
+
+fn number(v: &str) -> Option<String> {
+    v.replace(',', ".")
+        .parse::<f32>()
+        .ok()
+        .filter(|f| (0.0..=10.0).contains(f))
+        .map(|f| f.to_string())
+}
+
+fn pick(v: &str, names: &[&str]) -> Option<String> {
+    names.iter().position(|n| *n == v).map(|i| i.to_string())
+}
+
+const SETTINGS: &[Setting] = &[
+    Setting {
+        key: "camera_inverted",
+        tag: "bool",
+        name: "CameraYInverted",
+        value: on_off,
+    },
+    Setting {
+        key: "shift_lock",
+        tag: "token",
+        name: "ControlMode",
+        value: |v| on_off(v).map(|b| if b == "true" { "1".into() } else { "0".into() }),
+    },
+    Setting {
+        key: "camera_mode",
+        tag: "token",
+        name: "ComputerCameraMovementMode",
+        value: |v| pick(v, &["Default", "Classic", "Follow", "Orbital"]),
+    },
+    Setting {
+        key: "movement_mode",
+        tag: "token",
+        name: "ComputerMovementMode",
+        value: |v| pick(v, &["Default", "Keyboard", "Click to move"]),
+    },
+    Setting {
+        key: "volume",
+        tag: "float",
+        name: "MasterVolume",
+        value: tenths,
+    },
+    Setting {
+        key: "voice_volume",
+        tag: "float",
+        name: "VoiceChatVolume",
+        value: tenths,
+    },
+    Setting {
+        key: "chat",
+        tag: "bool",
+        name: "ChatVisible",
+        value: on_off,
+    },
+    Setting {
+        key: "stats",
+        tag: "bool",
+        name: "PerformanceStatsVisible",
+        value: on_off,
+    },
+    Setting {
+        key: "reduced_motion",
+        tag: "bool",
+        name: "ReducedMotion",
+        value: on_off,
+    },
+    Setting {
+        key: "translation",
+        tag: "bool",
+        name: "ChatTranslationEnabled",
+        value: on_off,
+    },
+    Setting {
+        key: "transparency",
+        tag: "float",
+        name: "PreferredTransparency",
+        value: |v| number(v).filter(|f| f.parse::<f32>().is_ok_and(|x| x <= 1.0)),
+    },
+    Setting {
+        key: "text_size",
+        tag: "token",
+        name: "PreferredTextSize",
+        value: |v| pick(v, &["", "Medium", "Large", "Larger", "Largest"]),
+    },
+];
+
+/// The file entries the Graphics form asks for, and the FPS cap it sets (0: none), or the first
+/// value that is not one Roblox takes.
+pub fn from_form(input: impl Fn(&str) -> String) -> Result<(Vec<Prop>, Option<u32>), String> {
+    let keep = |v: &str| v.is_empty() || v == "keep";
+    let mut props = Vec::new();
+    let mut fps = None;
+    match input("fps").as_str() {
+        v if keep(v) => {}
+        "no cap" => {
+            fps = Some(0);
+            props.push(prop("int", "FramerateCap", 10000));
+        }
+        v => match v.parse::<u32>() {
+            Ok(n @ 1..=1000) => {
+                fps = Some(n);
+                props.push(prop("int", "FramerateCap", n));
+            }
+            _ => return Err(format!("FPS limit: '{v}'")),
+        },
+    }
+    match input("quality").as_str() {
+        v if keep(v) => {}
+        "Automatic" => props.push(prop("token", "GraphicsOptimizationMode", 0)),
+        v => match v.parse::<u32>() {
+            Ok(n @ 1..=10) => props.extend(quality(n)),
+            _ => return Err(format!("Graphics level: '{v}'")),
+        },
+    }
+    match input("sensitivity").as_str() {
+        v if keep(v) => {}
+        v => match number(v) {
+            Some(f) => props.extend(sensitivity(f.parse().unwrap_or(0.2))),
+            None => return Err(format!("Camera sensitivity: '{v}' (0 to 10)")),
+        },
+    }
+    for st in SETTINGS {
+        let v = input(st.key);
+        if keep(&v) {
+            continue;
+        }
+        match (st.value)(&v) {
+            Some(value) => props.push(Prop {
+                tag: st.tag,
+                name: st.name,
+                value,
+            }),
+            None => return Err(format!("{}: '{v}'", st.name)),
+        }
+    }
+    Ok((props, fps))
 }
 
 /// Camera sensitivity, everywhere Roblox reads it.
@@ -151,13 +323,14 @@ mod tests {
     #[test]
     fn changes_only_what_is_named() {
         let mut props = quality(8);
+        // level 8 is 16 inside
         props.extend(sensitivity(0.25));
         props.push(prop("int", "FramerateCap", 330));
         let out = set(ROBLOX, &props);
         assert!(out.contains("<int name=\"FramerateCap\">330</int>"));
         // Roblox's tag kept, the missing one added
         assert!(out.contains("<token name=\"SavedQualityLevel\">8</token>"));
-        assert!(out.contains("<int name=\"GraphicsQualityLevel\">8</int>"));
+        assert!(out.contains("<int name=\"GraphicsQualityLevel\">16</int>"));
         assert!(
             out.contains("<X>0.250000</X>")
                 && out.contains("<Y>0.250000</Y>")
@@ -168,6 +341,37 @@ mod tests {
         assert_eq!(out.matches("FramerateCap").count(), 1);
         // a second run changes nothing
         assert_eq!(set(&out, &props), out);
+    }
+
+    #[test]
+    fn form_to_entries() {
+        let form = |k: &str| match k {
+            "fps" => "165".to_string(),
+            "quality" => "10".into(),
+            "shift_lock" => "on".into(),
+            "volume" => "5".into(),
+            "camera_mode" => "Classic".into(),
+            _ => "keep".into(),
+        };
+        let (props, fps) = from_form(form).unwrap();
+        assert_eq!(fps, Some(165));
+        let out = set(ROBLOX, &props);
+        assert!(out.contains("<int name=\"FramerateCap\">165</int>"));
+        // menu level 10 is 21 inside, as in a real file
+        assert!(out.contains("<token name=\"SavedQualityLevel\">10</token>"));
+        assert!(out.contains("<int name=\"GraphicsQualityLevel\">21</int>"));
+        assert!(out.contains("<token name=\"ControlMode\">1</token>"));
+        assert!(out.contains("<float name=\"MasterVolume\">0.5</float>"));
+        assert!(out.contains("<token name=\"ComputerCameraMovementMode\">1</token>"));
+        assert!(
+            from_form(|k| if k == "volume" {
+                "11".into()
+            } else {
+                "keep".into()
+            })
+            .is_err()
+        );
+        assert_eq!(from_form(|_| "keep".into()).unwrap().0.len(), 0);
     }
 
     #[test]

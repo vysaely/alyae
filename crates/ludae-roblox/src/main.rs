@@ -144,6 +144,60 @@ pub fn join_from(req: &Request) -> Join {
     j
 }
 
+/// Log in: Roblox's login page in `ludae-roblox-login`, filled in with the saved username,
+/// password and 2FA secret; the person solves a captcha if one shows. The new cookie is checked
+/// and saved.
+fn login(req: &Request) {
+    let (user, pass) = (req.get("username"), req.get("password"));
+    if user.is_empty() || pass.is_empty() {
+        fail("Log in needs the account's username and password saved");
+    }
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| {
+            e.parent().map(|d| {
+                d.join(if cfg!(windows) {
+                    "ludae-roblox-login.exe"
+                } else {
+                    "ludae-roblox-login"
+                })
+            })
+        })
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| "ludae-roblox-login".into());
+    status("login window open");
+    let mut child = std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| {
+            fail(&format!(
+                "cannot open the login window ({}): {e}",
+                exe.display()
+            ))
+        });
+    if let Some(mut stdin) = child.stdin.take() {
+        let request = json!({ "username": user, "password": pass, "totp": req.get("totp") });
+        let _ = writeln!(stdin, "{request}");
+    }
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|e| fail(&e.to_string()));
+    let cookie = serde_json::from_slice::<Value>(&out.stdout)
+        .ok()
+        .and_then(|v| v["cookie"].as_str().map(String::from))
+        .unwrap_or_else(|| fail("the login window closed before Roblox signed in"));
+    match api::authenticated(&cookie) {
+        Ok((id, name)) => {
+            say(
+                json!({ "set": { "cookie": cookie, "username": name, "user_id": id.to_string() } }),
+            );
+            status("signed in");
+        }
+        Err(e) => fail(&format!("Roblox gave a cookie that does not work: {e}")),
+    }
+}
+
 /// Checks the cookie and fills in the name and user ID.
 fn check(req: &Request) {
     let cookie = req.cookie();
@@ -233,6 +287,7 @@ fn main() {
     }
     match action.as_str() {
         "check" => check(&req),
+        "login" => login(&req),
         #[cfg(target_os = "linux")]
         "graphics" => linux::graphics(&req),
         "signout_all" | "logout" | "change_password" | "unblock_all" | "friends" | "privacy" => {

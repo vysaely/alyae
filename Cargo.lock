@@ -1915,19 +1915,28 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "getrandom 0.3.4",
- "hmac",
+ "ludae-otp",
  "rusqlite",
  "serde",
  "serde_json",
- "sha1",
  "toml",
+]
+
+[[package]]
+name = "ludae-otp"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "sha1",
 ]
 
 [[package]]
 name = "ludae-roblox"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "libc",
+ "ludae-otp",
  "serde_json",
  "ureq",
  "windows-sys 0.61.2",

@@ -6,7 +6,6 @@ mod look;
 mod module;
 mod paths;
 mod store;
-mod totp;
 mod ui;
 mod vault;
 

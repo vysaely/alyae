@@ -7,6 +7,7 @@ mod api;
 #[cfg(target_os = "linux")]
 mod linux;
 mod settings_xml;
+mod tools;
 #[cfg(windows)]
 mod windows;
 
@@ -234,6 +235,9 @@ fn main() {
         "check" => check(&req),
         #[cfg(target_os = "linux")]
         "graphics" => linux::graphics(&req),
+        "signout_all" | "logout" | "change_password" | "unblock_all" | "friends" | "privacy" => {
+            tools::run(&action, &req)
+        }
         "play" | "follow" => {
             #[cfg(target_os = "linux")]
             linux::play(&req);

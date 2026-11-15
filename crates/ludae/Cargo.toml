@@ -13,8 +13,7 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 crypto_secretbox = "0.1"
 getrandom = "0.3"
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
-hmac = "0.12"
-sha1 = "0.10"
+ludae-otp = { path = "../ludae-otp" }
 dirs = "6"
 
 [dev-dependencies]

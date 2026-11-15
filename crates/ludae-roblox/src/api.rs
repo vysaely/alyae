@@ -28,7 +28,7 @@ fn net(e: ureq::Error) -> String {
     format!("cannot reach Roblox: {e}")
 }
 
-fn answer(status: u16, what: &str) -> String {
+pub fn answer(status: u16, what: &str) -> String {
     match status {
         401 => "the cookie has expired: sign in again and paste the new one".into(),
         429 => "Roblox is rate limiting: try again in a minute".into(),
@@ -66,34 +66,219 @@ pub fn user_id_of(username: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("no Roblox user is called '{username}'"))
 }
 
-/// POST with the cookie, fetching the CSRF token Roblox asks for on the first try.
-fn post_signed(
-    url: &str,
-    cookie: &str,
-    body: &Value,
-) -> Result<ureq::http::Response<ureq::Body>, String> {
-    let a = agent();
-    let mut token = String::new();
-    for _ in 0..2 {
-        let mut req = a
-            .post(url)
-            .header("Cookie", &format!(".ROBLOSECURITY={cookie}"))
-            .header("Referer", "https://www.roblox.com/")
-            .header("Origin", "https://www.roblox.com");
-        if !token.is_empty() {
-            req = req.header("X-CSRF-TOKEN", &token);
+/// Who a request is sent as: the cookie, the device ID (some APIs refuse requests without one)
+/// and the 2FA secret that answers Roblox's two-step challenge.
+#[derive(Default)]
+pub struct Session {
+    pub cookie: String,
+    pub tracker: Option<String>,
+    pub totp: String,
+}
+
+impl Session {
+    pub fn plain(cookie: &str) -> Self {
+        Self {
+            cookie: cookie.to_string(),
+            ..Default::default()
         }
-        let r = req.send_json(body).map_err(net)?;
-        match r
-            .headers()
-            .get("x-csrf-token")
-            .and_then(|t| t.to_str().ok())
+    }
+
+    fn cookie_header(&self) -> String {
+        match &self.tracker {
+            Some(t) => format!(".ROBLOSECURITY={}; RBXEventTrackerV2={t}", self.cookie),
+            None => format!(".ROBLOSECURITY={}", self.cookie),
+        }
+    }
+}
+
+pub type Response = ureq::http::Response<ureq::Body>;
+
+fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
+    r.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+/// A signed POST (or GET with `body` None): fetches the CSRF token Roblox asks for, waits once
+/// when rate limited, and answers a two-step challenge with the session's 2FA secret.
+pub fn call(url: &str, s: &Session, body: Option<&Value>) -> Result<Response, String> {
+    let a = agent();
+    let mut csrf = String::new();
+    let mut challenge: Option<[(&str, String); 3]> = None;
+    let mut waited = false;
+    for _ in 0..5 {
+        let r = match body {
+            None => {
+                let mut q = a
+                    .get(url)
+                    .header("Cookie", &s.cookie_header())
+                    .header("Accept", "application/json");
+                if let Some(c) = &challenge {
+                    for (k, v) in c {
+                        q = q.header(*k, v);
+                    }
+                }
+                q.call()
+            }
+            Some(b) => {
+                let mut q = a
+                    .post(url)
+                    .header("Cookie", &s.cookie_header())
+                    .header("Accept", "application/json")
+                    .header("Referer", "https://www.roblox.com/")
+                    .header("Origin", "https://www.roblox.com");
+                if !csrf.is_empty() {
+                    q = q.header("X-CSRF-TOKEN", &csrf);
+                }
+                if let Some(c) = &challenge {
+                    for (k, v) in c {
+                        q = q.header(*k, v);
+                    }
+                }
+                q.send_json(b)
+            }
+        }
+        .map_err(net)?;
+        let status = r.status().as_u16();
+        if status == 429 && !waited {
+            let secs = header(&r, "retry-after")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(15)
+                .min(60);
+            std::thread::sleep(Duration::from_secs(secs));
+            waited = true;
+            continue;
+        }
+        if status != 403 {
+            return Ok(r);
+        }
+        if header(&r, "rblx-challenge-type")
+            .is_some_and(|t| t.eq_ignore_ascii_case("twostepverification"))
+            && challenge.is_none()
         {
-            Some(t) if r.status() == 403 && token.is_empty() => token = t.to_string(),
+            challenge = Some(two_step(&r, s)?);
+            continue;
+        }
+        match header(&r, "x-csrf-token") {
+            Some(t) if t != csrf => csrf = t.to_string(),
             _ => return Ok(r),
         }
     }
-    Err("Roblox refused the request token".into())
+    Err("Roblox kept refusing the request".into())
+}
+
+/// Answers a two-step challenge with the current code from the 2FA secret; returns the headers
+/// that prove it on the retried request.
+fn two_step(r: &Response, s: &Session) -> Result<[(&'static str, String); 3], String> {
+    if s.totp.is_empty() {
+        return Err("Roblox asks for a 2FA code: save the account's 2FA secret first".into());
+    }
+    let id = header(r, "rblx-challenge-id")
+        .ok_or("Roblox's challenge has no ID")?
+        .to_string();
+    let raw = header(r, "rblx-challenge-metadata").ok_or("Roblox's challenge has no details")?;
+    let meta: Value =
+        serde_json::from_slice(&base64_decode(raw).ok_or("unreadable challenge details")?)
+            .map_err(|e| format!("unreadable challenge details: {e}"))?;
+    let user = meta["userId"]
+        .as_str()
+        .map(String::from)
+        .or_else(|| meta["userId"].as_u64().map(|u| u.to_string()))
+        .ok_or("the challenge names no user")?;
+    let sub = meta["challengeId"]
+        .as_str()
+        .ok_or("the challenge has no inner ID")?
+        .to_string();
+    let action = meta["actionType"].as_str().unwrap_or("Generic").to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let code = ludae_otp::code(&s.totp, now).ok_or("the saved 2FA secret is not valid")?;
+    let plain = Session {
+        cookie: s.cookie.clone(),
+        tracker: s.tracker.clone(),
+        totp: String::new(),
+    };
+    let mut v = call(
+        &format!(
+            "https://twostepverification.roblox.com/v1/users/{user}/challenges/authenticator/verify"
+        ),
+        &plain,
+        Some(&json!({ "actionType": action, "challengeId": sub, "code": code })),
+    )?;
+    if v.status() != 200 {
+        let body: Value = v.body_mut().read_json().unwrap_or(Value::Null);
+        let msg = body["errors"][0]["message"]
+            .as_str()
+            .unwrap_or("rejected")
+            .to_string();
+        return Err(format!("2FA code {msg}"));
+    }
+    let token = v
+        .body_mut()
+        .read_json::<Value>()
+        .map_err(|e| e.to_string())?["verificationToken"]
+        .as_str()
+        .ok_or("Roblox sent no verification token")?
+        .to_string();
+    let inner = json!({ "verificationToken": token, "rememberDevice": false, "challengeId": sub, "actionType": action });
+    let cont = call(
+        "https://apis.roblox.com/challenge/v1/continue",
+        &plain,
+        Some(
+            &json!({ "challengeId": id, "challengeType": "twostepverification", "challengeMetadata": inner.to_string() }),
+        ),
+    )?;
+    if cont.status() != 200 {
+        return Err(answer(cont.status().as_u16(), "2FA challenge"));
+    }
+    Ok([
+        ("rblx-challenge-id", id),
+        ("rblx-challenge-type", "twostepverification".into()),
+        (
+            "rblx-challenge-metadata",
+            base64_encode(inner.to_string().as_bytes()),
+        ),
+    ])
+}
+
+/// The new `.ROBLOSECURITY` a response sets (a sign-out everywhere or a password change).
+pub fn new_cookie(r: &Response) -> Option<String> {
+    r.headers().get_all("set-cookie").iter().find_map(|h| {
+        let v = h.to_str().ok()?.strip_prefix(".ROBLOSECURITY=")?;
+        let v = v.split(';').next()?.trim();
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let (mut buf, mut bits, mut out) = (0u32, 0, Vec::new());
+    for c in s.trim().bytes().filter(|&c| c != b'=') {
+        buf = buf << 6 | B64.iter().position(|&b| b == c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// (place ID, link code) of a `roblox.com/share?code=...&type=Server` link.
@@ -102,10 +287,10 @@ pub fn resolve_share_link(link: &str, cookie: &str) -> Result<(u64, String), Str
         .split(['?', '&'])
         .find_map(|p| p.strip_prefix("code="))
         .ok_or("the link has no code")?;
-    let mut r = post_signed(
+    let mut r = call(
         "https://apis.roblox.com/sharelinks/v1/resolve-link",
-        cookie,
-        &json!({ "linkId": code, "linkType": "Server" }),
+        &Session::plain(cookie),
+        Some(&json!({ "linkId": code, "linkType": "Server" })),
     )?;
     if r.status() != 200 {
         return Err(answer(r.status().as_u16(), "share link"));
@@ -123,10 +308,10 @@ pub fn resolve_share_link(link: &str, cookie: &str) -> Result<(u64, String), Str
 pub fn presence(user_ids: &[u64], cookie: &str) -> Result<Vec<(u64, String)>, String> {
     let mut out = Vec::new();
     for chunk in user_ids.chunks(100) {
-        let mut r = post_signed(
+        let mut r = call(
             "https://presence.roblox.com/v1/presence/users",
-            cookie,
-            &json!({ "userIds": chunk }),
+            &Session::plain(cookie),
+            Some(&json!({ "userIds": chunk })),
         )?;
         if r.status() != 200 {
             return Err(answer(r.status().as_u16(), "online status"));
@@ -182,10 +367,10 @@ pub fn browser_id(tracker: &str) -> Option<&str> {
 /// A one-time ticket that signs the Windows client in.
 #[cfg(windows)]
 pub fn auth_ticket(cookie: &str) -> Result<String, String> {
-    let r = post_signed(
+    let r = call(
         "https://auth.roblox.com/v1/authentication-ticket",
-        cookie,
-        &json!({}),
+        &Session::plain(cookie),
+        Some(&json!({})),
     )?;
     if let Some(t) = r
         .headers()
@@ -200,6 +385,17 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_round_trip() {
+        for s in ["", "a", "ab", "abc", "{\"challengeId\":\"x\"}"] {
+            assert_eq!(
+                base64_decode(&base64_encode(s.as_bytes())).unwrap(),
+                s.as_bytes()
+            );
+        }
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+    }
 
     #[test]
     fn cookies_and_trackers() {

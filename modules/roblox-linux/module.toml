@@ -108,3 +108,48 @@ hint = "keep, or 0.1 to 4 as in Roblox's menu"
 key = "volume"
 label = "Volume"
 choices = ["keep", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+
+# account tools: each chosen account in turn, 4 s apart
+
+[[action]]
+id = "privacy"
+label = "Who can join"
+
+[[action.input]]
+key = "who"
+label = "Who can join"
+choices = ["All", "Friends", "Followers", "Following", "TrustedFriends", "NoOne"]
+
+[[action]]
+id = "friends"
+label = "Friends"
+
+[[action.input]]
+key = "what"
+label = "Do"
+choices = ["Decline all requests", "Accept all requests", "Remove all friends"]
+
+[[action]]
+id = "unblock_all"
+label = "Unblock everyone"
+confirm = "Every player these accounts blocked is unblocked."
+
+[[action]]
+id = "signout_all"
+label = "Sign out everywhere"
+confirm = "Every other session of these accounts ends (other PCs, phones, browsers). Ludae keeps a new cookie."
+
+[[action]]
+id = "logout"
+label = "Log out"
+confirm = "The saved cookie stops working; the account needs to sign in again to play."
+
+[[action]]
+id = "change_password"
+label = "Change password"
+confirm = "Needs the saved password (and 2FA secret if Roblox asks). The new one and a new cookie are saved here."
+
+[[action.input]]
+key = "new_password"
+label = "New password"
+hint = "empty: a random 20-character one"

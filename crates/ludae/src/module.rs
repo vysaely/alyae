@@ -273,16 +273,33 @@ impl Running {
     }
 }
 
+#[cfg(windows)]
 fn shell(cmd: &str) -> Command {
-    if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(cmd);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(cmd);
-        c
+    use std::os::windows::process::CommandExt;
+    let mut c = Command::new("cmd");
+    // cmd parses its own command line: quotes in `cmd` must reach it unescaped
+    c.raw_arg("/C").raw_arg(cmd);
+    no_console(&mut c);
+    c
+}
+
+#[cfg(not(windows))]
+fn shell(cmd: &str) -> Command {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(cmd);
+    c
+}
+
+/// A console program started from the window gets no console window of its own on Windows.
+fn no_console(c: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(not(windows))]
+    let _ = c;
 }
 
 fn account_json(a: &Account) -> serde_json::Map<String, serde_json::Value> {
@@ -305,7 +322,9 @@ fn spawn_helper(
         .ok_or_else(|| format!("{} has no helper for '{label}'", module.name))?;
     let dir = data_dir.join("games").join(&module.id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let child = Command::new(&helper)
+    let mut cmd = Command::new(&helper);
+    no_console(&mut cmd);
+    let child = cmd
         .arg(action)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -851,7 +851,9 @@ impl App {
             // the big button's boxes side by side, labels above (Place ID | Job ID)
             if let Some(p) = m.actions.iter().find(|a| a.primary) {
                 if !p.inputs.is_empty() {
-                    let w = ((full - 6.0 * (p.inputs.len() as f32 - 1.0)) / p.inputs.len() as f32).max(60.0);
+                    let gap = ui.spacing().item_spacing.x;
+                    let n = p.inputs.len() as f32;
+                    let w = ((full - gap * (n - 1.0)) / n - 1.0).floor().max(60.0);
                     ui.horizontal(|ui| {
                         for i in &p.inputs {
                             ui.vertical(|ui| {
@@ -864,19 +866,19 @@ impl App {
                     });
                 }
                 let label = if ids.len() > 1 { format!("{} ({})", p.label, ids.len()) } else { p.label.clone() };
-                if ui.add_enabled(can_run, look::primary(&label).min_size(egui::vec2(full, 30.0))).clicked() {
+                if ui.add_enabled(can_run, look::primary(&label).min_size(egui::vec2(full - 1.0, 30.0))).clicked() {
                     run = Some(p.id.clone());
                 }
             }
             // one-box buttons as a row: [box][Follow]
             for a in m.actions.iter().filter(|a| !a.primary && a.inputs.len() == 1) {
                 let i = &a.inputs[0];
-                ui.horizontal(|ui| {
-                    let v = inputs.entry(i.key.clone()).or_default();
-                    ui.add(egui::TextEdit::singleline(v).hint_text(&i.hint).desired_width(full - 100.0));
+                row(ui, |ui| {
                     if ui.add_enabled(can_run, egui::Button::new(&a.label).min_size(egui::vec2(94.0, 0.0))).clicked() {
                         run = Some(a.id.clone());
                     }
+                    let v = inputs.entry(i.key.clone()).or_default();
+                    ui.add(egui::TextEdit::singleline(v).hint_text(&i.hint).desired_width(ui.available_width()));
                 });
             }
         }
@@ -919,14 +921,13 @@ impl App {
         let saved = self.accounts.iter().find(|a| a.id == d.id).cloned();
         let mut copy = None;
         let mut save_now = false;
-        let full = ui.available_width();
         // Alias row, as AEAM: [alias][Set Alias]
-        ui.horizontal(|ui| {
-            let fallback = self.title(&Account { name: String::new(), ..d.clone() });
-            ui.add(egui::TextEdit::singleline(&mut d.name).hint_text(format!("Alias ({fallback})")).desired_width(full - 100.0));
+        let fallback = self.title(&Account { name: String::new(), ..d.clone() });
+        row(ui, |ui| {
             if !self.draft_new && ui.add_enabled(saved.as_ref().is_some_and(|s| s.name != d.name), egui::Button::new("Set Alias").min_size(egui::vec2(94.0, 0.0))).clicked() {
                 save_now = true;
             }
+            ui.add(egui::TextEdit::singleline(&mut d.name).hint_text(format!("Alias ({fallback})")).desired_width(ui.available_width()));
         });
         egui::Grid::new("fields").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             ui.label(RichText::new("Group").weak());
@@ -963,16 +964,17 @@ impl App {
                         .on_hover_text(&f.hint);
                     } else {
                         let show = !f.secret || self.shown_secrets.contains(&key);
-                        let w = (ui.available_width() - if f.secret { 96.0 } else { 0.0 }).max(80.0);
-                        ui.add(egui::TextEdit::singleline(&mut v).password(!show).hint_text(&f.hint).desired_width(w));
-                        if f.secret {
-                            if ui.small_button(if show { "Hide" } else { "Show" }).clicked() && !self.shown_secrets.remove(&key) {
-                                self.shown_secrets.insert(key);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if f.secret {
+                                if ui.add_enabled(!v.is_empty(), egui::Button::new("Copy").small()).clicked() {
+                                    copy = Some(v.clone());
+                                }
+                                if ui.small_button(if show { "Hide" } else { "Show" }).clicked() && !self.shown_secrets.remove(&key) {
+                                    self.shown_secrets.insert(key);
+                                }
                             }
-                            if ui.add_enabled(!v.is_empty(), egui::Button::new("Copy").small()).clicked() {
-                                copy = Some(v.clone());
-                            }
-                        }
+                            ui.add(egui::TextEdit::singleline(&mut v).password(!show).hint_text(&f.hint).desired_width(ui.available_width()));
+                        });
                     }
                 });
                 if v.is_empty() { map.remove(&f.key); } else { map.insert(f.key.clone(), v.clone()); }
@@ -1058,4 +1060,10 @@ fn plural(n: usize) -> String {
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// A row filling the width it has, laid out from the right: buttons first, then a box taking the rest.
+fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), h), egui::Layout::right_to_left(egui::Align::Center), add);
 }

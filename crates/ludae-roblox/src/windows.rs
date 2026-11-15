@@ -8,7 +8,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
-use windows_sys::Win32::System::Threading::{CreateMutexW, OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -29,7 +31,11 @@ fn clients() -> Vec<u32> {
         e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         let mut ok = Process32FirstW(snap, &mut e) != 0;
         while ok {
-            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let len = e
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(e.szExeFile.len());
             let name = String::from_utf16_lossy(&e.szExeFile[..len]);
             if name.eq_ignore_ascii_case("RobloxPlayerBeta.exe") {
                 out.push(e.th32ProcessID);
@@ -59,7 +65,9 @@ fn kill(pid: u32) {
 fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -80,27 +88,53 @@ pub fn play(req: &Request) {
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();
-    let browser = tracker.as_deref().and_then(api::browser_id).unwrap_or("0").to_string();
+    let browser = tracker
+        .as_deref()
+        .and_then(api::browser_id)
+        .unwrap_or("0")
+        .to_string();
     let base = "https://www.roblox.com/Game/PlaceLauncher.ashx";
     let launcher = match (j.follow, j.place) {
-        (Some(user), _) => Some(format!("{base}?request=RequestFollowUser&browserTrackerId={browser}&userId={user}")),
+        (Some(user), _) => Some(format!(
+            "{base}?request=RequestFollowUser&browserTrackerId={browser}&userId={user}"
+        )),
         (None, Some(p)) => Some(match (&j.job, &j.link_code) {
-            (Some(job), _) => format!("{base}?request=RequestGameJob&browserTrackerId={browser}&placeId={p}&gameId={job}&isPlayTogetherGame=false"),
-            (None, Some(code)) => format!("{base}?request=RequestPrivateGame&browserTrackerId={browser}&placeId={p}&linkCode={code}"),
-            (None, None) => format!("{base}?request=RequestGame&browserTrackerId={browser}&placeId={p}&isPlayTogetherGame=false"),
+            (Some(job), _) => format!(
+                "{base}?request=RequestGameJob&browserTrackerId={browser}&placeId={p}&gameId={job}&isPlayTogetherGame=false"
+            ),
+            (None, Some(code)) => format!(
+                "{base}?request=RequestPrivateGame&browserTrackerId={browser}&placeId={p}&linkCode={code}"
+            ),
+            (None, None) => format!(
+                "{base}?request=RequestGame&browserTrackerId={browser}&placeId={p}&isPlayTogetherGame=false"
+            ),
         }),
         (None, None) => None,
     };
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
-    let mut url = format!("roblox-player:1+launchmode:{}+gameinfo:{ticket}+launchtime:{now}", if launcher.is_some() { "play" } else { "app" });
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let mut url = format!(
+        "roblox-player:1+launchmode:{}+gameinfo:{ticket}+launchtime:{now}",
+        if launcher.is_some() { "play" } else { "app" }
+    );
     if let Some(l) = launcher {
         url += &format!("+placelauncherurl:{}", enc(&l));
     }
-    url += &format!("+browsertrackerid:{browser}+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp");
+    url += &format!(
+        "+browsertrackerid:{browser}+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp"
+    );
     let before = clients();
     // SAFETY: ShellExecuteW with NUL-terminated wide strings
     let r = unsafe {
-        ShellExecuteW(std::ptr::null_mut(), wide("open").as_ptr(), wide(&url).as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide("open").as_ptr(),
+            wide(&url).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
     };
     if (r as isize) <= 32 {
         fail("Roblox is not installed (no roblox-player: handler)");

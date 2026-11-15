@@ -36,8 +36,8 @@ fn answer(status: u16, what: &str) -> String {
     }
 }
 
-/// (user ID, username, display name) of the cookie's account.
-pub fn authenticated(cookie: &str) -> Result<(u64, String, String), String> {
+/// (user ID, username) of the cookie's account.
+pub fn authenticated(cookie: &str) -> Result<(u64, String), String> {
     let mut r = agent()
         .get("https://users.roblox.com/v1/users/authenticated")
         .header("Cookie", &format!(".ROBLOSECURITY={cookie}"))
@@ -49,8 +49,7 @@ pub fn authenticated(cookie: &str) -> Result<(u64, String, String), String> {
     }
     let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
     let id = v["id"].as_u64().ok_or("Roblox sent no user ID")?;
-    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
-    Ok((id, s("name"), s("displayName")))
+    Ok((id, v["name"].as_str().unwrap_or("").to_string()))
 }
 
 pub fn user_id_of(username: &str) -> Result<u64, String> {
@@ -62,11 +61,17 @@ pub fn user_id_of(username: &str) -> Result<u64, String> {
         return Err(answer(r.status().as_u16(), "user lookup"));
     }
     let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
-    v["data"][0]["id"].as_u64().ok_or_else(|| format!("no Roblox user is called '{username}'"))
+    v["data"][0]["id"]
+        .as_u64()
+        .ok_or_else(|| format!("no Roblox user is called '{username}'"))
 }
 
 /// POST with the cookie, fetching the CSRF token Roblox asks for on the first try.
-fn post_signed(url: &str, cookie: &str, body: &Value) -> Result<ureq::http::Response<ureq::Body>, String> {
+fn post_signed(
+    url: &str,
+    cookie: &str,
+    body: &Value,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
     let a = agent();
     let mut token = String::new();
     for _ in 0..2 {
@@ -79,7 +84,11 @@ fn post_signed(url: &str, cookie: &str, body: &Value) -> Result<ureq::http::Resp
             req = req.header("X-CSRF-TOKEN", &token);
         }
         let r = req.send_json(body).map_err(net)?;
-        match r.headers().get("x-csrf-token").and_then(|t| t.to_str().ok()) {
+        match r
+            .headers()
+            .get("x-csrf-token")
+            .and_then(|t| t.to_str().ok())
+        {
             Some(t) if r.status() == 403 && token.is_empty() => token = t.to_string(),
             _ => return Ok(r),
         }
@@ -129,14 +138,27 @@ pub fn browser_id(tracker: &str) -> Option<&str> {
     tracker
         .split('&')
         .find_map(|f| f.strip_prefix("browserid="))
-        .filter(|v| !v.is_empty() && v.len() <= 20 && v.bytes().all(|b| b.is_ascii_digit()) && !v.starts_with('0'))
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 20
+                && v.bytes().all(|b| b.is_ascii_digit())
+                && !v.starts_with('0')
+        })
 }
 
 /// A one-time ticket that signs the Windows client in.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(windows)]
 pub fn auth_ticket(cookie: &str) -> Result<String, String> {
-    let r = post_signed("https://auth.roblox.com/v1/authentication-ticket", cookie, &json!({}))?;
-    if let Some(t) = r.headers().get("rbx-authentication-ticket").and_then(|t| t.to_str().ok()) {
+    let r = post_signed(
+        "https://auth.roblox.com/v1/authentication-ticket",
+        cookie,
+        &json!({}),
+    )?;
+    if let Some(t) = r
+        .headers()
+        .get("rbx-authentication-ticket")
+        .and_then(|t| t.to_str().ok())
+    {
         return Ok(t.to_string());
     }
     Err(answer(r.status().as_u16(), "sign-in ticket"))
@@ -148,9 +170,15 @@ mod tests {
 
     #[test]
     fn cookies_and_trackers() {
-        assert_eq!(clean_cookie(" .ROBLOSECURITY=\"_|WARNING|abc\"; path=/ "), "_|WARNING|abc");
+        assert_eq!(
+            clean_cookie(" .ROBLOSECURITY=\"_|WARNING|abc\"; path=/ "),
+            "_|WARNING|abc"
+        );
         assert_eq!(clean_cookie("'_|abc'"), "_|abc");
-        assert_eq!(browser_id("CreateDate=1/1/2026&rbxid=&browserid=1234567"), Some("1234567"));
+        assert_eq!(
+            browser_id("CreateDate=1/1/2026&rbxid=&browserid=1234567"),
+            Some("1234567")
+        );
         assert_eq!(browser_id("browserid=0123"), None);
     }
 }

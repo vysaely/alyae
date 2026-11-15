@@ -25,9 +25,16 @@ fn infynitae() -> Option<Colors> {
     if cfg!(windows) {
         return None;
     }
-    let out = std::process::Command::new("infynitae-edge-apps").arg("--print-theme").output().ok()?;
+    let out = std::process::Command::new("infynitae-edge-apps")
+        .arg("--print-theme")
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("LOOK_{k}="))).and_then(hex);
+    let get = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("LOOK_{k}=")))
+            .and_then(hex)
+    };
     let (card, text_c, accent) = (get("CARD")?, get("TEXT")?, get("ACCENT")?);
     Some(Colors {
         card,
@@ -38,24 +45,30 @@ fn infynitae() -> Option<Colors> {
     })
 }
 
+/// The desktop's colours, or egui's own dark look's where the desktop gives none.
 pub fn colors() -> Colors {
     *COLORS.get_or_init(|| {
-        infynitae().unwrap_or(Colors {
-            card: Color32::from_rgb(0x1b, 0x1b, 0x1d),
-            edge: Color32::from_rgb(0x3a, 0x3a, 0x3e),
-            text: Color32::from_rgb(0xee, 0xee, 0xf0),
-            muted: Color32::from_rgb(0xa0, 0xa0, 0xa6),
-            accent: Color32::from_rgb(0x6c, 0x9e, 0xf8),
+        infynitae().unwrap_or_else(|| {
+            let v = egui::Visuals::dark();
+            Colors {
+                card: v.panel_fill,
+                edge: v.widgets.noninteractive.bg_stroke.color,
+                text: v.text_color(),
+                muted: v.weak_text_color(),
+                accent: v.selection.bg_fill,
+            }
         })
     })
 }
 
-pub const ONLINE: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
-
 pub fn apply(ctx: &egui::Context) {
     let c = colors();
     let dark = c.card.r() as u32 + c.card.g() as u32 + c.card.b() as u32 <= 384;
-    let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let mut v = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
     let lift = |k: f32| c.card.lerp_to_gamma(c.text, k);
     v.panel_fill = c.card;
     v.window_fill = c.card;
@@ -68,7 +81,10 @@ pub fn apply(ctx: &egui::Context) {
     v.selection.bg_fill = c.accent.gamma_multiply(0.35);
     v.selection.stroke = Stroke::new(1.0, c.text);
     v.widgets.noninteractive.bg_stroke.color = c.edge;
-    for (w, k) in [(&mut v.widgets.inactive, 0.08), (&mut v.widgets.hovered, 0.14)] {
+    for (w, k) in [
+        (&mut v.widgets.inactive, 0.08),
+        (&mut v.widgets.hovered, 0.14),
+    ] {
         w.bg_fill = lift(k);
         w.weak_bg_fill = lift(k);
     }
@@ -83,13 +99,21 @@ pub fn primary(label: &str) -> egui::Button<'static> {
     egui::Button::new(RichText::new(label.to_string()).strong().color(c.card)).fill(c.accent)
 }
 
-/// A section title, as AEAM's "// ACTIVE ACCOUNT".
+/// A section title (AEAM's place for one).
 pub fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(6.0);
-    ui.label(RichText::new(format!("// {}", title.to_uppercase())).color(colors().muted).font(FontId::proportional(11.0)).strong());
+    ui.label(
+        RichText::new(title.to_uppercase())
+            .color(colors().muted)
+            .font(FontId::proportional(11.0))
+            .strong(),
+    );
 }
 
 /// A small label, as AEAM's "GROUP:".
 pub fn tag(text: &str) -> RichText {
-    RichText::new(text.to_uppercase()).color(colors().muted).font(FontId::proportional(11.0)).strong()
+    RichText::new(text.to_uppercase())
+        .color(colors().muted)
+        .font(FontId::proportional(11.0))
+        .strong()
 }

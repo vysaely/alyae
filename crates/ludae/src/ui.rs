@@ -52,12 +52,12 @@ const NO_GROUP: &str = "Ungrouped";
 
 impl App {
     pub fn new(
-        cc: &eframe::CreationContext<'_>,
+        ctx: &egui::Context,
         opened: Result<Store, String>,
         dir: PathBuf,
+        (modules, problems): (Vec<Module>, Vec<String>),
     ) -> Self {
-        crate::look::apply(&cc.egui_ctx);
-        let (modules, problems) = module::load_all(&crate::paths::module_dirs());
+        crate::look::apply(ctx);
         let (tx, rx) = channel();
         let mut app = Self {
             store: None,
@@ -85,7 +85,7 @@ impl App {
             new_group: String::new(),
             tx,
             rx,
-            ctx: Some(cc.egui_ctx.clone()),
+            ctx: Some(ctx.clone()),
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, list)) => {
@@ -478,20 +478,22 @@ impl App {
         egui::CentralPanel::default().show(ui, |ui| self.accounts_side(ui, &m));
     }
 
-    /// The last message (an error in red), with a button to dismiss it.
+    /// The last message (an error in red); clicking it dismisses it.
     fn message_line(&mut self, ui: &mut egui::Ui) {
         if let Some((text, bad)) = self.message.clone() {
-            ui.horizontal(|ui| {
-                if ui.small_button("✕").clicked() {
-                    self.message = None;
-                }
-                let color = if bad {
-                    ui.visuals().error_fg_color
-                } else {
-                    look::colors().muted
-                };
-                ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
-            });
+            let color = if bad {
+                ui.visuals().error_fg_color
+            } else {
+                look::colors().muted
+            };
+            let resp = ui.add(
+                egui::Label::new(RichText::new(text).color(color))
+                    .truncate()
+                    .sense(egui::Sense::click()),
+            );
+            if resp.on_hover_text("Click to dismiss").clicked() {
+                self.message = None;
+            }
         }
     }
 
@@ -552,8 +554,8 @@ impl App {
     /// A column heading that sorts by `by`: first click A→Z, second Z→A, third back to no sort.
     fn sort_heading(&mut self, ui: &mut egui::Ui, label: &str, by: Sort) {
         let arrow = match self.sort_by {
-            Some((b, false)) if b == by => " ▲",
-            Some((b, true)) if b == by => " ▼",
+            Some((b, false)) if b == by => " A-Z",
+            Some((b, true)) if b == by => " Z-A",
             _ => "",
         };
         let resp = ui.add(
@@ -1455,4 +1457,66 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         egui::Layout::right_to_left(egui::Align::Center),
         add,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// The window on a fresh data folder, opened on `game`, with the repository's modules.
+    fn window(game: &str) -> (Harness<'static, App>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ludae-ui-{}", store::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(&dir.join("t.db"), crate::vault::Vault::from_key(&[3; 32])).unwrap();
+        s.set_setting("last_game", game);
+        let modules = module::load_all(&[PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules"
+        ))]);
+        let d = dir.clone();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1000.0, 580.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, Ok(s), d, modules));
+        h.run();
+        (h, dir)
+    }
+
+    #[test]
+    fn add_account() {
+        let (mut h, dir) = window("generic");
+        h.get_by_label("Add account").click();
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+        assert_eq!(
+            h.state().accounts.len(),
+            1,
+            "Add did not save the new account"
+        );
+        // the sort arrows draw (a glyph the font lacks stops the window)
+        h.get_by_label("DESCRIPTION").click();
+        h.run();
+        h.get_by_label("DESCRIPTION A-Z").click();
+        h.run();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_roblox_account() {
+        let (mut h, dir) = window("roblox");
+        h.get_by_label("Add account").click();
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+        assert_eq!(
+            h.state().accounts.len(),
+            1,
+            "Add did not save the new account"
+        );
+        assert_eq!(h.state().accounts[0].game, "roblox");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

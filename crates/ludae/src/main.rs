@@ -33,6 +33,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ludae",
         options,
-        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, opened, dir)))),
+        Box::new(move |cc| {
+            let modules = module::load_all(&paths::module_dirs());
+            Ok(Box::new(ui::App::new(&cc.egui_ctx, opened, dir, modules)))
+        }),
     )
 }

@@ -75,3 +75,9 @@ hint = "username or follow target..."
 [[action]]
 id = "check"
 label = "Refresh"
+
+# online status of every account, every 15 s while the game is shown
+[watch]
+action = "presence"
+every = 15
+column = "Online"

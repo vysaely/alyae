@@ -88,3 +88,23 @@ label = "Refresh"
 action = "presence"
 every = 15
 column = "Online"
+
+# Roblox's own settings file of each chosen account (while it is closed)
+[[action]]
+id = "graphics"
+label = "Graphics"
+
+[[action.input]]
+key = "quality"
+label = "Graphics level"
+choices = ["keep", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+
+[[action.input]]
+key = "sensitivity"
+label = "Camera sensitivity"
+hint = "keep, or 0.1 to 4 as in Roblox's menu"
+
+[[action.input]]
+key = "volume"
+label = "Volume"
+choices = ["keep", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]

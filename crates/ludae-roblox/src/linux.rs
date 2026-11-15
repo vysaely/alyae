@@ -3,7 +3,7 @@
 //! The settings mirror what AEAM ran with; AEAM-only extras (chat overlay, anti-AFK, self-heal)
 //! are left out.
 
-use crate::{Join, Request, api, fail, join_from, say, status, wait_for_stop};
+use crate::{Join, Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
@@ -270,74 +270,68 @@ fn fast_flags(main: bool) -> serde_json::Value {
     f
 }
 
-/// Keeps Roblox's own frame cap in step with the account's: its settings file is created with
-/// the role's quality, then only FramerateCap is set again (and alts kept quiet and low).
+/// Before each launch: Roblox's frame cap follows the account's; alts are kept at graphics
+/// level 1 and muted. A main's graphics level, sensitivity and volume are left to Roblox's menu
+/// and the Graphics button.
 fn engine_settings(profile: &Path, main: bool, fps_cap: u32) {
-    let file = profile.join("data/files/appData/GlobalBasicSettings_13.xml");
-    let (gfx, vol) = if main { (7, "1") } else { (1, "0") };
-    let Ok(text) = fs::read_to_string(&file) else {
-        let xml = format!(
-            r#"<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
-	<External>null</External>
-	<External>nil</External>
-	<Item class="UserGameSettings" referent="RBX16e4b21d820447a6adf2f8b7d933dc0b">
-		<Properties>
-			<token name="ControlMode">1</token>
-			<int name="FramerateCap">{fps_cap}</int>
-			<bool name="Fullscreen">false</bool>
-			<token name="GraphicsOptimizationMode">1</token>
-			<int name="GraphicsQualityLevel">{gfx}</int>
-			<float name="MasterVolume">{vol}</float>
-			<bool name="MaxQualityEnabled">false</bool>
-			<token name="SavedQualityLevel">{gfx}</token>
-			<string name="Name">GameSettings</string>
-		</Properties>
-	</Item>
-</roblox>"#
-        );
-        let _ = fs::create_dir_all(file.parent().unwrap_or(profile));
-        let _ = fs::write(&file, xml);
-        return;
-    };
-    let mut out = String::with_capacity(text.len());
-    let mut has_cap = false;
-    for line in text.lines() {
-        let t = line.trim_start();
-        let indent = &line[..line.len() - t.len()];
-        if t.contains("name=\"FramerateCap\"") {
-            has_cap = true;
-            out += &format!("{indent}<int name=\"FramerateCap\">{fps_cap}</int>\n");
-        } else if !main && t.starts_with("<float name=\"MasterVolume\">") {
-            out += &format!("{indent}<float name=\"MasterVolume\">0</float>\n");
-        } else if !main
-            && (t.contains("name=\"GraphicsQualityLevel\"")
-                || t.contains("name=\"SavedQualityLevel\""))
-        {
-            let tag = if t.starts_with("<token") {
-                "token"
-            } else {
-                "int"
-            };
-            let name = if t.contains("Saved") {
-                "SavedQualityLevel"
-            } else {
-                "GraphicsQualityLevel"
-            };
-            out += &format!("{indent}<{tag} name=\"{name}\">1</{tag}>\n");
-        } else {
-            out += line;
-            out.push('\n');
+    let mut props = vec![settings_xml::prop("int", "FramerateCap", fps_cap)];
+    if !main {
+        props.extend(settings_xml::quality(1));
+        props.push(settings_xml::prop("float", "MasterVolume", 0));
+    }
+    if let Err(e) = settings_xml::apply(&settings_file(profile), &props) {
+        fail(&format!("cannot write Roblox's settings: {e}"));
+    }
+}
+
+fn settings_file(profile: &Path) -> PathBuf {
+    profile.join("data/files/appData/GlobalBasicSettings_13.xml")
+}
+
+/// The Graphics button: sets the graphics level, camera sensitivity and volume in Roblox's own
+/// settings file. A value left at "keep" (or empty) stays as it is.
+pub fn graphics(req: &Request) {
+    let m = find_mocktail();
+    if let Some(m) = &m {
+        let program = m.lib.join(format!(
+            "mocktail_ludae_{}",
+            &req.id[..req.id.len().min(12)]
+        ));
+        if already_running(&program) {
+            fail("close this account's Roblox first: it rewrites its settings when it closes");
         }
     }
-    if !has_cap {
-        out = out.replacen(
-            "<Properties>",
-            &format!("<Properties>\n\t\t\t<int name=\"FramerateCap\">{fps_cap}</int>"),
-            1,
-        );
+    let mut props = Vec::new();
+    match req.input("quality") {
+        "" | "keep" => {}
+        q => match q.parse::<u32>() {
+            Ok(n @ 1..=10) => props.extend(settings_xml::quality(n)),
+            _ => fail("Graphics level: 1 to 10"),
+        },
     }
-    if out.trim_end() != text.trim_end() {
-        let _ = fs::write(&file, out);
+    match req.input("sensitivity") {
+        "" | "keep" => {}
+        s => match s.replace(',', ".").parse::<f32>() {
+            Ok(v) if (0.0..=10.0).contains(&v) => props.extend(settings_xml::sensitivity(v)),
+            _ => fail("Sensitivity: a number from 0 to 10, as in Roblox's menu"),
+        },
+    }
+    match req.input("volume") {
+        "" | "keep" => {}
+        v => match v.parse::<u32>() {
+            Ok(n @ 0..=10) => {
+                props.push(settings_xml::prop("float", "MasterVolume", n as f32 / 10.0))
+            }
+            _ => fail("Volume: 0 to 10"),
+        },
+    }
+    if props.is_empty() {
+        fail("nothing to change: every value is \"keep\"");
+    }
+    let profile = profile_dir(req, &req.data_dir);
+    match settings_xml::apply(&settings_file(&profile), &props) {
+        Ok(()) => status("graphics set"),
+        Err(e) => fail(&format!("cannot write Roblox's settings: {e}")),
     }
 }
 

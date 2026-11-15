@@ -87,6 +87,11 @@ action = "presence"
 every = 15
 column = "Online"
 
+[watch.colors]
+"In game" = "#3dd68c"
+"Online" = "#4aa8ff"
+"In Studio" = "#f0a030"
+
 # account tools: each chosen account in turn, 4 s apart
 
 [[action]]

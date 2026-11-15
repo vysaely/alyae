@@ -180,13 +180,23 @@ fn login(req: &Request) {
         let request = json!({ "username": user, "password": pass, "totp": req.get("totp") });
         let _ = writeln!(stdin, "{request}");
     }
-    let out = child
-        .wait_with_output()
-        .unwrap_or_else(|e| fail(&e.to_string()));
-    let cookie = serde_json::from_slice::<Value>(&out.stdout)
-        .ok()
-        .and_then(|v| v["cookie"].as_str().map(String::from))
-        .unwrap_or_else(|| fail("the login window closed before Roblox signed in"));
+    // its steps are passed on as they happen; the cookie line ends it
+    let mut cookie = None;
+    if let Some(out) = child.stdout.take() {
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Some(t) = v["status"].as_str() {
+                status(t);
+            }
+            if let Some(c) = v["cookie"].as_str() {
+                cookie = Some(c.to_string());
+            }
+        }
+    }
+    let _ = child.wait();
+    let cookie = cookie.unwrap_or_else(|| fail("the login window closed before Roblox signed in"));
     match api::authenticated(&cookie) {
         Ok((id, name)) => {
             say(

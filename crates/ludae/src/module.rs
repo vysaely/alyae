@@ -76,9 +76,38 @@ pub struct Watch {
     /// values matching none get a grey dot
     #[serde(default)]
     pub colors: std::collections::BTreeMap<String, String>,
+    /// the account fields the helper gets (only plain fields; none declared: only the account id)
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// at most one secret field the helper also gets, when the check cannot work without it
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 impl Watch {
+    /// What the helper gets of `a`: the declared plain fields and the one declared secret, nothing
+    /// else (a watch runs every few seconds, so it carries as little as it can).
+    pub fn account_json(
+        &self,
+        module: &Module,
+        a: &Account,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let plain = self
+            .fields
+            .iter()
+            .filter(|k| !module.is_secret(k))
+            .filter_map(|k| a.fields.get(k).map(|v| (k, v)));
+        let secret = self
+            .secret
+            .iter()
+            .filter(|k| module.is_secret(k))
+            .filter_map(|k| a.secrets.get(k).map(|v| (k, v)));
+        plain
+            .chain(secret)
+            .map(|(k, v)| (k.clone(), v.clone().into()))
+            .collect()
+    }
+
     pub fn color_of(&self, value: &str) -> Option<&str> {
         self.colors
             .iter()
@@ -245,6 +274,8 @@ pub enum Event {
     },
     /// a watch's values, by account id
     Watch(crate::store::Values),
+    /// a watch's helper could not answer
+    WatchError(String),
     WatchEnded,
 }
 
@@ -329,7 +360,7 @@ pub fn watch(
     let (mut child, dir, helper) = spawn_helper(module, &w.action, &w.column, data_dir)?;
     let list: Vec<serde_json::Value> = accounts
         .iter()
-        .map(|a| serde_json::json!({ "id": a.id, "account": account_json(a) }))
+        .map(|a| serde_json::json!({ "id": a.id, "account": w.account_json(module, a) }))
         .collect();
     let request = serde_json::json!({ "accounts": list, "data_dir": dir });
     // stdin closes here: a watch answers once and ends
@@ -350,6 +381,9 @@ pub fn watch(
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect();
                 let _ = tx.send(Event::Watch(values));
+                wake();
+            } else if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                let _ = tx.send(Event::WatchError(e.to_string()));
                 wake();
             }
         }
@@ -517,5 +551,43 @@ label = "Place"
         assert_eq!(w.color_of("In game: Rogue Lineage"), Some("#00ff00"));
         assert_eq!(w.color_of("In Studio"), Some("#000000"));
         assert_eq!(w.color_of("Offline"), None);
+    }
+
+    #[test]
+    fn watch_sends_only_declared_fields() {
+        let m = Module::parse(
+            "id = \"x\"\nname = \"x\"\n\
+             [[field]]\nkey = \"user_id\"\nlabel = \"U\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"N\"\n\
+             [[field]]\nkey = \"cookie\"\nlabel = \"C\"\nsecret = true\n\
+             [[field]]\nkey = \"password\"\nlabel = \"P\"\nsecret = true\n\
+             [watch]\naction = \"p\"\nevery = 15\ncolumn = \"Online\"\nfields = [\"user_id\", \"password\"]\n",
+            Path::new("/"),
+        )
+        .unwrap();
+        let mut a = Account::default();
+        for (k, v) in [("user_id", "1"), ("username", "me")] {
+            a.fields.insert(k.into(), v.into());
+        }
+        for (k, v) in [("cookie", "c"), ("password", "p")] {
+            a.secrets.insert(k.into(), v.into());
+        }
+        let mut w = m.watch.clone().unwrap();
+        // a secret named in `fields` is not sent: secrets only come through `secret`
+        let j = w.account_json(&m, &a);
+        assert_eq!(j.len(), 1);
+        assert_eq!(j["user_id"], "1");
+        // one declared secret is added
+        w.secret = Some("cookie".into());
+        let j = w.account_json(&m, &a);
+        assert_eq!(j.len(), 2);
+        assert_eq!(j["cookie"], "c");
+        // a plain field named as the secret is not sent
+        w.secret = Some("username".into());
+        assert_eq!(w.account_json(&m, &a).len(), 1);
+        // nothing declared: nothing sent
+        w.fields.clear();
+        w.secret = None;
+        assert!(w.account_json(&m, &a).is_empty());
     }
 }

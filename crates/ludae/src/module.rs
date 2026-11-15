@@ -139,6 +139,9 @@ pub struct Module {
     pub actions: Vec<Action>,
     #[serde(default)]
     pub watch: Option<Watch>,
+    /// a helper action run (and waited for) before an account is removed, to delete its files
+    #[serde(default)]
+    pub on_remove: String,
     #[serde(skip)]
     pub dir: PathBuf,
 }
@@ -366,6 +369,48 @@ fn spawn_helper(
     Ok((child, dir, helper))
 }
 
+fn request_json(account: &Account, inputs: &crate::store::Values, dir: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "id": account.id,
+        "name": account.name,
+        "account": account_json(account),
+        "inputs": inputs,
+        "data_dir": dir,
+    })
+}
+
+/// Runs the helper's `action` for `account` and waits for it to end: for short actions the
+/// window waits on (the module's `on_remove`). Its errors are joined into the Err.
+pub fn run_and_wait(
+    module: &Module,
+    action: &str,
+    account: &Account,
+    data_dir: &Path,
+) -> Result<(), String> {
+    let (mut child, dir, helper) = spawn_helper(module, action, action, data_dir)?;
+    let request = request_json(account, &Default::default(), &dir);
+    // stdin closes after the request: the helper sees no more lines
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let sent = stdin.write_all(format!("{request}\n").as_bytes());
+    drop(stdin);
+    let out = child.stdout.take().expect("piped stdout");
+    let errors: Vec<String> = BufReader::new(out)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+        .filter_map(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        .collect();
+    let status = child.wait().map_err(|e| e.to_string())?;
+    sent.map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    if !status.success() {
+        return Err(format!("{} '{action}' failed ({status})", helper.display()));
+    }
+    Ok(())
+}
+
 /// Runs the module's watch once for `accounts`; its values arrive as one `Event::Watch`, then
 /// `Event::WatchEnded`.
 pub fn watch(
@@ -452,13 +497,7 @@ pub fn start(
         }));
     }
     let (mut child, dir, helper) = spawn_helper(module, &action.id, &action.label, data_dir)?;
-    let request = serde_json::json!({
-        "id": account.id,
-        "name": account.name,
-        "account": account_json(account),
-        "inputs": inputs,
-        "data_dir": dir,
-    });
+    let request = request_json(account, inputs, &dir);
     let mut stdin = child.stdin.take();
     if let Some(s) = stdin.as_mut() {
         s.write_all(format!("{request}\n").as_bytes())
@@ -554,13 +593,15 @@ label = "Place"
         // one plain input: a box beside the button; a choice or a confirmation: a form
         assert!(!m.actions[0].needs_form());
         let f = Module::parse(
-            "id = \"x\"\nname = \"x\"\n[watch]\naction = \"p\"\nevery = 15\ncolumn = \"Online\"\n\
+            "id = \"x\"\nname = \"x\"\non_remove = \"forget\"\n[watch]\naction = \"p\"\nevery = 15\ncolumn = \"Online\"\n\
              [[action]]\nid = \"a\"\nlabel = \"A\"\n[[action.input]]\nkey = \"k\"\nlabel = \"K\"\nchoices = [\"1\", \"2\"]\n\
              [[action]]\nid = \"b\"\nlabel = \"B\"\nconfirm = \"Sure?\"\n",
             Path::new("/"),
         )
         .unwrap();
         assert!(f.actions.iter().all(Action::needs_form));
+        assert!(m.on_remove.is_empty());
+        assert_eq!(f.on_remove, "forget");
         assert_eq!(f.watch.unwrap().column, "Online");
         // the longest matching start decides a value's colour
         let w: Watch = toml::from_str(

@@ -5,6 +5,9 @@ platform = "linux"
 description = "Several accounts at once, join servers, 2FA"
 helper = "ludae-roblox"
 title_field = "username"
+# removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
+# AEAM stays; only Mocktail's saved sign-in in it goes)
+on_remove = "forget"
 
 [[field]]
 key = "username"

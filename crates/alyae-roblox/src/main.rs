@@ -1,4 +1,4 @@
-//! Ludae's Roblox helper. Ludae runs `ludae-roblox <action>` and writes one JSON line: the account
+//! Alyae's Roblox helper. Alyae runs `alyae-roblox <action>` and writes one JSON line: the account
 //! (`account`: its fields and secrets), the button's `inputs` and a `data_dir` for this game.
 //! Answers are JSON lines: `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`. While a game
 //! runs the helper waits for it; a `stop` line on stdin closes the game.
@@ -158,7 +158,7 @@ pub fn join_from(req: &Request) -> Join {
     j
 }
 
-/// Log in: Roblox's login page in `ludae-roblox-login`, filled in with the saved username,
+/// Log in: Roblox's login page in `alyae-roblox-login`, filled in with the saved username,
 /// password and 2FA secret; the person solves a captcha if one shows. The new cookie is checked
 /// and saved.
 fn login(req: &Request) {
@@ -169,14 +169,14 @@ fn login(req: &Request) {
         .and_then(|e| {
             e.parent().map(|d| {
                 d.join(if cfg!(windows) {
-                    "ludae-roblox-login.exe"
+                    "alyae-roblox-login.exe"
                 } else {
-                    "ludae-roblox-login"
+                    "alyae-roblox-login"
                 })
             })
         })
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| "ludae-roblox-login".into());
+        .unwrap_or_else(|| "alyae-roblox-login".into());
     status("login window open");
     let mut child = std::process::Command::new(&exe)
         .stdin(std::process::Stdio::piped())
@@ -328,6 +328,8 @@ fn main() {
         "login" => login(&req),
         #[cfg(target_os = "linux")]
         "graphics" => linux::graphics(&req),
+        #[cfg(windows)]
+        "graphics" => windows::graphics(&req),
         #[cfg(target_os = "linux")]
         "reset" => linux::reset(&req),
         #[cfg(target_os = "linux")]
@@ -347,7 +349,7 @@ fn main() {
     }
 }
 
-/// Lines from Ludae after the request: true when it asked to stop (false when Ludae closed).
+/// Lines from Alyae after the request: true when it asked to stop (false when Alyae closed).
 pub fn wait_for_stop() -> bool {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {

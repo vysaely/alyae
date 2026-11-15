@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Mocktail with Ludae's patches (patches/*.patch, in order) at the upstream commit in
+# Builds Mocktail with Alyae's patches (patches/*.patch, in order) at the upstream commit in
 # patches/UPSTREAM_COMMIT, and installs it under ~/.local (bin/mocktail, lib/mocktail/).
 # What was installed there before is backed up first.
 #
@@ -19,9 +19,9 @@ PATCHES="$HERE/patches"
 UPSTREAM_URL="https://github.com/komaruworld/mocktail.git"
 UPSTREAM_COMMIT="$(tr -d '[:space:]' < "$PATCHES/UPSTREAM_COMMIT")"
 PREFIX="$HOME/.local"
-SRC="${LUDAE_MOCKTAIL_SRC:-$HOME/.cache/ludae/mocktail-src}"
+SRC="${ALYAE_MOCKTAIL_SRC:-$HOME/.cache/alyae/mocktail-src}"
 BUILD="$SRC-build"
-MARKER="$PREFIX/lib/mocktail/ludae-mocktail-patch"
+MARKER="$PREFIX/lib/mocktail/alyae-mocktail-patch"
 
 deps() {
     echo "Install Mocktail's build dependencies, then run this again:"
@@ -55,7 +55,7 @@ if ! { cmake -S "$SRC" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_T
     exit 1
 fi
 
-if pgrep -f '/mocktail(_ludae_|_acc_)?[^/]*$' > /dev/null 2>&1; then
+if pgrep -f '/mocktail(_alyae_|_acc_)?[^/]*$' > /dev/null 2>&1; then
     echo "Close every running Roblox first, then run this again (the build is kept)."
     exit 1
 fi
@@ -63,7 +63,7 @@ if [ -e "$PREFIX/bin/mocktail" ] || [ -e "$PREFIX/lib/mocktail/mocktail" ]; then
     BACKUP="$PREFIX/lib/mocktail-backup/$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$BACKUP"
     [ -e "$PREFIX/bin/mocktail" ] && cp -a "$PREFIX/bin/mocktail" "$BACKUP/bin-mocktail"
-    find "$PREFIX/lib/mocktail" -maxdepth 1 -type f ! -name 'mocktail_acc_*' ! -name 'mocktail_ludae_*' \
+    find "$PREFIX/lib/mocktail" -maxdepth 1 -type f ! -name 'mocktail_acc_*' ! -name 'mocktail_alyae_*' \
         -exec cp -a {} "$BACKUP/" \;
     echo "Previous Mocktail kept in $BACKUP"
     # a wrapper or link here would shadow the new program

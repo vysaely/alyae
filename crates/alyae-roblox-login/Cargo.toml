@@ -1,11 +1,11 @@
 [package]
-name = "ludae-roblox-login"
+name = "alyae-roblox-login"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 serde_json.workspace = true
-ludae-otp = { path = "../ludae-otp" }
+alyae-otp = { path = "../alyae-otp" }
 tao = "0.37"
 wry = "0.57"

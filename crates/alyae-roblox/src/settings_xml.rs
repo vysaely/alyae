@@ -117,7 +117,7 @@ pub fn apply(path: &Path, props: &[Prop]) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("ludae-tmp");
+    let tmp = path.with_extension("alyae-tmp");
     std::fs::write(&tmp, new)?;
     std::fs::rename(tmp, path)
 }
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn creates_the_file() {
-        let dir = std::env::temp_dir().join(format!("ludae-xml-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("alyae-xml-{}", std::process::id()));
         let f = dir.join("appData/GlobalBasicSettings_13.xml");
         apply(&f, &[prop("float", "MasterVolume", 0)]).unwrap();
         let t = std::fs::read_to_string(&f).unwrap();

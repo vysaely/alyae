@@ -1,14 +1,15 @@
 //! Roblox on Windows: the official client, signed in with a one-time ticket. Roblox allows one
-//! client at a time by holding a named mutex; while Ludae's helper holds it first, every client
+//! client at a time by holding a named mutex; while Alyae's helper holds it first, every client
 //! started after it runs side by side.
 //!
 //! Every client shares one settings file, `%LOCALAPPDATA%\Roblox\GlobalBasicSettings_13.xml`, read
-//! when the client starts. Each account keeps its own copy in Ludae's data folder: it is put in
+//! when the client starts. Each account keeps its own copy in Alyae's data folder: it is put in
 //! place (with the account's FPS cap, and an alt's low graphics and no sound) just before that
 //! account's client starts, and taken back when it closes. Launches take turns, so the new client
 //! that appears belongs to the account that started it.
 
-use crate::{Request, api, fail, join_from, settings_xml, status, wait_for_stop};
+use crate::{Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -109,12 +110,12 @@ fn settings_before_launch(req: &Request, live: &Path) {
     if let Some(d) = own.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    if own.is_file() {
-        if let Err(e) = std::fs::copy(&own, live) {
-            fail(&format!(
-                "cannot put this account's Roblox settings in place: {e}"
-            ));
-        }
+    if own.is_file()
+        && let Err(e) = std::fs::copy(&own, live)
+    {
+        fail(&format!(
+            "cannot put this account's Roblox settings in place: {e}"
+        ));
     }
     let fps = req.fps();
     let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
@@ -138,6 +139,54 @@ fn settings_after_exit(req: &Request, live: &Path) {
     }
 }
 
+/// Where the account's running client is noted (its process ID), for Settings to see.
+fn pid_file(req: &Request) -> PathBuf {
+    req.data_dir
+        .join("settings")
+        .join(format!("{}.pid", req.id))
+}
+
+fn running(req: &Request) -> bool {
+    std::fs::read_to_string(pid_file(req))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .is_some_and(alive)
+}
+
+/// The Settings form into the account's own copy, used from its next start. Its client must be
+/// closed: the copy is taken back from Roblox's file when the client closes.
+pub fn graphics(req: &Request) {
+    if running(req) {
+        fail("close this account's Roblox first: its settings are taken back when it closes");
+    }
+    let (props, fps) =
+        settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
+    if props.is_empty() {
+        fail("nothing to change: every value is \"keep\"");
+    }
+    // the launch sets FramerateCap from the account's FPS cap: keep the two in step
+    if let Some(f) = fps {
+        say(json!({ "set": { "fps": f.to_string() } }));
+    }
+    let own = own_settings(req);
+    if let Some(d) = own.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    // the first time: start from the settings Roblox has now
+    if !own.is_file()
+        && let Some(live) = live_settings().filter(|l| l.is_file())
+    {
+        let _ = std::fs::copy(live, &own);
+    }
+    match settings_xml::apply(&own, &props) {
+        Ok(()) => status(&format!(
+            "{} settings set (used from the next start)",
+            props.len()
+        )),
+        Err(e) => fail(&format!("cannot write the settings: {e}")),
+    }
+}
+
 /// Held while one account's client starts: the next launch waits for it.
 struct LaunchTurn(HANDLE);
 
@@ -148,7 +197,7 @@ impl LaunchTurn {
             let h = CreateMutexW(
                 std::ptr::null(),
                 0,
-                wide("Local\\LudaeRobloxLaunch").as_ptr(),
+                wide("Local\\AlyaeRobloxLaunch").as_ptr(),
             );
             if h.is_null() {
                 fail("cannot create the launch lock");
@@ -244,6 +293,7 @@ pub fn play(req: &Request) {
         }
         std::thread::sleep(Duration::from_millis(500));
     };
+    let _ = std::fs::write(pid_file(req), pid.to_string());
     // the client reads its settings while it starts: the next launch waits a little longer
     std::thread::sleep(Duration::from_secs(5));
     drop(turn);
@@ -262,4 +312,5 @@ pub fn play(req: &Request) {
         std::thread::sleep(Duration::from_millis(500));
     }
     settings_after_exit(req, &live);
+    let _ = std::fs::remove_file(pid_file(req));
 }

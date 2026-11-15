@@ -1,5 +1,5 @@
-//! Ludae's log: one line per event (`2026-11-15 20:51:03 xSEz1n: Join Server: running`) in
-//! `<data>/ludae.log`, moved to `ludae.log.1` past 1 MB. Helpers' own error output goes to the same
+//! Alyae's log: one line per event (`2026-11-15 20:51:03 xSEz1n: Join Server: running`) in
+//! `<data>/alyae.log`, moved to `alyae.log.1` past 1 MB. Helpers' own error output goes to the same
 //! file. Secret values never reach it: changed fields are logged by name only.
 
 use std::fs::{File, OpenOptions};
@@ -11,7 +11,7 @@ static PATH: OnceLock<PathBuf> = OnceLock::new();
 const MAX: u64 = 1 << 20;
 
 pub fn init(dir: &std::path::Path) {
-    let _ = PATH.set(dir.join("ludae.log"));
+    let _ = PATH.set(dir.join("alyae.log"));
 }
 
 /// The log, opened for appending (rotated first when full); None before `init` or when the
@@ -51,7 +51,7 @@ fn now() -> String {
     )
 }
 
-/// Appends one line; `who` is an account name, or empty for Ludae itself.
+/// Appends one line; `who` is an account name, or empty for Alyae itself.
 pub fn line(who: &str, text: &str) {
     let Some(mut f) = file() else { return };
     let text = text.replace('\n', " ");

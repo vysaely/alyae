@@ -1,7 +1,7 @@
 [workspace]
-members = ["crates/ludae", "crates/ludae-roblox", "crates/ludae-otp", "crates/ludae-roblox-login"]
+members = ["crates/alyae", "crates/alyae-roblox", "crates/alyae-otp", "crates/alyae-roblox-login"]
 # the login window needs the system web view (webkit2gtk-4.1 on Linux): install.sh builds it when present
-default-members = ["crates/ludae", "crates/ludae-roblox", "crates/ludae-otp"]
+default-members = ["crates/alyae", "crates/alyae-roblox", "crates/alyae-otp"]
 resolver = "3"
 
 [workspace.package]

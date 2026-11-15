@@ -152,7 +152,7 @@ fn main() {
     }
     match action.as_str() {
         "check" => check(&req),
-        "play" => {
+        "play" | "follow" => {
             #[cfg(target_os = "linux")]
             linux::play(&req);
             #[cfg(windows)]

@@ -8,6 +8,7 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui_extras = { version = "0.37", default-features = false }
 rusqlite = { version = "0.43", features = ["bundled"] }
 crypto_secretbox = "0.1"
 getrandom = "0.3"

@@ -48,23 +48,29 @@ hint = "empty: 330 for a main, 6 for an alt; 0: no cap"
 
 [[action]]
 id = "play"
-label = "Play"
+label = "Join Server"
+primary = true
 runs = true
 
 [[action.input]]
 key = "place"
-label = "Place"
+label = "Place ID"
 hint = "place ID or game link (empty: Roblox home)"
 
 [[action.input]]
 key = "server"
-label = "Server"
+label = "Job ID"
 hint = "job ID or private server link"
+
+[[action]]
+id = "follow"
+label = "Follow"
+runs = true
 
 [[action.input]]
 key = "follow"
 label = "Follow"
-hint = "username or user ID to join"
+hint = "username or follow target..."
 
 [[action]]
 id = "check"

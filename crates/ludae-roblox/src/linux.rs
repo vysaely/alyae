@@ -312,6 +312,77 @@ pub fn graphics(req: &Request) {
     }
 }
 
+/// Size of `p` in bytes, links not followed.
+fn size_of(p: &Path) -> u64 {
+    match fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => {
+            fs::read_dir(p).map_or(0, |d| d.flatten().map(|e| size_of(&e.path())).sum())
+        }
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Removes `p`; a link is removed itself, never what it points to (the shared client and caches).
+fn remove(p: &Path) -> u64 {
+    let size = size_of(p);
+    let gone = match fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(p),
+        Ok(_) => fs::remove_file(p),
+        Err(_) => return 0,
+    };
+    if gone.is_err() { 0 } else { size }
+}
+
+/// Removes everything in `dir` but the names in `keep`.
+fn clear(dir: &Path, keep: &[&str]) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| !keep.contains(&e.file_name().to_string_lossy().as_ref()))
+        .map(|e| remove(&e.path()))
+        .sum()
+}
+
+/// What Reset files removes from a profile: Roblox's app storage, its caches and downloaded
+/// assets, Mocktail's saved sign-in and logs; all are made again on the next launch, the sign-in
+/// from Ludae's vault. Kept: Roblox's settings file, the device ID, the window and Mocktail
+/// settings, the links to the shared client. Returns the bytes freed.
+fn reset_profile(profile: &Path) -> u64 {
+    let data = profile.join("data");
+    clear(&data.join("files/appData"), &["GlobalBasicSettings_13.xml"])
+        + clear(&data.join("files"), &["appData"])
+        + clear(&data.join("mocktail"), &["payloads", "current.json"])
+        + clear(
+            &data,
+            &["payloads", "rbx_bin", "current.json", "mocktail", "files"],
+        )
+        + clear(&profile.join("cache"), &["mesa_shader_cache"])
+        + remove(&profile.join("state/logs"))
+        + remove(&profile.join("roblox.cookie"))
+}
+
+/// The Reset files button.
+pub fn reset(req: &Request) {
+    if let Some(m) = find_mocktail() {
+        let program = m.lib.join(format!(
+            "mocktail_ludae_{}",
+            &req.id[..req.id.len().min(12)]
+        ));
+        if already_running(&program) {
+            fail("close this account's Roblox first");
+        }
+    }
+    let profile = profile_dir(req, &req.data_dir);
+    if !profile.is_dir() {
+        fail("this account has no files yet");
+    }
+    let freed = reset_profile(&profile);
+    status(&format!("files reset, {} MB freed", freed / 1_000_000));
+}
+
 /// The account's folder: Ludae's own, or AEAM's when the account came from there (its in-game
 /// settings and caches stay).
 fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
@@ -786,6 +857,65 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    /// Reset keeps the settings file, the device ID and the shared folders behind links.
+    #[test]
+    fn reset_keeps_what_it_should() {
+        let root = std::env::temp_dir().join(format!("ludae-reset-{}", std::process::id()));
+        let (p, shared) = (root.join("profile"), root.join("shared"));
+        for d in [
+            "data/files/appData/LocalStorage",
+            "data/ContentProvider_1",
+            "data/mocktail/x",
+            "cache/clientsettings",
+            "state/logs",
+        ] {
+            fs::create_dir_all(p.join(d)).unwrap();
+        }
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("asset"), "shared").unwrap();
+        symlink(&shared, p.join("data/rbx-storage")).unwrap();
+        symlink(&shared, p.join("data/payloads")).unwrap();
+        fs::write(
+            p.join("data/files/appData/GlobalBasicSettings_13.xml"),
+            "settings",
+        )
+        .unwrap();
+        fs::write(
+            p.join("data/files/appData/LocalStorage/appStorage.json"),
+            "app",
+        )
+        .unwrap();
+        fs::write(p.join("data/files/appData/rbx-storage.db"), "index").unwrap();
+        fs::write(p.join("browser_tracker"), "id").unwrap();
+        fs::write(p.join("data/mocktail/current.json"), "{}").unwrap();
+        assert!(reset_profile(&p) > 0);
+        assert!(
+            p.join("data/files/appData/GlobalBasicSettings_13.xml")
+                .exists()
+        );
+        assert!(
+            p.join("browser_tracker").exists() && p.join("data/mocktail/current.json").exists()
+        );
+        assert!(fs::symlink_metadata(p.join("data/payloads")).is_ok());
+        for gone in [
+            "data/files/appData/LocalStorage",
+            "data/files/appData/rbx-storage.db",
+            "data/ContentProvider_1",
+            "data/rbx-storage",
+            "data/mocktail/x",
+            "cache/clientsettings",
+            "state/logs",
+        ] {
+            assert!(fs::symlink_metadata(p.join(gone)).is_err(), "{gone} left");
+        }
+        assert_eq!(
+            fs::read_to_string(shared.join("asset")).unwrap(),
+            "shared",
+            "followed a link"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

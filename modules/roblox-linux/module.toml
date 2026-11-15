@@ -224,3 +224,8 @@ confirm = "Needs the saved password (and 2FA secret if Roblox asks). The new one
 key = "new_password"
 label = "New password"
 hint = "empty: a random 20-character one"
+
+[[action]]
+id = "reset"
+label = "Reset files"
+confirm = "Roblox's app storage, caches, downloaded assets and Mocktail's saved sign-in of these accounts are removed and made again on the next launch. Kept: Roblox settings, device ID, the saved cookie. Fixes missing animations or textures when the cache is at fault."

@@ -99,17 +99,6 @@ pub fn primary(label: &str) -> egui::Button<'static> {
     egui::Button::new(RichText::new(label.to_string()).strong().color(c.card)).fill(c.accent)
 }
 
-/// A section title (AEAM's place for one).
-pub fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(title.to_uppercase())
-            .color(colors().muted)
-            .font(FontId::proportional(11.0))
-            .strong(),
-    );
-}
-
 /// A small label, as AEAM's "GROUP:".
 pub fn tag(text: &str) -> RichText {
     RichText::new(text.to_uppercase())

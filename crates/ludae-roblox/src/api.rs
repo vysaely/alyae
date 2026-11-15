@@ -336,6 +336,26 @@ pub fn presence(user_ids: &[u64], cookie: &str) -> Result<Vec<(u64, String)>, St
     Ok(out)
 }
 
+/// Where `user` is playing, as the account with `cookie` may see it: (place ID, server ID).
+pub fn whereabouts(user: u64, cookie: &str) -> Result<Option<(u64, String)>, String> {
+    let mut r = call(
+        "https://presence.roblox.com/v1/presence/users",
+        &Session::plain(cookie),
+        Some(&json!({ "userIds": [user] })),
+    )?;
+    if r.status() != 200 {
+        return Err(answer(r.status().as_u16(), "online status"));
+    }
+    let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+    let p = &v["userPresences"][0];
+    Ok(match (p["placeId"].as_u64(), p["gameId"].as_str()) {
+        (Some(place), Some(server)) if place > 0 && !server.is_empty() => {
+            Some((place, server.to_string()))
+        }
+        _ => None,
+    })
+}
+
 /// A new device identity (`RBXEventTrackerV2` value), as the Roblox app makes on its first start.
 /// Some requests (blocking a player, for one) fail from sessions without one.
 pub fn new_browser_tracker() -> Option<String> {

@@ -136,10 +136,24 @@ pub fn join_from(req: &Request) -> Join {
     }
     let follow = req.input("follow");
     if !follow.is_empty() {
-        j.follow = Some(match follow.parse() {
+        let user = match follow.parse() {
             Ok(n) => n,
             Err(_) => api::user_id_of(follow).unwrap_or_else(|e| fail(&format!("Follow: {e}"))),
-        });
+        };
+        // Mocktail joins only with a place: the user's own server, looked up first
+        match api::whereabouts(user, &req.cookie()) {
+            Ok(Some((place, server))) => {
+                status(&format!("{follow} is in place {place}"));
+                j.place = Some(place);
+                j.job = Some(server);
+                j.link_code = None;
+            }
+            Ok(None) => fail(&format!(
+                "{follow} is not in a game this account can see (offline, or their privacy hides it)"
+            )),
+            Err(e) => fail(&format!("Follow: {e}")),
+        }
+        j.follow = Some(user);
     }
     j
 }

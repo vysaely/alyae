@@ -46,6 +46,14 @@ pub struct App {
     tx: Sender<Event>,
     rx: Receiver<Event>,
     ctx: Option<egui::Context>,
+    /// the module's watch (online status): its values by account, the run in progress, the last run
+    watch_values: HashMap<String, String>,
+    watching: Option<std::process::Child>,
+    last_watch: Option<(String, std::time::Instant)>,
+    /// an action waiting in its form: (action id, accounts)
+    form: Option<(String, Vec<String>)>,
+    /// the name typed for a new bookmark
+    bookmark_name: String,
 }
 
 const NO_GROUP: &str = "Ungrouped";
@@ -86,6 +94,11 @@ impl App {
             tx,
             rx,
             ctx: Some(ctx.clone()),
+            watch_values: HashMap::new(),
+            watching: None,
+            last_watch: None,
+            form: None,
+            bookmark_name: String::new(),
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, list)) => {
@@ -230,6 +243,12 @@ impl App {
                     self.say(format!("{name}: {text}"), true);
                     self.status.insert(account, (text, true));
                 }
+                Event::Watch(values) => self.watch_values.extend(values),
+                Event::WatchEnded => {
+                    if let Some(mut c) = self.watching.take() {
+                        let _ = c.wait();
+                    }
+                }
                 Event::Ended {
                     account,
                     action,
@@ -364,9 +383,13 @@ impl eframe::App for App {
         }
         match self.game.clone() {
             None => self.game_picker(ui),
-            Some(g) => self.game_view(ui, &g),
+            Some(g) => {
+                self.tick_watch(&ctx, &g);
+                self.game_view(ui, &g);
+            }
         }
         self.remove_dialog(&ctx);
+        self.form_dialog(&ctx);
     }
 }
 
@@ -529,6 +552,7 @@ impl App {
                     Sort::Group => lower(&a.group),
                     Sort::Mode => self.mode(m, a),
                     Sort::Notes => lower(a.notes.lines().next().unwrap_or("")),
+                    Sort::Watch => lower(self.watch_values.get(&a.id).map_or("", String::as_str)),
                 };
                 (v.is_empty(), v, user(a))
             };
@@ -717,7 +741,7 @@ impl App {
     }
 
     fn table(&mut self, ui: &mut egui::Ui, m: &Module) {
-        let rows: Vec<(String, String, String, String, String, String)> = self
+        let rows: Vec<(String, String, String, String, String, String, String)> = self
             .visible(m)
             .iter()
             .map(|a| {
@@ -729,6 +753,7 @@ impl App {
                     a.group.clone(),
                     self.mode(m, a),
                     a.notes.lines().next().unwrap_or("").to_string(),
+                    self.watch_values.get(&a.id).cloned().unwrap_or_default(),
                 )
             })
             .collect();
@@ -737,6 +762,7 @@ impl App {
             .field(&m.title_field)
             .map_or("Account".to_string(), |f| f.label.clone());
         let has_mode = m.field("role").is_some();
+        let watch_col = m.watch.as_ref().map(|w| w.column.clone());
         let show_group = self.group_filter.is_none();
         let mut clicked: Option<(String, bool)> = None; // (id, secondary)
         let mut double = None;
@@ -770,6 +796,14 @@ impl App {
                     .resizable(true),
             );
         }
+        if watch_col.is_some() {
+            table = table.column(
+                Column::initial(140.0)
+                    .at_least(60.0)
+                    .clip(true)
+                    .resizable(true),
+            );
+        }
         table
             .column(Column::remainder().at_least(60.0).clip(true))
             .auto_shrink(false)
@@ -785,11 +819,14 @@ impl App {
                 if has_mode {
                     h.col(|ui| self.sort_heading(ui, "Mode", Sort::Mode));
                 }
+                if let Some(c) = &watch_col {
+                    h.col(|ui| self.sort_heading(ui, c, Sort::Watch));
+                }
                 h.col(|ui| self.sort_heading(ui, "Description", Sort::Notes));
             })
             .body(|body| {
                 body.rows(22.0, rows.len(), |mut row| {
-                    let (id, user, alias, group, mode, notes) = &rows[row.index()];
+                    let (id, user, alias, group, mode, notes, watched) = &rows[row.index()];
                     row.set_selected(selected.contains(id));
                     let on = running.contains(id);
                     row.col(|ui| {
@@ -811,6 +848,11 @@ impl App {
                     if has_mode {
                         row.col(|ui| {
                             ui.label(RichText::new(mode).weak());
+                        });
+                    }
+                    if watch_col.is_some() {
+                        row.col(|ui| {
+                            ui.label(watched);
                         });
                     }
                     row.col(|ui| match self.status.get(id) {
@@ -1010,7 +1052,7 @@ impl App {
 
     fn apply_menu(&mut self, m: &Module, ids: Vec<String>, choice: MenuChoice) {
         match choice {
-            MenuChoice::Run(action) => self.run_action(&action, ids),
+            MenuChoice::Run(action) => self.start_action(m, &action, ids),
             MenuChoice::Stop => self.stop(&ids),
             MenuChoice::Copy(text) => {
                 if let Some(c) = &self.ctx {
@@ -1111,6 +1153,118 @@ impl App {
         }
     }
 
+    /// Runs `action`, or first opens its form when it asks for values or a confirmation.
+    fn start_action(&mut self, m: &Module, action: &str, ids: Vec<String>) {
+        if m.actions.iter().any(|a| a.id == action && a.needs_form()) {
+            self.form = Some((action.to_string(), ids));
+        } else {
+            self.run_action(action, ids);
+        }
+    }
+
+    fn form_dialog(&mut self, ctx: &egui::Context) {
+        let Some((action_id, ids)) = self.form.clone() else {
+            return;
+        };
+        let Some(game) = self.game.clone() else {
+            return;
+        };
+        let Some(action) = self
+            .module(&game)
+            .and_then(|m| m.actions.iter().find(|a| a.id == action_id))
+            .cloned()
+        else {
+            self.form = None;
+            return;
+        };
+        let mut done = None;
+        let inputs = self.inputs.entry(game).or_default();
+        egui::Modal::new(egui::Id::unique("form")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(format!("{} for {}", action.label, plural(ids.len())));
+            if !action.confirm.is_empty() {
+                ui.label(&action.confirm);
+            }
+            egui::Grid::new("form_inputs")
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    for i in &action.inputs {
+                        ui.label(RichText::new(&i.label).weak());
+                        let v = inputs.entry(i.key.clone()).or_default();
+                        if i.choices.is_empty() {
+                            ui.add(
+                                egui::TextEdit::singleline(v)
+                                    .hint_text(&i.hint)
+                                    .desired_width(220.0),
+                            );
+                        } else {
+                            if v.is_empty() {
+                                *v = i.choices[0].clone();
+                            }
+                            egui::ComboBox::from_id_salt(("form", &i.key))
+                                .selected_text(v.as_str())
+                                .show_ui(ui, |ui| {
+                                    for c in &i.choices {
+                                        ui.selectable_value(v, c.clone(), c);
+                                    }
+                                });
+                        }
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add(look::primary(&action.label)).clicked() {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => {
+                self.form = None;
+                self.run_action(&action_id, ids);
+            }
+            Some(false) => self.form = None,
+            None => {}
+        }
+    }
+
+    /// Runs the shown game's watch (online status) when it is due, at most one run at a time.
+    fn tick_watch(&mut self, ctx: &egui::Context, game: &str) {
+        let Some(m) = self.module(game).cloned() else {
+            return;
+        };
+        let Some(w) = m.watch.clone() else { return };
+        let every = Duration::from_secs(w.every.max(5));
+        let due = match &self.last_watch {
+            Some((g, t)) if g == game => t.elapsed() >= every,
+            _ => {
+                self.watch_values.clear();
+                true
+            }
+        };
+        if due && self.watching.is_none() {
+            self.last_watch = Some((game.to_string(), std::time::Instant::now()));
+            let accounts: Vec<&Account> = self.accounts.iter().filter(|a| a.game == game).collect();
+            if !accounts.is_empty() {
+                let wake_ctx = self.ctx.clone();
+                match module::watch(&m, &w, &accounts, &self.dir, self.tx.clone(), move || {
+                    if let Some(c) = &wake_ctx {
+                        c.request_repaint();
+                    }
+                }) {
+                    Ok(child) => self.watching = Some(child),
+                    Err(e) => self.say(format!("{}: {e}", w.column), true),
+                }
+            }
+        }
+        ctx.request_repaint_after(every);
+    }
+
     // --- right: launch and the chosen account -----------------------------------------------
 
     fn deck(&mut self, ui: &mut egui::Ui, m: &Module) {
@@ -1137,8 +1291,18 @@ impl App {
                 if !p.inputs.is_empty() {
                     let gap = ui.spacing().item_spacing.x;
                     let n = p.inputs.len() as f32;
-                    let w = ((full - gap * (n - 1.0)) / n - 1.0).floor().max(60.0);
+                    let mark_w = 84.0;
+                    let w = ((full - gap * n - mark_w) / n - 1.0).floor().max(60.0);
                     ui.horizontal(|ui| {
+                        bookmarks_menu(
+                            ui,
+                            self.store.as_ref(),
+                            &m.id,
+                            p,
+                            inputs,
+                            &mut self.bookmark_name,
+                            mark_w,
+                        );
                         for i in &p.inputs {
                             let v = inputs.entry(i.key.clone()).or_default();
                             ui.add(
@@ -1164,7 +1328,7 @@ impl App {
             for a in m
                 .actions
                 .iter()
-                .filter(|a| !a.primary && a.inputs.len() == 1)
+                .filter(|a| !a.primary && a.inputs.len() == 1 && !a.needs_form())
             {
                 let i = &a.inputs[0];
                 row(ui, |ui| {
@@ -1196,7 +1360,7 @@ impl App {
             for a in m
                 .actions
                 .iter()
-                .filter(|a| !a.primary && a.inputs.len() != 1)
+                .filter(|a| !a.primary && (a.inputs.len() != 1 || a.needs_form()))
             {
                 if ui
                     .add_enabled(can_run, egui::Button::new(count(&a.label)))
@@ -1218,7 +1382,7 @@ impl App {
             }
         });
         if let Some(a) = run {
-            self.run_action(&a, ids.clone());
+            self.start_action(m, &a, ids.clone());
         }
         ui.separator();
         self.editor(ui, m);
@@ -1424,6 +1588,7 @@ enum Sort {
     Group,
     Mode,
     Notes,
+    Watch,
 }
 
 enum MenuChoice {
@@ -1467,14 +1632,18 @@ mod tests {
 
     /// The window on a fresh data folder, opened on `game`, with the repository's modules.
     fn window(game: &str) -> (Harness<'static, App>, PathBuf) {
+        window_with(
+            game,
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules")),
+        )
+    }
+
+    fn window_with(game: &str, modules_dir: PathBuf) -> (Harness<'static, App>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("ludae-ui-{}", store::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let s = Store::open(&dir.join("t.db"), crate::vault::Vault::from_key(&[3; 32])).unwrap();
         s.set_setting("last_game", game);
-        let modules = module::load_all(&[PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../modules"
-        ))]);
+        let modules = module::load_all(&[modules_dir]);
         let d = dir.clone();
         let mut h = Harness::builder()
             .with_size(egui::vec2(1000.0, 580.0))
@@ -1504,6 +1673,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A button with a confirmation opens its form; the form's button runs it, for the chosen accounts.
+    #[test]
+    fn form_runs_after_confirming() {
+        let mods = std::env::temp_dir().join(format!("ludae-mods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        let marker = mods.join("ran");
+        std::fs::write(
+            mods.join("t/module.toml"),
+            format!(
+                "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\n[[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
+                 [[action]]\nid = \"wipe\"\nlabel = \"Wipe\"\nconfirm = \"Sure?\"\ncommand = \"touch {}\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        h.get_by_label("Add account").click();
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+        h.get_by_label("Wipe").click();
+        h.run();
+        assert!(h.state().form.is_some(), "the form did not open");
+        assert!(!marker.exists(), "ran before it was confirmed");
+        h.get_all_by_label("Wipe").last().unwrap().click();
+        h.run();
+        assert!(h.state().form.is_none());
+        for _ in 0..50 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(marker.exists(), "the confirmed action did not run");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
     #[test]
     fn add_roblox_account() {
         let (mut h, dir) = window("roblox");
@@ -1519,4 +1726,97 @@ mod tests {
         assert_eq!(h.state().accounts[0].game, "roblox");
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Saved values for the main button's boxes (AEAM's Bookmarks), kept per game.
+fn bookmarks_menu(
+    ui: &mut egui::Ui,
+    store: Option<&Store>,
+    game: &str,
+    primary: &module::Action,
+    inputs: &mut Values,
+    name: &mut String,
+    width: f32,
+) {
+    let Some(store) = store else { return };
+    let key = format!("bookmarks.{game}");
+    let load = || -> Vec<(String, Values)> {
+        store
+            .setting(&key)
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default()
+    };
+    let save = |list: &Vec<(String, Values)>| {
+        store.set_setting(
+            &key,
+            &serde_json::to_string(list).expect("a list of strings serializes"),
+        );
+    };
+    ui.allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
+        ui.menu_button("Bookmarks", |ui| {
+            let mut list = load();
+            let mut changed = false;
+            let mut remove = None;
+            for (i, (label, values)) in list.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button(label).clicked() {
+                        for inp in &primary.inputs {
+                            inputs.insert(
+                                inp.key.clone(),
+                                values.get(&inp.key).cloned().unwrap_or_default(),
+                            );
+                        }
+                        ui.close();
+                    }
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                list.remove(i);
+                changed = true;
+            }
+            if !list.is_empty() {
+                ui.separator();
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(name)
+                        .hint_text("Name")
+                        .desired_width(140.0),
+                );
+                let has_values = primary
+                    .inputs
+                    .iter()
+                    .any(|i| inputs.get(&i.key).is_some_and(|v| !v.trim().is_empty()));
+                if ui
+                    .add_enabled(
+                        has_values && !name.trim().is_empty(),
+                        egui::Button::new("Save"),
+                    )
+                    .clicked()
+                {
+                    let values: Values = primary
+                        .inputs
+                        .iter()
+                        .filter_map(|i| {
+                            inputs
+                                .get(&i.key)
+                                .map(|v| (i.key.clone(), v.trim().to_string()))
+                        })
+                        .collect();
+                    list.retain(|(l, _)| l != name.trim());
+                    list.push((name.trim().to_string(), values));
+                    name.clear();
+                    changed = true;
+                }
+            });
+            if changed {
+                save(&list);
+            }
+        })
+        .response
+        .on_hover_text("Saved places and servers");
+    });
 }

@@ -30,6 +30,9 @@ pub struct Input {
     pub label: String,
     #[serde(default)]
     pub hint: String,
+    /// the values to pick from, when the input is a choice
+    #[serde(default)]
+    pub choices: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -47,6 +50,28 @@ pub struct Action {
     pub primary: bool,
     #[serde(default, rename = "input")]
     pub inputs: Vec<Input>,
+    /// asked before the action runs (it changes the accounts)
+    #[serde(default)]
+    pub confirm: String,
+}
+
+impl Action {
+    /// Asks for its values (or a confirmation) in a small form before running; one plain input
+    /// is a box beside the button instead.
+    pub fn needs_form(&self) -> bool {
+        !self.confirm.is_empty()
+            || (!self.primary
+                && (self.inputs.len() > 1 || self.inputs.iter().any(|i| !i.choices.is_empty())))
+    }
+}
+
+/// A helper action Ludae runs for all of a game's accounts every `every` seconds while the game is
+/// shown; its answers fill the column `column`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Watch {
+    pub action: String,
+    pub every: u64,
+    pub column: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -69,6 +94,8 @@ pub struct Module {
     pub fields: Vec<Field>,
     #[serde(default, rename = "action")]
     pub actions: Vec<Action>,
+    #[serde(default)]
+    pub watch: Option<Watch>,
     #[serde(skip)]
     pub dir: PathBuf,
 }
@@ -202,6 +229,9 @@ pub enum Event {
         action: String,
         ok: bool,
     },
+    /// a watch's values, by account id
+    Watch(crate::store::Values),
+    WatchEnded,
 }
 
 pub struct Running {
@@ -239,6 +269,79 @@ fn shell(cmd: &str) -> Command {
         c.arg("-c").arg(cmd);
         c
     }
+}
+
+fn account_json(a: &Account) -> serde_json::Map<String, serde_json::Value> {
+    a.fields
+        .iter()
+        .chain(a.secrets.iter())
+        .map(|(k, v)| (k.clone(), v.clone().into()))
+        .collect()
+}
+
+/// The module's helper started for `action`, with its data folder.
+fn spawn_helper(
+    module: &Module,
+    action: &str,
+    label: &str,
+    data_dir: &Path,
+) -> Result<(Child, PathBuf, PathBuf), String> {
+    let helper = module
+        .helper_path()
+        .ok_or_else(|| format!("{} has no helper for '{label}'", module.name))?;
+    let dir = data_dir.join("games").join(&module.id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let child = Command::new(&helper)
+        .arg(action)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", helper.display()))?;
+    Ok((child, dir, helper))
+}
+
+/// Runs the module's watch once for `accounts`; its values arrive as one `Event::Watch`, then
+/// `Event::WatchEnded`.
+pub fn watch(
+    module: &Module,
+    w: &Watch,
+    accounts: &[&Account],
+    data_dir: &Path,
+    tx: Sender<Event>,
+    wake: impl Fn() + Send + 'static,
+) -> Result<Child, String> {
+    let (mut child, dir, helper) = spawn_helper(module, &w.action, &w.column, data_dir)?;
+    let list: Vec<serde_json::Value> = accounts
+        .iter()
+        .map(|a| serde_json::json!({ "id": a.id, "account": account_json(a) }))
+        .collect();
+    let request = serde_json::json!({ "accounts": list, "data_dir": dir });
+    // stdin closes here: a watch answers once and ends
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(format!("{request}\n").as_bytes())
+        .map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
+    drop(stdin);
+    let out = child.stdout.take().expect("piped stdout");
+    std::thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if let Some(map) = v.get("watch").and_then(|m| m.as_object()) {
+                let values = map
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect();
+                let _ = tx.send(Event::Watch(values));
+                wake();
+            }
+        }
+        let _ = tx.send(Event::WatchEnded);
+        wake();
+    });
+    Ok(child)
 }
 
 /// Starts `action` for `account`; its output arrives as events on `tx` (and `wake` is called so
@@ -280,26 +383,11 @@ pub fn start(
             stdin: None,
         }));
     }
-    let helper = module
-        .helper_path()
-        .ok_or_else(|| format!("{} has no helper for '{}'", module.name, action.label))?;
-    let dir = data_dir.join("games").join(&module.id);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let mut child = Command::new(&helper)
-        .arg(&action.id)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", helper.display()))?;
-    let mut account_json = serde_json::Map::new();
-    for (k, v) in account.fields.iter().chain(account.secrets.iter()) {
-        account_json.insert(k.clone(), v.clone().into());
-    }
+    let (mut child, dir, helper) = spawn_helper(module, &action.id, &action.label, data_dir)?;
     let request = serde_json::json!({
         "id": account.id,
         "name": account.name,
-        "account": account_json,
+        "account": account_json(account),
         "inputs": inputs,
         "data_dir": dir,
     });
@@ -395,5 +483,16 @@ label = "Place"
         inputs.insert("place".into(), "42".into());
         assert_eq!(fill(&m.actions[0].command, &a, &inputs), "run me {x} 42");
         assert!(Module::parse("id = \"a b\"\nname = \"x\"", Path::new("/")).is_err());
+        // one plain input: a box beside the button; a choice or a confirmation: a form
+        assert!(!m.actions[0].needs_form());
+        let f = Module::parse(
+            "id = \"x\"\nname = \"x\"\n[watch]\naction = \"p\"\nevery = 15\ncolumn = \"Online\"\n\
+             [[action]]\nid = \"a\"\nlabel = \"A\"\n[[action.input]]\nkey = \"k\"\nlabel = \"K\"\nchoices = [\"1\", \"2\"]\n\
+             [[action]]\nid = \"b\"\nlabel = \"B\"\nconfirm = \"Sure?\"\n",
+            Path::new("/"),
+        )
+        .unwrap();
+        assert!(f.actions.iter().all(Action::needs_form));
+        assert_eq!(f.watch.unwrap().column, "Online");
     }
 }

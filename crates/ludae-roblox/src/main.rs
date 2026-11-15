@@ -157,6 +157,40 @@ fn check(req: &Request) {
     }
 }
 
+/// Online status of all accounts: one request per 100, signed with the first account's cookie
+/// (Roblox shows presence its privacy settings hide only to a signed-in viewer).
+fn presence(v: &Value) {
+    let accounts = v["accounts"].as_array().cloned().unwrap_or_default();
+    let field = |a: &Value, k: &str| a["account"][k].as_str().unwrap_or("").trim().to_string();
+    let by_user: Vec<(u64, String)> = accounts
+        .iter()
+        .filter_map(|a| {
+            Some((
+                field(a, "user_id").parse().ok()?,
+                a["id"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    let cookie = accounts
+        .iter()
+        .map(|a| api::clean_cookie(&field(a, "cookie")))
+        .find(|c| !c.is_empty())
+        .unwrap_or_default();
+    let ids: Vec<u64> = by_user.iter().map(|(u, _)| *u).collect();
+    match api::presence(&ids, &cookie) {
+        Ok(list) => {
+            let mut map = Map::new();
+            for (user, text) in list {
+                for (_, id) in by_user.iter().filter(|(u, _)| *u == user) {
+                    map.insert(id.clone(), json!(text));
+                }
+            }
+            say(json!({ "watch": map }));
+        }
+        Err(e) => fail(&e),
+    }
+}
+
 fn main() {
     let action = std::env::args().nth(1).unwrap_or_default();
     let mut line = String::new();
@@ -167,6 +201,10 @@ fn main() {
     drop(stdin);
     let v: Value =
         serde_json::from_str(&line).unwrap_or_else(|e| fail(&format!("bad request: {e}")));
+    if action == "presence" {
+        presence(&v);
+        return;
+    }
     let obj = |k: &str| {
         v.get(k)
             .and_then(Value::as_object)

@@ -1,6 +1,6 @@
 # Roblox on Linux, through Mocktail.
 id = "roblox"
-name = "Roblox"
+name = "Roblox Linux"
 platform = "linux"
 description = "Several accounts at once, join servers, 2FA"
 helper = "ludae-roblox"

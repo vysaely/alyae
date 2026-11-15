@@ -16,3 +16,6 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 hmac = "0.12"
 sha1 = "0.10"
 dirs = "6"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe"] }

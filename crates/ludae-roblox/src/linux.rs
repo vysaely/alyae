@@ -106,10 +106,14 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The file name of the account's own copy of the Mocktail program.
+fn program_name(req: &Request) -> String {
+    format!("mocktail_ludae_{}", &req.id[..req.id.len().min(12)])
+}
+
 /// The account's own copy of the Mocktail program (a hard link where it can be one): Mocktail
 /// derives its single-instance lock from its own path, so each account needs a path of its own.
 fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
-    let name = format!("mocktail_ludae_{}", &req.id[..req.id.len().min(12)]);
     let writable = std::ffi::CString::new(m.lib.as_os_str().as_bytes())
         // SAFETY: access(2) with a NUL-terminated path
         .is_ok_and(|p| unsafe { libc::access(p.as_ptr(), libc::W_OK) } == 0);
@@ -137,7 +141,7 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
             }
         }
     }
-    let target = dir.join(name);
+    let target = dir.join(program_name(req));
     if !same_file(&m.bin, &target) {
         let staging = target.with_extension("provision");
         let _ = fs::remove_file(&staging);
@@ -288,10 +292,7 @@ fn settings_file(profile: &Path) -> PathBuf {
 pub fn graphics(req: &Request) {
     let m = find_mocktail();
     if let Some(m) = &m {
-        let program = m.lib.join(format!(
-            "mocktail_ludae_{}",
-            &req.id[..req.id.len().min(12)]
-        ));
+        let program = m.lib.join(program_name(req));
         if already_running(&program) {
             fail("close this account's Roblox first: it rewrites its settings when it closes");
         }
@@ -367,10 +368,7 @@ fn reset_profile(profile: &Path) -> u64 {
 /// The Reset files button.
 pub fn reset(req: &Request) {
     if let Some(m) = find_mocktail() {
-        let program = m.lib.join(format!(
-            "mocktail_ludae_{}",
-            &req.id[..req.id.len().min(12)]
-        ));
+        let program = m.lib.join(program_name(req));
         if already_running(&program) {
             fail("close this account's Roblox first");
         }
@@ -381,6 +379,52 @@ pub fn reset(req: &Request) {
     }
     let freed = reset_profile(&profile);
     status(&format!("files reset, {} MB freed", freed / 1_000_000));
+}
+
+/// The resolved profile folder when it is one of Ludae's own (inside `data_dir/profiles`, links
+/// resolved, so a link pointing out of it does not count); None for AEAM's folders and the like.
+fn owned_profile(profile: &Path, data_dir: &Path) -> Option<PathBuf> {
+    let root = fs::canonicalize(data_dir.join("profiles")).ok()?;
+    let p = fs::canonicalize(profile).ok()?;
+    (p != root && p.starts_with(&root)).then_some(p)
+}
+
+/// Run before the account is removed from Ludae: its copy of the Mocktail program goes, and its
+/// profile folder when Ludae made it; a folder shared with AEAM stays, only Mocktail's saved
+/// sign-in in it goes.
+pub fn forget(req: &Request) {
+    let name = program_name(req);
+    if already_running(Path::new(&name)) {
+        fail("close this account's Roblox first");
+    }
+    let mut problems = Vec::new();
+    let mut gone = |f: &Path| match fs::remove_file(f) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            problems.push(format!("{}: {e}", f.display()))
+        }
+        _ => {}
+    };
+    let mut dirs = vec![req.data_dir.join("bin")];
+    dirs.extend(find_mocktail().map(|m| m.lib));
+    for d in dirs {
+        let program = d.join(&name);
+        gone(&program.with_extension("provision"));
+        gone(&program);
+    }
+    let profile = profile_dir(req, &req.data_dir);
+    match owned_profile(&profile, &req.data_dir) {
+        Some(p) => {
+            if let Err(e) = fs::remove_dir_all(&p) {
+                problems.push(format!("{}: {e}", p.display()));
+            }
+        }
+        None if profile.is_dir() => gone(&profile.join("data/auth/roblox.cookie")),
+        None => {}
+    }
+    if !problems.is_empty() {
+        fail(&format!("cannot delete {}", problems.join("; ")));
+    }
+    status("files deleted");
 }
 
 /// The account's folder: Ludae's own, or AEAM's when the account came from there (its in-game
@@ -551,6 +595,9 @@ pub fn play(req: &Request) {
     let join = join_from(req);
     let profile = profile_dir(req, data_dir);
     mkdir(&profile);
+    // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
+    // replace it, and at the end it would pass for a renewed cookie
+    let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
     status("starting");
     prepare_profile(
         &m,
@@ -915,6 +962,31 @@ mod tests {
             "shared",
             "followed a link"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Only folders inside Ludae's own profiles folder are Ludae's to delete; AEAM's and links
+    /// pointing out are not.
+    #[test]
+    fn owned_profiles_only() {
+        let root = std::env::temp_dir().join(format!("ludae-forget-{}", std::process::id()));
+        let (data, aeam) = (root.join("data"), root.join("aeam/profile"));
+        let own = data.join("profiles/abc");
+        fs::create_dir_all(&own).unwrap();
+        fs::create_dir_all(&aeam).unwrap();
+        symlink(&aeam, data.join("profiles/link")).unwrap();
+        assert_eq!(
+            owned_profile(&own, &data),
+            Some(fs::canonicalize(&own).unwrap())
+        );
+        // the same folder named through a detour still counts
+        assert!(owned_profile(&data.join("profiles/../profiles/abc"), &data).is_some());
+        assert_eq!(owned_profile(&aeam, &data), None);
+        assert_eq!(owned_profile(&data.join("profiles/link"), &data), None);
+        assert_eq!(owned_profile(&data.join("profiles/../.."), &data), None);
+        assert_eq!(owned_profile(&data.join("profiles"), &data), None);
+        assert_eq!(owned_profile(&data, &data), None);
+        assert_eq!(owned_profile(&data.join("profiles/missing"), &data), None);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -1242,11 +1242,25 @@ impl App {
             return;
         }
         let n = self.confirm_remove.len();
+        // modules that delete an account's files on removal (Roblox Linux: its profile folder)
+        let with_files = self.confirm_remove.iter().any(|id| {
+            self.accounts
+                .iter()
+                .find(|a| &a.id == id)
+                .and_then(|a| self.module(&a.game))
+                .is_some_and(|m| !m.on_remove.is_empty())
+        });
         let mut done = None;
         egui::Modal::new(egui::Id::unique("remove")).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.heading(format!("Remove {}?", plural(n)));
             ui.label("Their logins and secrets are deleted from Ludae.");
+            if with_files {
+                ui.label(
+                    "Their game files kept by Ludae are deleted too (folders shared with AEAM stay, \
+                     only the saved sign-in in them goes).",
+                );
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
@@ -1264,6 +1278,14 @@ impl App {
             Some(true) => {
                 let ids = std::mem::take(&mut self.confirm_remove);
                 for id in &ids {
+                    // the module's files go first (quick); the row goes even when that fails
+                    let account = self.accounts.iter().find(|a| &a.id == id).cloned();
+                    if let Some(a) = account
+                        && let Some(m) = self.module(&a.game).filter(|m| !m.on_remove.is_empty())
+                        && let Err(e) = module::run_and_wait(m, &m.on_remove, &a, &self.dir)
+                    {
+                        self.say(format!("{}: files not deleted: {e}", self.title(&a)), true);
+                    }
                     let res = self.store.as_ref().map(|s| s.delete(id));
                     match res {
                         Some(Ok(())) => {
@@ -1837,7 +1859,6 @@ fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
     ui.painter().circle_filled(rect.center(), 3.5, color);
     resp
 }
-
 
 /// One value from a helper into an account: `name`, a secret or a plain field (an empty value
 /// removes it).

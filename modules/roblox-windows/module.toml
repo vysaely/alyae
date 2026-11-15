@@ -1,6 +1,6 @@
 # Roblox on Windows, through the official client.
 id = "roblox"
-name = "Roblox"
+name = "Roblox Windows"
 platform = "windows"
 description = "Several accounts at once, join servers, 2FA"
 helper = "ludae-roblox"

@@ -107,10 +107,11 @@ pub fn call(url: &str, s: &Session, body: Option<&Value>) -> Result<Response, St
     for _ in 0..5 {
         let r = match body {
             None => {
-                let mut q = a
-                    .get(url)
-                    .header("Cookie", &s.cookie_header())
-                    .header("Accept", "application/json");
+                let mut q = a.get(url).header("Accept", "application/json");
+                // no cookie: no Cookie header at all, so the request is anonymous
+                if !s.cookie.is_empty() {
+                    q = q.header("Cookie", &s.cookie_header());
+                }
                 if let Some(c) = &challenge {
                     for (k, v) in c {
                         q = q.header(*k, v);
@@ -121,10 +122,12 @@ pub fn call(url: &str, s: &Session, body: Option<&Value>) -> Result<Response, St
             Some(b) => {
                 let mut q = a
                     .post(url)
-                    .header("Cookie", &s.cookie_header())
                     .header("Accept", "application/json")
                     .header("Referer", "https://www.roblox.com/")
                     .header("Origin", "https://www.roblox.com");
+                if !s.cookie.is_empty() {
+                    q = q.header("Cookie", &s.cookie_header());
+                }
                 if !csrf.is_empty() {
                     q = q.header("X-CSRF-TOKEN", &csrf);
                 }
@@ -304,7 +307,8 @@ pub fn resolve_share_link(link: &str, cookie: &str) -> Result<(u64, String), Str
 }
 
 /// Online status by user ID, for up to 100 users per request, as the account with `cookie` sees
-/// it: "Offline", "Online", "In game: <place>", "In Studio", "Invisible".
+/// it (an empty cookie asks anonymously: the status Roblox shows to everyone): "Offline",
+/// "Online", "In game: <place>", "In Studio", "Invisible".
 pub fn presence(user_ids: &[u64], cookie: &str) -> Result<Vec<(u64, String)>, String> {
     let mut out = Vec::new();
     for chunk in user_ids.chunks(100) {

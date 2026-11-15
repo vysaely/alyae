@@ -50,6 +50,8 @@ pub struct App {
     watch_values: HashMap<String, String>,
     watching: Option<std::process::Child>,
     last_watch: Option<(String, std::time::Instant)>,
+    /// the watch's last error, shown once until it changes or the watch works again
+    watch_error: Option<String>,
     /// an action waiting in its form: (action id, accounts)
     form: Option<(String, Vec<String>)>,
     /// the name typed for a new bookmark
@@ -99,6 +101,7 @@ impl App {
             watch_values: HashMap::new(),
             watching: None,
             last_watch: None,
+            watch_error: None,
             form: None,
             bookmark_name: String::new(),
             watch_text: true,
@@ -265,7 +268,22 @@ impl App {
                     self.say(format!("{name}: {text}"), true);
                     self.status.insert(account, (text, true));
                 }
-                Event::Watch(values) => self.watch_values.extend(values),
+                Event::Watch(values) => {
+                    self.watch_error = None;
+                    self.watch_values.extend(values);
+                }
+                Event::WatchError(e) => {
+                    if self.watch_error.as_ref() != Some(&e) {
+                        let column = self
+                            .game
+                            .as_deref()
+                            .and_then(|g| self.module(g))
+                            .and_then(|m| m.watch.as_ref())
+                            .map_or_else(|| "Watch".to_string(), |w| w.column.clone());
+                        self.say(format!("{column}: {e}"), true);
+                        self.watch_error = Some(e);
+                    }
+                }
                 Event::WatchEnded => {
                     if let Some(mut c) = self.watching.take() {
                         let _ = c.wait();
@@ -1331,7 +1349,20 @@ impl App {
             return;
         };
         let Some(w) = m.watch.clone() else { return };
+        // paused while the window is in the background or minimized: no repaint is asked for, and
+        // focusing the window (which repaints it) runs the watch at once
+        let (focused, minimized) =
+            ctx.input(|i| (i.focused, i.viewport().minimized.unwrap_or(false)));
         let every = Duration::from_secs(w.every.max(5));
+        if !focused || minimized {
+            if let (Some((_, t)), Some(past)) = (
+                &mut self.last_watch,
+                std::time::Instant::now().checked_sub(every),
+            ) {
+                *t = past;
+            }
+            return;
+        }
         let due = match &self.last_watch {
             Some((g, t)) if g == game => t.elapsed() >= every,
             _ => {

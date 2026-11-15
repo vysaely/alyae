@@ -76,6 +76,11 @@ hint = "username or follow target..."
 id = "check"
 label = "Refresh"
 
+# Roblox's login page, filled in from the saved username, password and 2FA secret
+[[action]]
+id = "login"
+label = "Log in"
+
 # online status of every account, every 15 s while the game is shown
 [watch]
 action = "presence"

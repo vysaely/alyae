@@ -520,7 +520,6 @@ impl App {
             return;
         };
         egui::Panel::right("deck")
-            .resizable(true)
             .default_size(300.0)
             .min_size(240.0)
             .show(ui, |ui| {
@@ -817,7 +816,6 @@ impl App {
         let has_mode = m.field("role").is_some();
         let watch = m.watch.clone();
         let watch_col = watch.as_ref().map(|w| w.column.clone());
-        let show_text = self.watch_text;
         let show_group = self.group_filter.is_none();
         let mut clicked: Option<(String, bool)> = None; // (id, secondary)
         let mut double = None;
@@ -829,61 +827,58 @@ impl App {
             .striped(true)
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-        if watch_col.is_some() {
-            table = table.column(if self.watch_text {
-                Column::initial(140.0)
-                    .at_least(60.0)
-                    .clip(true)
-                    .resizable(true)
-            } else {
-                Column::exact(70.0).clip(true)
-            });
+        // with its text hidden the status is a dot at the start of the name: no column of its own
+        let watch_column = watch_col.is_some() && self.watch_text;
+        if watch_column {
+            table = table.column(Column::initial(140.0).at_least(60.0).clip(true));
         }
-        table = table.column(
-            Column::initial(170.0)
-                .at_least(80.0)
-                .clip(true)
-                .resizable(true),
-        );
+        table = table.column(Column::initial(170.0).at_least(80.0).clip(true));
         if show_group {
-            table = table.column(
-                Column::initial(80.0)
-                    .at_least(50.0)
-                    .clip(true)
-                    .resizable(true),
-            );
+            table = table.column(Column::initial(80.0).at_least(50.0).clip(true));
         }
         if has_mode {
-            table = table.column(
-                Column::initial(90.0)
-                    .at_least(70.0)
-                    .clip(true)
-                    .resizable(true),
-            );
+            table = table.column(Column::initial(90.0).at_least(70.0).clip(true));
         }
         table
             .column(Column::remainder().at_least(60.0).clip(true))
             .auto_shrink(false)
             .header(20.0, |mut h| {
-                if let Some(c) = &watch_col {
-                    h.col(|ui| {
-                        let mut show = self.watch_text;
-                        self.sort_heading(ui, c, Sort::Watch).context_menu(|ui| {
-                            ui.checkbox(&mut show, "Show text");
-                        });
-                        if show != self.watch_text {
-                            self.watch_text = show;
-                            if let Some(s) = &self.store {
-                                s.set_setting("watch_text", if show { "1" } else { "0" });
-                            }
+                let mut show = self.watch_text;
+                let mut sort_watch = false;
+                let watch_menu = |ui: &mut egui::Ui, show: &mut bool, sort_watch: &mut bool| {
+                    if let Some(c) = &watch_col {
+                        ui.checkbox(show, format!("{c}: show text"));
+                        if ui.button(format!("Sort by {c}")).clicked() {
+                            *sort_watch = true;
+                            ui.close();
                         }
+                    }
+                };
+                if watch_column {
+                    h.col(|ui| {
+                        let c = watch_col.clone().unwrap_or_default();
+                        self.sort_heading(ui, &c, Sort::Watch)
+                            .context_menu(|ui| watch_menu(ui, &mut show, &mut sort_watch));
                     });
                 }
                 h.col(|ui| {
-                    self.sort_heading(ui, &first_label, Sort::User);
+                    if watch_col.is_some() && !watch_column {
+                        ui.add_space(12.0);
+                    }
+                    self.sort_heading(ui, &first_label, Sort::User)
+                        .context_menu(|ui| watch_menu(ui, &mut show, &mut sort_watch));
                     ui.label(look::tag("·"));
                     self.sort_heading(ui, "Alias", Sort::Alias);
                 });
+                if show != self.watch_text {
+                    self.watch_text = show;
+                    if let Some(s) = &self.store {
+                        s.set_setting("watch_text", if show { "1" } else { "0" });
+                    }
+                }
+                if sort_watch {
+                    self.sort_by = Some((Sort::Watch, false));
+                }
                 if show_group {
                     h.col(|ui| {
                         self.sort_heading(ui, "Group", Sort::Group);
@@ -903,23 +898,34 @@ impl App {
                     let (id, user, alias, group, mode, notes, watched) = &rows[row.index()];
                     row.set_selected(selected.contains(id));
                     let on = running.contains(id);
-                    if let Some(w) = &watch {
+                    let watch_dot = |ui: &mut egui::Ui| -> Option<egui::Response> {
+                        let w = watch.as_ref()?;
+                        if watched.is_empty() {
+                            return None;
+                        }
+                        let c = w
+                            .color_of(watched)
+                            .and_then(look::hex)
+                            .unwrap_or(look::colors().muted);
+                        Some(dot(ui, c))
+                    };
+                    if watch_column {
                         row.col(|ui| {
-                            if !watched.is_empty() {
-                                let c = w
-                                    .color_of(watched)
-                                    .and_then(look::hex)
-                                    .unwrap_or(look::colors().muted);
-                                if show_text {
-                                    dot(ui, c);
-                                    ui.label(watched);
-                                } else {
-                                    dot(ui, c).on_hover_text(watched);
-                                }
+                            if watch_dot(ui).is_some() {
+                                ui.label(watched);
                             }
                         });
                     }
                     row.col(|ui| {
+                        if !watch_column {
+                            match watch_dot(ui) {
+                                Some(d) => {
+                                    d.on_hover_text(watched);
+                                }
+                                None if watch.is_some() => ui.add_space(8.0),
+                                None => {}
+                            }
+                        }
                         // the accent marks what runs
                         ui.label(if on {
                             RichText::new(user).color(look::colors().accent)
@@ -1904,9 +1910,16 @@ mod tests {
         assert!(h.state().watch_text);
         h.get_by_label("ONLINE").click_secondary();
         h.run();
-        h.get_by_label("Show text").click();
+        h.get_by_label("Online: show text").click();
         h.run();
         assert!(!h.state().watch_text, "Show text did not switch off");
+        // the column is gone; the Username heading switches it back
+        assert!(h.query_by_label("ONLINE").is_none());
+        h.get_by_label("USERNAME").click_secondary();
+        h.run();
+        h.get_by_label("Online: show text").click();
+        h.run();
+        assert!(h.state().watch_text, "Show text did not switch back on");
         let _ = std::fs::remove_dir_all(dir);
     }
 

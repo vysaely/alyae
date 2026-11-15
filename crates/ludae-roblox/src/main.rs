@@ -6,6 +6,7 @@
 mod api;
 #[cfg(target_os = "linux")]
 mod linux;
+mod settings_xml;
 #[cfg(windows)]
 mod windows;
 
@@ -231,6 +232,8 @@ fn main() {
     }
     match action.as_str() {
         "check" => check(&req),
+        #[cfg(target_os = "linux")]
+        "graphics" => linux::graphics(&req),
         "play" | "follow" => {
             #[cfg(target_os = "linux")]
             linux::play(&req);

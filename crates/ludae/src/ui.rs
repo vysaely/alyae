@@ -1442,37 +1442,7 @@ impl App {
                 });
             }
         }
-        // the other buttons (Refresh) and Stop, for what is chosen
-        let mine: Vec<String> = ids
-            .iter()
-            .filter(|id| self.running.contains_key(*id))
-            .cloned()
-            .collect();
-        ui.horizontal_wrapped(|ui| {
-            for a in m
-                .actions
-                .iter()
-                .filter(|a| !a.primary && (a.inputs.len() != 1 || a.needs_form()))
-            {
-                if ui
-                    .add_enabled(can_run, egui::Button::new(count(&a.label)))
-                    .clicked()
-                {
-                    run = Some(a.id.clone());
-                }
-            }
-            if !mine.is_empty()
-                && ui
-                    .button(if mine.len() > 1 {
-                        format!("Stop ({})", mine.len())
-                    } else {
-                        "Stop".into()
-                    })
-                    .clicked()
-            {
-                self.stop(&mine);
-            }
-        });
+        // every other button (Refresh, Settings, the account tools, Stop) is in the right-click menu
         if let Some(a) = run {
             self.start_action(m, &a, ids.clone());
         }
@@ -1482,7 +1452,7 @@ impl App {
 
     fn editor(&mut self, ui: &mut egui::Ui, m: &Module) {
         if self.selected.len() > 1 {
-            ui.label(format!("{} accounts chosen. The buttons above run for all of them; right-click them for more.", self.selected.len()));
+            ui.label(format!("{} accounts chosen. The buttons above run for all of them; right-click them for everything else.", self.selected.len()));
             return;
         }
         let Some(mut d) = self.draft.take() else {
@@ -1884,6 +1854,9 @@ mod tests {
         h.get_by_label("Add account").click();
         h.run();
         h.get_by_label("Add").click();
+        h.run();
+        // from the right-click menu of the account's row
+        h.get_by_label("(unnamed)").click_secondary();
         h.run();
         h.get_by_label("Wipe").click();
         h.run();

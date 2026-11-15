@@ -15,7 +15,7 @@ pub struct Field {
     pub label: String,
     #[serde(default)]
     pub secret: bool,
-    /// "text" (default), "totp" (shows the live code), "choice", "multiline"
+    /// "text" (default), "totp" (shows the live code), "choice"
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
@@ -76,8 +76,16 @@ pub struct Module {
 impl Module {
     pub fn parse(text: &str, dir: &Path) -> Result<Self, String> {
         let mut m: Module = toml::from_str(text).map_err(|e| e.to_string())?;
-        if m.id.is_empty() || !m.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return Err(format!("module id '{}' must be letters, digits, - or _", m.id));
+        if m.id.is_empty()
+            || !m
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "module id '{}' must be letters, digits, - or _",
+                m.id
+            ));
         }
         m.dir = dir.to_path_buf();
         Ok(m)
@@ -95,7 +103,13 @@ impl Module {
         if self.helper.is_empty() {
             return None;
         }
-        let exe = |p: PathBuf| if cfg!(windows) { p.with_extension("exe") } else { p };
+        let exe = |p: PathBuf| {
+            if cfg!(windows) {
+                p.with_extension("exe")
+            } else {
+                p
+            }
+        };
         let beside_module = exe(self.dir.join(&self.helper));
         if beside_module.is_file() {
             return Some(beside_module);
@@ -116,12 +130,16 @@ pub fn load_all(dirs: &[PathBuf]) -> (Vec<Module>, Vec<String>) {
     let mut mods: Vec<Module> = Vec::new();
     let mut problems = Vec::new();
     for root in dirs {
-        let Ok(entries) = std::fs::read_dir(root) else { continue };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
         let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
         entries.sort();
         for dir in entries {
             let file = dir.join("module.toml");
-            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
             match Module::parse(&text, &dir) {
                 Ok(m) if !m.platform.is_empty() && m.platform != std::env::consts::OS => {}
                 Ok(m) => {
@@ -153,7 +171,11 @@ pub fn fill(template: &str, account: &Account, inputs: &crate::store::Values) ->
             break;
         };
         let key = &rest[..j];
-        out.push_str(inputs.get(key).map_or_else(|| account.value(key), String::as_str));
+        out.push_str(
+            inputs
+                .get(key)
+                .map_or_else(|| account.value(key), String::as_str),
+        );
         rest = &rest[j + 1..];
     }
     out.push_str(&rest.replace("}}", "}"));
@@ -163,10 +185,23 @@ pub fn fill(template: &str, account: &Account, inputs: &crate::store::Values) ->
 /// What a running action tells the window.
 #[derive(Debug)]
 pub enum Event {
-    Set { account: String, values: crate::store::Values },
-    Status { account: String, text: String },
-    Error { account: String, text: String },
-    Ended { account: String, action: String, ok: bool },
+    Set {
+        account: String,
+        values: crate::store::Values,
+    },
+    Status {
+        account: String,
+        text: String,
+    },
+    Error {
+        account: String,
+        text: String,
+    },
+    Ended {
+        account: String,
+        action: String,
+        ok: bool,
+    },
 }
 
 pub struct Running {
@@ -230,14 +265,24 @@ pub fn start(
             let act = action.id.clone();
             std::thread::spawn(move || {
                 let ok = child.wait().is_ok_and(|s| s.success());
-                let _ = tx.send(Event::Ended { account: id, action: act, ok });
+                let _ = tx.send(Event::Ended {
+                    account: id,
+                    action: act,
+                    ok,
+                });
                 wake();
             });
             return Ok(None);
         }
-        return Ok(Some(Running { action: action.id.clone(), child, stdin: None }));
+        return Ok(Some(Running {
+            action: action.id.clone(),
+            child,
+            stdin: None,
+        }));
     }
-    let helper = module.helper_path().ok_or_else(|| format!("{} has no helper for '{}'", module.name, action.label))?;
+    let helper = module
+        .helper_path()
+        .ok_or_else(|| format!("{} has no helper for '{}'", module.name, action.label))?;
     let dir = data_dir.join("games").join(&module.id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut child = Command::new(&helper)
@@ -269,28 +314,47 @@ pub fn start(
     std::thread::spawn(move || {
         let mut ok = true;
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
             let ev = if let Some(set) = v.get("set").and_then(|s| s.as_object()) {
                 let values = set
                     .iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect();
-                Event::Set { account: id.clone(), values }
+                Event::Set {
+                    account: id.clone(),
+                    values,
+                }
             } else if let Some(t) = v.get("status").and_then(|s| s.as_str()) {
-                Event::Status { account: id.clone(), text: t.to_string() }
+                Event::Status {
+                    account: id.clone(),
+                    text: t.to_string(),
+                }
             } else if let Some(t) = v.get("error").and_then(|s| s.as_str()) {
                 ok = false;
-                Event::Error { account: id.clone(), text: t.to_string() }
+                Event::Error {
+                    account: id.clone(),
+                    text: t.to_string(),
+                }
             } else {
                 continue;
             };
             let _ = tx.send(ev);
             wake();
         }
-        let _ = tx.send(Event::Ended { account: id, action: act, ok });
+        let _ = tx.send(Event::Ended {
+            account: id,
+            action: act,
+            ok,
+        });
         wake();
     });
-    Ok(Some(Running { action: action.id.clone(), child, stdin }))
+    Ok(Some(Running {
+        action: action.id.clone(),
+        child,
+        stdin,
+    }))
 }
 
 #[cfg(test)]

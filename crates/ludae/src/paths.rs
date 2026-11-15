@@ -14,14 +14,14 @@ pub fn data_dir() -> PathBuf {
 /// run from it), then the system share folder, then the user's own.
 pub fn module_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(bin) = exe.parent() {
-            out.push(bin.join("modules"));
-            // target/{debug,release}/ludae -> the repository's modules/
-            out.push(bin.join("../../modules"));
-            // ~/.local/bin/ludae -> ~/.local/share/ludae/modules is the user's; /usr/bin -> /usr/share
-            out.push(bin.join("../share/ludae/modules"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin) = exe.parent()
+    {
+        out.push(bin.join("modules"));
+        // target/{debug,release}/ludae -> the repository's modules/
+        out.push(bin.join("../../modules"));
+        // ~/.local/bin/ludae -> ~/.local/share/ludae/modules is the user's; /usr/bin -> /usr/share
+        out.push(bin.join("../share/ludae/modules"));
     }
     out.push(data_dir().join("modules"));
     out

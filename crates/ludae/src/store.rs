@@ -87,22 +87,25 @@ impl Store {
                         sort: r.get(5)?,
                         created: r.get(6)?,
                         last_used: r.get(7)?,
-                        fields: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                        fields: Values::new(),
                         secrets: Values::new(),
                     },
+                    r.get::<_, String>(8)?,
                     r.get::<_, Option<Vec<u8>>>(9)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for row in rows {
-            let (mut a, blob) = row.map_err(|e| e.to_string())?;
+            let (mut a, fields, blob) = row.map_err(|e| e.to_string())?;
+            a.fields = serde_json::from_str(&fields)
+                .map_err(|e| format!("the fields of '{}' are damaged: {e}", a.name))?;
             if let Some(b) = blob {
-                let plain = self
-                    .vault
-                    .open_blob(&b)
-                    .ok_or_else(|| format!("the secrets of '{}' do not open with this key", a.name))?;
-                a.secrets = serde_json::from_slice(&plain).unwrap_or_default();
+                let plain = self.vault.open_blob(&b).ok_or_else(|| {
+                    format!("the secrets of '{}' do not open with this key", a.name)
+                })?;
+                a.secrets = serde_json::from_slice(&plain)
+                    .map_err(|e| format!("the secrets of '{}' are damaged: {e}", a.name))?;
             }
             out.push(a);
         }
@@ -110,8 +113,13 @@ impl Store {
     }
 
     pub fn save(&self, a: &Account) -> Result<(), String> {
-        let secrets = (!a.secrets.is_empty())
-            .then(|| self.vault.seal(serde_json::to_string(&a.secrets).unwrap_or_default().as_bytes()));
+        let secrets = (!a.secrets.is_empty()).then(|| {
+            self.vault.seal(
+                serde_json::to_string(&a.secrets)
+                    .expect("a string map serializes")
+                    .as_bytes(),
+            )
+        });
         self.db
             .execute(
                 "INSERT INTO accounts (id, game, name, grp, notes, sort, created, last_used, fields, secrets)
@@ -127,7 +135,7 @@ impl Store {
                     a.sort,
                     a.created,
                     a.last_used,
-                    serde_json::to_string(&a.fields).unwrap_or_default(),
+                    serde_json::to_string(&a.fields).expect("a string map serializes"),
                     secrets
                 ],
             )
@@ -144,7 +152,9 @@ impl Store {
 
     pub fn setting(&self, key: &str) -> Option<String> {
         self.db
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
             .ok()
     }
 
@@ -165,7 +175,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ludae-store-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let s = Store::open(&dir.join("t.db"), Vault::from_key(&[1; 32])).unwrap();
-        let mut a = Account { id: new_id(), game: "generic".into(), name: "me".into(), ..Default::default() };
+        let mut a = Account {
+            id: new_id(),
+            game: "generic".into(),
+            name: "me".into(),
+            ..Default::default()
+        };
         a.fields.insert("login".into(), "me@x".into());
         a.secrets.insert("password".into(), "hunter2".into());
         s.save(&a).unwrap();

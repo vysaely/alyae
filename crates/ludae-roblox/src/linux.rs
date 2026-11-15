@@ -21,23 +21,48 @@ struct Mocktail {
     data: PathBuf,
 }
 
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+}
+
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into())
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/".into())
 }
 
 fn find_mocktail() -> Option<Mocktail> {
     let h = home();
-    let lib_dirs = [h.join(".local/lib/mocktail"), "/usr/lib/mocktail".into(), "/usr/local/lib/mocktail".into(), "/opt/mocktail/lib".into()];
-    let mut bins: Vec<PathBuf> = std::env::var_os("LUDAE_MOCKTAIL").map(PathBuf::from).into_iter().collect();
+    let lib_dirs = [
+        h.join(".local/lib/mocktail"),
+        "/usr/lib/mocktail".into(),
+        "/usr/local/lib/mocktail".into(),
+        "/opt/mocktail/lib".into(),
+    ];
+    let mut bins: Vec<PathBuf> = std::env::var_os("LUDAE_MOCKTAIL")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
     bins.extend(lib_dirs.iter().map(|d| d.join("mocktail")));
-    bins.extend([h.join(".local/bin/mocktail"), "/usr/bin/mocktail".into(), "/usr/local/bin/mocktail".into()]);
+    bins.extend([
+        h.join(".local/bin/mocktail"),
+        "/usr/bin/mocktail".into(),
+        "/usr/local/bin/mocktail".into(),
+    ]);
     let bin = bins.into_iter().find(|b| b.is_file())?;
     let bin = fs::canonicalize(&bin).unwrap_or(bin);
     let lib = std::iter::once(bin.parent()?.to_path_buf())
         .chain(lib_dirs)
         .find(|d| d.join("libmocktail_audio_sdl.so").exists())?;
-    let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| h.join(".local/share"));
-    Some(Mocktail { bin, lib, data: data_home.join("mocktail") })
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| h.join(".local/share"));
+    Some(Mocktail {
+        bin,
+        lib,
+        data: data_home.join("mocktail"),
+    })
 }
 
 fn mkdir(p: &Path) {
@@ -52,7 +77,11 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     }
     let tmp = path.with_extension("ludae-tmp");
     let _ = fs::remove_file(&tmp);
-    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
         .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))?;
     fs::rename(&tmp, path)
 }
@@ -69,7 +98,10 @@ fn link_dir(src: &Path, dest: &Path) {
 fn same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(x), Ok(y)) => (x.dev(), x.ino()) == (y.dev(), y.ino()) || (x.len() == y.len() && x.mtime() == y.mtime()),
+        (Ok(x), Ok(y)) => {
+            (x.dev(), x.ino()) == (y.dev(), y.ino())
+                || (x.len() == y.len() && x.mtime() == y.mtime())
+        }
         _ => false,
     }
 }
@@ -78,9 +110,14 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// derives its single-instance lock from its own path, so each account needs a path of its own.
 fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
     let name = format!("mocktail_ludae_{}", &req.id[..req.id.len().min(12)]);
-    let writable = fs::metadata(&m.lib).is_ok_and(|md| !md.permissions().readonly())
-        && Command::new("test").arg("-w").arg(&m.lib).status().is_ok_and(|s| s.success());
-    let dir = if writable { m.lib.clone() } else { data_dir.join("bin") };
+    let writable = std::ffi::CString::new(m.lib.as_os_str().as_bytes())
+        // SAFETY: access(2) with a NUL-terminated path
+        .is_ok_and(|p| unsafe { libc::access(p.as_ptr(), libc::W_OK) } == 0);
+    let dir = if writable {
+        m.lib.clone()
+    } else {
+        data_dir.join("bin")
+    };
     mkdir(&dir);
     if dir != m.lib {
         // the libraries Mocktail loads from beside itself
@@ -88,7 +125,10 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
             for e in entries.flatten() {
                 let n = e.file_name();
                 let s = n.to_string_lossy();
-                if (s.contains(".so") || s.starts_with("mocktail_")) && !s.starts_with("mocktail_acc_") && !s.starts_with("mocktail_ludae_") {
+                if (s.contains(".so") || s.starts_with("mocktail_"))
+                    && !s.starts_with("mocktail_acc_")
+                    && !s.starts_with("mocktail_ludae_")
+                {
                     let dest = dir.join(&n);
                     if fs::symlink_metadata(&dest).is_err() {
                         let _ = symlink(e.path(), dest);
@@ -101,10 +141,10 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
     if !same_file(&m.bin, &target) {
         let staging = target.with_extension("provision");
         let _ = fs::remove_file(&staging);
-        if fs::hard_link(&m.bin, &staging).is_err() {
-            if let Err(e) = fs::copy(&m.bin, &staging) {
-                fail(&format!("cannot copy Mocktail for this account: {e}"));
-            }
+        if fs::hard_link(&m.bin, &staging).is_err()
+            && let Err(e) = fs::copy(&m.bin, &staging)
+        {
+            fail(&format!("cannot copy Mocktail for this account: {e}"));
         }
         let _ = fs::set_permissions(&staging, fs::Permissions::from_mode(0o755));
         // renamed over the old one: a running instance keeps its file
@@ -117,8 +157,13 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
 
 /// Whether this account's Mocktail already runs (its program path names the account).
 fn already_running(program: &Path) -> bool {
-    let want = program.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    let Ok(procs) = fs::read_dir("/proc") else { return false };
+    let want = program
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return false;
+    };
     procs.flatten().any(|p| {
         fs::read(p.path().join("cmdline")).is_ok_and(|c| {
             let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
@@ -138,7 +183,13 @@ fn cpu_sets() -> Option<(Vec<usize>, Vec<usize>)> {
     let mut cores: Vec<((u32, u32), Vec<usize>)> = Vec::new();
     for cpu in 0..n {
         let t = format!("/sys/devices/system/cpu/cpu{cpu}/topology");
-        let read = |f: &str| fs::read_to_string(format!("{t}/{f}")).ok()?.trim().parse::<u32>().ok();
+        let read = |f: &str| {
+            fs::read_to_string(format!("{t}/{f}"))
+                .ok()?
+                .trim()
+                .parse::<u32>()
+                .ok()
+        };
         let key = (read("physical_package_id")?, read("core_id")?);
         match cores.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(cpu),
@@ -149,7 +200,10 @@ fn cpu_sets() -> Option<(Vec<usize>, Vec<usize>)> {
         return None;
     }
     let alt_cores = ((cores.len() as f64 * 0.35) as usize).max(1);
-    let alt: Vec<usize> = cores[cores.len() - alt_cores..].iter().flat_map(|(_, v)| v.clone()).collect();
+    let alt: Vec<usize> = cores[cores.len() - alt_cores..]
+        .iter()
+        .flat_map(|(_, v)| v.clone())
+        .collect();
     let main: Vec<usize> = (0..n).filter(|c| !alt.contains(c)).collect();
     Some((main, alt))
 }
@@ -255,9 +309,20 @@ fn engine_settings(profile: &Path, main: bool, fps_cap: u32) {
             out += &format!("{indent}<int name=\"FramerateCap\">{fps_cap}</int>\n");
         } else if !main && t.starts_with("<float name=\"MasterVolume\">") {
             out += &format!("{indent}<float name=\"MasterVolume\">0</float>\n");
-        } else if !main && (t.contains("name=\"GraphicsQualityLevel\"") || t.contains("name=\"SavedQualityLevel\"")) {
-            let tag = if t.starts_with("<token") { "token" } else { "int" };
-            let name = if t.contains("Saved") { "SavedQualityLevel" } else { "GraphicsQualityLevel" };
+        } else if !main
+            && (t.contains("name=\"GraphicsQualityLevel\"")
+                || t.contains("name=\"SavedQualityLevel\""))
+        {
+            let tag = if t.starts_with("<token") {
+                "token"
+            } else {
+                "int"
+            };
+            let name = if t.contains("Saved") {
+                "SavedQualityLevel"
+            } else {
+                "GraphicsQualityLevel"
+            };
             out += &format!("{indent}<{tag} name=\"{name}\">1</{tag}>\n");
         } else {
             out += line;
@@ -265,7 +330,11 @@ fn engine_settings(profile: &Path, main: bool, fps_cap: u32) {
         }
     }
     if !has_cap {
-        out = out.replacen("<Properties>", &format!("<Properties>\n\t\t\t<int name=\"FramerateCap\">{fps_cap}</int>"), 1);
+        out = out.replacen(
+            "<Properties>",
+            &format!("<Properties>\n\t\t\t<int name=\"FramerateCap\">{fps_cap}</int>"),
+            1,
+        );
     }
     if out.trim_end() != text.trim_end() {
         let _ = fs::write(&file, out);
@@ -282,8 +351,13 @@ fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
     data_dir.join("profiles").join(&req.id)
 }
 
-fn prepare_profile(m: &Mocktail, req: &Request, data_dir: &Path, profile: &Path, main: bool, fps_limit: u32) {
-    for sub in ["data/mocktail", "config/mocktail", "cache/mocktail", "state/mocktail"] {
+fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fps_limit: u32) {
+    for sub in [
+        "data/mocktail",
+        "config/mocktail",
+        "cache/mocktail",
+        "state/mocktail",
+    ] {
         mkdir(&profile.join(sub));
     }
     // the Roblox client (payloads) is shared; the chosen version is copied
@@ -298,7 +372,10 @@ fn prepare_profile(m: &Mocktail, req: &Request, data_dir: &Path, profile: &Path,
     // its own, as Roblox deletes files its own index evicts
     let shared_assets = data_dir.join("shared_rbx_storage");
     mkdir(&shared_assets);
-    for dest in [profile.join("data/mocktail/rbx-storage"), profile.join("data/rbx-storage")] {
+    for dest in [
+        profile.join("data/mocktail/rbx-storage"),
+        profile.join("data/rbx-storage"),
+    ] {
         let is_link = fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink());
         if main && is_link {
             let _ = fs::remove_file(&dest);
@@ -326,21 +403,28 @@ fn prepare_profile(m: &Mocktail, req: &Request, data_dir: &Path, profile: &Path,
         "windowed": { "has_position": false, "height": h, "width": w },
     })
     .to_string();
-    for c in [profile.join("config/mocktail/config.yaml"), profile.join("config/config.yaml")] {
-        let _ = write_private(&c, &config);
-    }
-    for s in [profile.join("state/window-state.json"), profile.join("state/mocktail/window-state.json")] {
-        let _ = write_private(&s, &window);
+    for (file, text) in [
+        (profile.join("config/mocktail/config.yaml"), &config),
+        (profile.join("config/config.yaml"), &config),
+        (profile.join("state/window-state.json"), &window),
+        (profile.join("state/mocktail/window-state.json"), &window),
+    ] {
+        if let Err(e) = write_private(&file, text) {
+            fail(&format!("cannot write {}: {e}", file.display()));
+        }
     }
     // written ahead so concurrent first starts do not race on it inside Mocktail
     let platform = r#"{"profile_revision":"device-v1-pc-windows-11-t0-m1-k1","schema_version":1}"#;
-    for d in [profile.join("data/mocktail/android/data"), profile.join("data/android/data"), profile.join("data")] {
+    for d in [
+        profile.join("data/mocktail/android/data"),
+        profile.join("data/android/data"),
+        profile.join("data"),
+    ] {
         let f = d.join(".mocktail-platform-profile.json");
         if !f.exists() {
             let _ = write_private(&f, platform);
         }
     }
-    let _ = req;
 }
 
 fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> Vec<PathBuf> {
@@ -348,7 +432,10 @@ fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> Vec<Path
     if let Some(t) = tracker {
         line += &format!("RBXEventTrackerV2={t}\n");
     }
-    let paths = vec![profile.join("roblox.cookie"), profile.join("data/mocktail/roblox.cookie")];
+    let paths = vec![
+        profile.join("roblox.cookie"),
+        profile.join("data/mocktail/roblox.cookie"),
+    ];
     for p in &paths {
         if let Err(e) = write_private(p, &line) {
             fail(&format!("cannot write the sign-in file: {e}"));
@@ -366,7 +453,15 @@ fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
     mkdir(&dir);
     if let Some(h) = host {
         let wl = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
-        for name in ["bus", "systemd", "pulse", "pipewire-0", "pipewire-0-manager", "wayland-0", wl.as_str()] {
+        for name in [
+            "bus",
+            "systemd",
+            "pulse",
+            "pipewire-0",
+            "pipewire-0-manager",
+            "wayland-0",
+            wl.as_str(),
+        ] {
             let (src, dest) = (h.join(name), dir.join(name));
             if fs::symlink_metadata(&dest).is_ok() && !dest.exists() {
                 let _ = fs::remove_file(&dest);
@@ -380,10 +475,15 @@ fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
 }
 
 fn tail(path: &Path, from: u64) -> String {
-    let text = fs::read(path).map(|b| String::from_utf8_lossy(&b[(from as usize).min(b.len())..]).into_owned()).unwrap_or_default();
+    let text = fs::read(path)
+        .map(|b| String::from_utf8_lossy(&b[(from as usize).min(b.len())..]).into_owned())
+        .unwrap_or_default();
     text.lines()
         .rev()
-        .find(|l| { let l = l.to_lowercase(); l.contains("error") || l.contains("failed") || l.contains("fatal") })
+        .find(|l| {
+            let l = l.to_lowercase();
+            l.contains("error") || l.contains("failed") || l.contains("fatal")
+        })
         .map(|l| l.trim().chars().take(200).collect())
         .unwrap_or_default()
 }
@@ -394,7 +494,9 @@ pub fn play(req: &Request) {
         fail("no cookie: paste the .ROBLOSECURITY value into Cookie");
     }
     let Some(m) = find_mocktail() else {
-        fail("Mocktail is not installed (looked in ~/.local/lib/mocktail, /usr/lib/mocktail and PATH)");
+        fail(
+            "Mocktail is not installed (looked in ~/.local/lib/mocktail, /usr/lib/mocktail and PATH)",
+        );
     };
     let data_dir = &req.data_dir;
     let main = req.is_main();
@@ -408,7 +510,13 @@ pub fn play(req: &Request) {
     let profile = profile_dir(req, data_dir);
     mkdir(&profile);
     status("starting");
-    prepare_profile(&m, req, data_dir, &profile, main, if fps_limit == 10000 { 1000 } else { fps_limit });
+    prepare_profile(
+        &m,
+        data_dir,
+        &profile,
+        main,
+        if fps_limit == 10000 { 1000 } else { fps_limit },
+    );
     engine_settings(&profile, main, fps_limit);
     let tracker_file = profile.join("browser_tracker");
     let tracker = fs::read_to_string(&tracker_file)
@@ -423,7 +531,11 @@ pub fn play(req: &Request) {
     let cookie_files = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
-    let (w, h) = if main { ("1920", "1080") } else { ("800", "600") };
+    let (w, h) = if main {
+        ("1920", "1080")
+    } else {
+        ("800", "600")
+    };
     let mut args: Vec<String> = vec!["--windowed".into(), "--graphics".into(), "opengl".into()];
     if let Some(u) = uri(&join) {
         args.push("--launch-uri".into());
@@ -452,19 +564,38 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_WIN_WIDTH".into(), w.into()),
         ("MOCKTAIL_WIN_HEIGHT".into(), h.into()),
         ("MOCKTAIL_WIN_HIGH_DPI".into(), "0".into()),
-        ("MOCKTAIL_GRAPHICS_QUALITY".into(), if main { "manual".into() } else { "1".into() }),
+        (
+            "MOCKTAIL_GRAPHICS_QUALITY".into(),
+            if main { "manual".into() } else { "1".into() },
+        ),
         ("vblank_mode".into(), "0".into()),
         ("MOCKTAIL_FRAME_RATE_LIMIT".into(), fps_limit.to_string()),
         ("MOCKTAIL_VSYNC".into(), "off".into()),
         ("SDL_VIDEO_WAYLAND_ALLOW_TEARING".into(), "1".into()),
         ("MOCKTAIL_SWAPCHAIN_IMAGES".into(), "3".into()),
         ("MOCKTAIL_MULTITHREADED_RENDERING".into(), "1".into()),
-        ("MOCKTAIL_PHYSICS_WORKER_MODE".into(), if main { "throughput".into() } else { "auto".into() }),
-        ("MOCKTAIL_F11_FULLSCREEN".into(), if main { "1".into() } else { "0".into() }),
-        ("MOCKTAIL_FULLSCREEN_READINESS".into(), if main { "1".into() } else { "0".into() }),
+        (
+            "MOCKTAIL_PHYSICS_WORKER_MODE".into(),
+            if main {
+                "throughput".into()
+            } else {
+                "auto".into()
+            },
+        ),
+        (
+            "MOCKTAIL_F11_FULLSCREEN".into(),
+            if main { "1".into() } else { "0".into() },
+        ),
+        (
+            "MOCKTAIL_FULLSCREEN_READINESS".into(),
+            if main { "1".into() } else { "0".into() },
+        ),
     ];
     let flags = fast_flags(main).to_string();
-    env.push(("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON".into(), flags.clone()));
+    env.push((
+        "MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON".into(),
+        flags.clone(),
+    ));
     env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
     if main {
         // the desktop's hardware cursor instead of one drawn in the frame (AEAM's Mocktail build)
@@ -478,10 +609,22 @@ pub fn play(req: &Request) {
     let meta = m.data.join("metadata");
     if meta.is_dir() {
         for (k, f) in [
-            ("MOCKTAIL_COMPATIBILITY_MANIFEST", "roblox_compatibility.json"),
-            ("MOCKTAIL_BOOTSTRAP_SOURCES_PATH", "roblox_bootstrap_sources.json"),
-            ("MOCKTAIL_HOST_ABI_PROFILE_FILE", "roblox_host_abi_reference.json"),
-            ("MOCKTAIL_UPDATE_SIGNING_TRUST_PATH", "roblox_signing_certificates.json"),
+            (
+                "MOCKTAIL_COMPATIBILITY_MANIFEST",
+                "roblox_compatibility.json",
+            ),
+            (
+                "MOCKTAIL_BOOTSTRAP_SOURCES_PATH",
+                "roblox_bootstrap_sources.json",
+            ),
+            (
+                "MOCKTAIL_HOST_ABI_PROFILE_FILE",
+                "roblox_host_abi_reference.json",
+            ),
+            (
+                "MOCKTAIL_UPDATE_SIGNING_TRUST_PATH",
+                "roblox_signing_certificates.json",
+            ),
         ] {
             env.push((k.into(), meta.join(f).to_string_lossy().into_owned()));
         }
@@ -496,12 +639,25 @@ pub fn play(req: &Request) {
     env.push(("LD_LIBRARY_PATH".into(), ld.join(":")));
 
     let sets = cpu_sets();
-    let mut cmd = if !main && Command::new("systemd-run").arg("--version").stdout(Stdio::null()).status().is_ok() {
+    let mut cmd = if !main && on_path("systemd-run") {
         // alts in a low-weight scope: the desktop and the main come first
         let mut c = Command::new("systemd-run");
-        c.args(["--user", "--scope", "--quiet", "-pMemoryHigh=900M", "-pCPUWeight=1", "-pIOWeight=1"]);
+        c.args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "-pMemoryHigh=900M",
+            "-pCPUWeight=1",
+            "-pIOWeight=1",
+        ]);
         if let Some((_, alt)) = &sets {
-            c.arg(format!("-pAllowedCPUs={}", alt.iter().map(usize::to_string).collect::<Vec<_>>().join(",")));
+            c.arg(format!(
+                "-pAllowedCPUs={}",
+                alt.iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         c.arg("--").arg(&program);
         c
@@ -509,7 +665,10 @@ pub fn play(req: &Request) {
         Command::new(&program)
     };
     cmd.args(&args);
-    for key in std::env::vars().map(|(k, _)| k).filter(|k| k.starts_with("MOCKTAIL_")) {
+    for key in std::env::vars()
+        .map(|(k, _)| k)
+        .filter(|k| k.starts_with("MOCKTAIL_"))
+    {
         cmd.env_remove(key);
     }
     cmd.envs(env);
@@ -517,10 +676,17 @@ pub fn play(req: &Request) {
     if fs::metadata(&log_path).is_ok_and(|m| m.len() > 8 << 20) {
         let _ = fs::rename(&log_path, profile.join("ludae.log.1"));
     }
-    let log = fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log_path)
         .unwrap_or_else(|e| fail(&format!("cannot open {}: {e}", log_path.display())));
     let log_start = log.metadata().map_or(0, |m| m.len());
-    let _ = std::io::Write::write_all(&mut &log, format!("\n=== Ludae launch {} ===\n", std::process::id()).as_bytes());
+    let _ = std::io::Write::write_all(
+        &mut &log,
+        format!("\n=== Ludae launch {} ===\n", std::process::id()).as_bytes(),
+    );
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone().unwrap_or_else(|e| fail(&e.to_string())))
         .stderr(log);
@@ -534,7 +700,10 @@ pub fn play(req: &Request) {
             }
             if !main {
                 // no realtime or raised priority for alts, and a low share of the CPU
-                let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                let zero = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
                 libc::setrlimit(libc::RLIMIT_RTPRIO, &zero);
                 libc::setrlimit(libc::RLIMIT_NICE, &zero);
                 libc::nice(15);
@@ -543,7 +712,9 @@ pub fn play(req: &Request) {
         });
     }
     let started = Instant::now();
-    let mut child = cmd.spawn().unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
     let pid = child.id() as i32;
     say(json!({ "status": "running" }));
 
@@ -584,7 +755,14 @@ pub fn play(req: &Request) {
     }
     if !code.success() && started.elapsed() < Duration::from_secs(20) {
         let why = tail(&log_path, log_start);
-        fail(&if why.is_empty() { format!("Mocktail stopped right away ({code}); see {}", log_path.display()) } else { why });
+        fail(&if why.is_empty() {
+            format!(
+                "Mocktail stopped right away ({code}); see {}",
+                log_path.display()
+            )
+        } else {
+            why
+        });
     }
 }
 
@@ -594,11 +772,35 @@ mod tests {
 
     #[test]
     fn launch_uris() {
-        let j = Join { place: Some(1), job: Some("j".into()), link_code: None, follow: None };
-        assert_eq!(uri(&j).as_deref(), Some("roblox://experiences/start?placeId=1&gameInstanceId=j"));
-        let j = Join { place: None, job: None, link_code: None, follow: Some(9) };
-        assert_eq!(uri(&j).as_deref(), Some("roblox://experiences/start?userId=9"));
-        assert!(uri(&Join { place: None, job: None, link_code: None, follow: None }).is_none());
+        let j = Join {
+            place: Some(1),
+            job: Some("j".into()),
+            link_code: None,
+            follow: None,
+        };
+        assert_eq!(
+            uri(&j).as_deref(),
+            Some("roblox://experiences/start?placeId=1&gameInstanceId=j")
+        );
+        let j = Join {
+            place: None,
+            job: None,
+            link_code: None,
+            follow: Some(9),
+        };
+        assert_eq!(
+            uri(&j).as_deref(),
+            Some("roblox://experiences/start?userId=9")
+        );
+        assert!(
+            uri(&Join {
+                place: None,
+                job: None,
+                link_code: None,
+                follow: None
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -606,7 +808,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ludae-rbx-{}", std::process::id()));
         engine_settings(&dir, false, 6);
         let f = dir.join("data/files/appData/GlobalBasicSettings_13.xml");
-        assert!(fs::read_to_string(&f).unwrap().contains("<int name=\"FramerateCap\">6</int>"));
+        assert!(
+            fs::read_to_string(&f)
+                .unwrap()
+                .contains("<int name=\"FramerateCap\">6</int>")
+        );
         engine_settings(&dir, false, 30);
         let t = fs::read_to_string(&f).unwrap();
         assert!(t.contains("<int name=\"FramerateCap\">30</int>") && !t.contains(">6<"));

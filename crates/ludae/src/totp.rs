@@ -13,7 +13,10 @@ fn secret_of(input: &str) -> String {
     } else {
         s
     };
-    s.chars().filter(|c| !c.is_whitespace() && *c != '=' && *c != '-').collect::<String>().to_ascii_uppercase()
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '=' && *c != '-')
+        .collect::<String>()
+        .to_ascii_uppercase()
 }
 
 fn base32(s: &str) -> Option<Vec<u8>> {

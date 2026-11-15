@@ -3,9 +3,9 @@
 use crate::look;
 use crate::module::{self, Event, Module, Running};
 use crate::store::{self, Account, Store, Values};
-use crate::totp;
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
+use ludae_otp as totp;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -315,7 +315,10 @@ impl App {
             );
         }
         let mut started = 0;
-        for id in ids {
+        for (index, id) in ids.into_iter().enumerate() {
+            // the account's place in the batch: helpers space requests out by it
+            let mut inputs = inputs.clone();
+            inputs.insert("index".into(), index.to_string());
             if action.runs && self.running.contains_key(&id) {
                 continue;
             }

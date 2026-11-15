@@ -28,6 +28,8 @@ pub struct App {
     search: String,
     /// the GROUP picker: None is all groups
     group_filter: Option<String>,
+    /// the column the table is sorted by (and whether reversed); None: groups, then own order
+    sort_by: Option<(Sort, bool)>,
     shown_secrets: HashSet<(String, String)>,
     /// the action inputs (place, server ...) per game
     inputs: HashMap<String, Values>,
@@ -71,6 +73,7 @@ impl App {
             draft_new: false,
             search: String::new(),
             group_filter: None,
+            sort_by: None,
             shown_secrets: HashSet::new(),
             inputs: HashMap::new(),
             running: HashMap::new(),
@@ -513,7 +516,59 @@ impl App {
         shown.sort_by(|a, b| {
             (a.group.is_empty(), &a.group, a.sort).cmp(&(b.group.is_empty(), &b.group, b.sort))
         });
+        if let Some((by, reverse)) = self.sort_by {
+            let lower = |s: &str| s.to_lowercase();
+            let user = |a: &Account| lower(&self.title_value(m, a));
+            // empty values last, whichever way the column runs
+            let key = |a: &Account| -> (bool, String, String) {
+                let v = match by {
+                    Sort::User => user(a),
+                    Sort::Alias => lower(&a.name),
+                    Sort::Group => lower(&a.group),
+                    Sort::Mode => self.mode(m, a),
+                    Sort::Notes => lower(a.notes.lines().next().unwrap_or("")),
+                };
+                (v.is_empty(), v, user(a))
+            };
+            shown.sort_by(|a, b| {
+                let (ka, kb) = (key(a), key(b));
+                let o = ka.1.cmp(&kb.1).then(ka.2.cmp(&kb.2));
+                ka.0.cmp(&kb.0).then(if reverse { o.reverse() } else { o })
+            });
+        }
         shown
+    }
+
+    /// The account's name in the first column: its title field (the username), else its title.
+    fn title_value(&self, m: &Module, a: &Account) -> String {
+        let v = a.value(&m.title_field);
+        if v.is_empty() {
+            self.title(a)
+        } else {
+            v.to_string()
+        }
+    }
+
+    /// A column heading that sorts by `by`: first click A→Z, second Z→A, third back to no sort.
+    fn sort_heading(&mut self, ui: &mut egui::Ui, label: &str, by: Sort) {
+        let arrow = match self.sort_by {
+            Some((b, false)) if b == by => " ▲",
+            Some((b, true)) if b == by => " ▼",
+            _ => "",
+        };
+        let resp = ui.add(
+            egui::Label::new(look::tag(&format!("{label}{arrow}"))).sense(egui::Sense::click()),
+        );
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            self.sort_by = match self.sort_by {
+                Some((b, false)) if b == by => Some((by, true)),
+                Some((b, true)) if b == by => None,
+                _ => Some((by, false)),
+            };
+        }
     }
 
     fn groups(&self, game: &str) -> Vec<String> {
@@ -664,8 +719,7 @@ impl App {
             .visible(m)
             .iter()
             .map(|a| {
-                let user = a.value(&m.title_field).to_string();
-                let user = if user.is_empty() { self.title(a) } else { user };
+                let user = self.title_value(m, a);
                 (
                     a.id.clone(),
                     user,
@@ -718,19 +772,18 @@ impl App {
             .column(Column::remainder().at_least(60.0).clip(true))
             .auto_shrink(false)
             .header(20.0, |mut h| {
-                let mut heads = vec![first_label.as_str()];
+                h.col(|ui| {
+                    self.sort_heading(ui, &first_label, Sort::User);
+                    ui.label(look::tag("·"));
+                    self.sort_heading(ui, "Alias", Sort::Alias);
+                });
                 if show_group {
-                    heads.push("Group");
+                    h.col(|ui| self.sort_heading(ui, "Group", Sort::Group));
                 }
                 if has_mode {
-                    heads.push("Mode");
+                    h.col(|ui| self.sort_heading(ui, "Mode", Sort::Mode));
                 }
-                heads.push("Description");
-                for t in heads {
-                    h.col(|ui| {
-                        ui.label(look::tag(t));
-                    });
-                }
+                h.col(|ui| self.sort_heading(ui, "Description", Sort::Notes));
             })
             .body(|body| {
                 body.rows(22.0, rows.len(), |mut row| {
@@ -1360,6 +1413,15 @@ impl App {
             self.selected.clear();
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Sort {
+    User,
+    Alias,
+    Group,
+    Mode,
+    Notes,
 }
 
 enum MenuChoice {

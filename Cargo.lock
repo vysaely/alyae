@@ -1532,7 +1532,6 @@ name = "ludae-roblox"
 version = "0.1.0"
 dependencies = [
  "libc",
- "serde",
  "serde_json",
  "ureq",
  "windows-sys 0.61.2",

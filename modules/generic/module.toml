@@ -29,4 +29,5 @@ hint = "e.g. steam steam://rungameid/1422450"
 [[action]]
 id = "play"
 label = "Launch"
+primary = true
 command = "{launch}"

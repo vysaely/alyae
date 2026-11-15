@@ -94,23 +94,18 @@ pub fn play(req: &Request) {
         .unwrap_or("0")
         .to_string();
     let base = "https://www.roblox.com/Game/PlaceLauncher.ashx";
-    let launcher = match (j.follow, j.place) {
-        (Some(user), _) => Some(format!(
-            "{base}?request=RequestFollowUser&browserTrackerId={browser}&userId={user}"
-        )),
-        (None, Some(p)) => Some(match (&j.job, &j.link_code) {
-            (Some(job), _) => format!(
-                "{base}?request=RequestGameJob&browserTrackerId={browser}&placeId={p}&gameId={job}&isPlayTogetherGame=false"
-            ),
-            (None, Some(code)) => format!(
-                "{base}?request=RequestPrivateGame&browserTrackerId={browser}&placeId={p}&linkCode={code}"
-            ),
-            (None, None) => format!(
-                "{base}?request=RequestGame&browserTrackerId={browser}&placeId={p}&isPlayTogetherGame=false"
-            ),
-        }),
-        (None, None) => None,
-    };
+    // a follow arrives as the followed user's place and server
+    let launcher = j.place.map(|p| match (&j.job, &j.link_code) {
+        (Some(job), _) => format!(
+            "{base}?request=RequestGameJob&browserTrackerId={browser}&placeId={p}&gameId={job}&isPlayTogetherGame=false"
+        ),
+        (None, Some(code)) => format!(
+            "{base}?request=RequestPrivateGame&browserTrackerId={browser}&placeId={p}&linkCode={code}"
+        ),
+        (None, None) => format!(
+            "{base}?request=RequestGame&browserTrackerId={browser}&placeId={p}&isPlayTogetherGame=false"
+        ),
+    });
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());

@@ -219,19 +219,14 @@ fn set_affinity(cpus: &[usize]) {
     }
 }
 
+/// The link Mocktail joins with: a place, and a server in it (job ID, or a private server's link
+/// code). Follow arrives here already turned into the followed user's place and server.
 fn uri(j: &Join) -> Option<String> {
-    let mut u = match (j.follow, j.place) {
-        (Some(user), Some(p)) => format!("roblox://experiences/start?placeId={p}&userId={user}"),
-        (Some(user), None) => format!("roblox://experiences/start?userId={user}"),
-        (None, Some(p)) => format!("roblox://experiences/start?placeId={p}"),
-        (None, None) => return None,
-    };
-    if j.follow.is_none() {
-        if let Some(job) = &j.job {
-            u += &format!("&gameInstanceId={job}");
-        } else if let Some(code) = &j.link_code {
-            u += &format!("&linkCode={code}");
-        }
+    let mut u = format!("roblox://experiences/start?placeId={}", j.place?);
+    if let Some(job) = &j.job {
+        u += &format!("&gameInstanceId={job}");
+    } else if let Some(code) = &j.link_code {
+        u += &format!("&linkCode={code}");
     }
     Some(u)
 }
@@ -301,36 +296,18 @@ pub fn graphics(req: &Request) {
             fail("close this account's Roblox first: it rewrites its settings when it closes");
         }
     }
-    let mut props = Vec::new();
-    match req.input("quality") {
-        "" | "keep" => {}
-        q => match q.parse::<u32>() {
-            Ok(n @ 1..=10) => props.extend(settings_xml::quality(n)),
-            _ => fail("Graphics level: 1 to 10"),
-        },
-    }
-    match req.input("sensitivity") {
-        "" | "keep" => {}
-        s => match s.replace(',', ".").parse::<f32>() {
-            Ok(v) if (0.0..=10.0).contains(&v) => props.extend(settings_xml::sensitivity(v)),
-            _ => fail("Sensitivity: a number from 0 to 10, as in Roblox's menu"),
-        },
-    }
-    match req.input("volume") {
-        "" | "keep" => {}
-        v => match v.parse::<u32>() {
-            Ok(n @ 0..=10) => {
-                props.push(settings_xml::prop("float", "MasterVolume", n as f32 / 10.0))
-            }
-            _ => fail("Volume: 0 to 10"),
-        },
-    }
+    let (props, fps) =
+        settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
     if props.is_empty() {
         fail("nothing to change: every value is \"keep\"");
     }
+    // the launch sets FramerateCap from the account's FPS cap: keep the two in step
+    if let Some(f) = fps {
+        say(json!({ "set": { "fps": f.to_string() } }));
+    }
     let profile = profile_dir(req, &req.data_dir);
     match settings_xml::apply(&settings_file(&profile), &props) {
-        Ok(()) => status("graphics set"),
+        Ok(()) => status(&format!("{} settings set", props.len())),
         Err(e) => fail(&format!("cannot write Roblox's settings: {e}")),
     }
 }
@@ -781,16 +758,25 @@ mod tests {
             uri(&j).as_deref(),
             Some("roblox://experiences/start?placeId=1&gameInstanceId=j")
         );
+        // a follow arrives with the user's place and server; without a place there is no link
+        // (Mocktail refuses one: "requires a positive placeId")
+        let j = Join {
+            place: Some(2),
+            job: Some("s".into()),
+            link_code: None,
+            follow: Some(9),
+        };
+        assert_eq!(
+            uri(&j).as_deref(),
+            Some("roblox://experiences/start?placeId=2&gameInstanceId=s")
+        );
         let j = Join {
             place: None,
             job: None,
             link_code: None,
             follow: Some(9),
         };
-        assert_eq!(
-            uri(&j).as_deref(),
-            Some("roblox://experiences/start?userId=9")
-        );
+        assert!(uri(&j).is_none());
         assert!(
             uri(&Join {
                 place: None,

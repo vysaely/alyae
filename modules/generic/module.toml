@@ -1,0 +1,32 @@
+# Any game: what to remember about an account, and a command to start it.
+id = "generic"
+name = "Any game"
+description = "Logins, passwords and 2FA for any game, with a launch command"
+title_field = "login"
+
+[[field]]
+key = "login"
+label = "Login"
+hint = "username or email"
+
+[[field]]
+key = "password"
+label = "Password"
+secret = true
+
+[[field]]
+key = "totp"
+label = "2FA"
+kind = "totp"
+secret = true
+hint = "base32 secret or otpauth:// link"
+
+[[field]]
+key = "launch"
+label = "Launch command"
+hint = "e.g. steam steam://rungameid/1422450"
+
+[[action]]
+id = "play"
+label = "Launch"
+command = "{launch}"

@@ -1,0 +1,71 @@
+# Roblox on Windows, through the official client.
+id = "roblox"
+name = "Roblox"
+platform = "windows"
+description = "Several accounts at once, join servers, 2FA"
+helper = "ludae-roblox"
+title_field = "username"
+
+[[field]]
+key = "username"
+label = "Username"
+hint = "filled in by Refresh"
+
+[[field]]
+key = "user_id"
+label = "User ID"
+hint = "filled in by Refresh"
+
+[[field]]
+key = "cookie"
+label = "Cookie"
+secret = true
+hint = ".ROBLOSECURITY value"
+
+[[field]]
+key = "password"
+label = "Password"
+secret = true
+
+[[field]]
+key = "totp"
+label = "2FA"
+kind = "totp"
+secret = true
+hint = "base32 secret or otpauth:// link"
+
+[[field]]
+key = "role"
+label = "Role"
+kind = "choice"
+choices = ["alt", "main"]
+hint = "main: full FPS and quality; alt: small, muted, low FPS"
+
+[[field]]
+key = "fps"
+label = "FPS cap"
+hint = "empty: 330 for a main, 6 for an alt; 0: no cap"
+
+[[action]]
+id = "play"
+label = "Play"
+runs = true
+
+[[action.input]]
+key = "place"
+label = "Place"
+hint = "place ID or game link (empty: Roblox home)"
+
+[[action.input]]
+key = "server"
+label = "Server"
+hint = "job ID or private server link"
+
+[[action.input]]
+key = "follow"
+label = "Follow"
+hint = "username or user ID to join"
+
+[[action]]
+id = "check"
+label = "Refresh"

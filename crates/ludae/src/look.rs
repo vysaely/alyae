@@ -1,7 +1,19 @@
 //! Colours from the desktop: Infynitae's theme when it runs (`LOOK_*` from
-//! `infynitae-edge-apps --print-theme`), else egui's dark or light look.
+//! `infynitae-edge-apps --print-theme`), else egui's dark look. The layout follows AEAM.
 
-use eframe::egui::{self, Color32};
+use eframe::egui::{self, Color32, FontId, RichText, Stroke};
+use std::sync::OnceLock;
+
+#[derive(Clone, Copy)]
+pub struct Colors {
+    pub card: Color32,
+    pub edge: Color32,
+    pub text: Color32,
+    pub muted: Color32,
+    pub accent: Color32,
+}
+
+static COLORS: OnceLock<Colors> = OnceLock::new();
 
 fn hex(s: &str) -> Option<Color32> {
     let s = s.trim().trim_matches('"').strip_prefix('#')?;
@@ -9,43 +21,75 @@ fn hex(s: &str) -> Option<Color32> {
     Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-fn infynitae() -> Option<std::collections::HashMap<String, Color32>> {
+fn infynitae() -> Option<Colors> {
     if cfg!(windows) {
         return None;
     }
     let out = std::process::Command::new("infynitae-edge-apps").arg("--print-theme").output().ok()?;
-    let map: std::collections::HashMap<String, Color32> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.split_once('='))
-        .filter_map(|(k, v)| Some((k.strip_prefix("LOOK_")?.to_string(), hex(v)?)))
-        .collect();
-    (!map.is_empty()).then_some(map)
+    let text = String::from_utf8_lossy(&out.stdout);
+    let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("LOOK_{k}="))).and_then(hex);
+    let (card, text_c, accent) = (get("CARD")?, get("TEXT")?, get("ACCENT")?);
+    Some(Colors {
+        card,
+        edge: get("EDGE").unwrap_or(card.lerp_to_gamma(text_c, 0.2)),
+        text: text_c,
+        muted: get("MUTED").unwrap_or(card.lerp_to_gamma(text_c, 0.6)),
+        accent,
+    })
 }
 
+pub fn colors() -> Colors {
+    *COLORS.get_or_init(|| {
+        infynitae().unwrap_or(Colors {
+            card: Color32::from_rgb(0x1b, 0x1b, 0x1d),
+            edge: Color32::from_rgb(0x3a, 0x3a, 0x3e),
+            text: Color32::from_rgb(0xee, 0xee, 0xf0),
+            muted: Color32::from_rgb(0xa0, 0xa0, 0xa6),
+            accent: Color32::from_rgb(0x6c, 0x9e, 0xf8),
+        })
+    })
+}
+
+pub const ONLINE: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
+
 pub fn apply(ctx: &egui::Context) {
-    let Some(t) = infynitae() else { return };
-    let (Some(&card), Some(&text), Some(&accent)) = (t.get("CARD"), t.get("TEXT"), t.get("ACCENT")) else { return };
-    let edge = t.get("EDGE").copied().unwrap_or(text.gamma_multiply(0.2));
-    let muted = t.get("MUTED").copied().unwrap_or(text.gamma_multiply(0.6));
-    let dark = card.r() as u32 + card.g() as u32 + card.b() as u32 <= 384;
+    let c = colors();
+    let dark = c.card.r() as u32 + c.card.g() as u32 + c.card.b() as u32 <= 384;
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-    let lift = |c: Color32, k: f32| c.lerp_to_gamma(text, k);
-    v.panel_fill = card;
-    v.window_fill = card;
-    v.extreme_bg_color = lift(card, 0.04);
-    v.faint_bg_color = lift(card, 0.03);
-    v.override_text_color = Some(text);
-    v.weak_text_color = Some(muted);
-    v.hyperlink_color = accent;
-    v.selection.bg_fill = accent.gamma_multiply(0.35);
-    v.selection.stroke.color = accent;
-    v.window_stroke.color = edge;
-    v.widgets.noninteractive.bg_stroke.color = edge;
-    v.widgets.inactive.weak_bg_fill = lift(card, 0.08);
-    v.widgets.inactive.bg_fill = lift(card, 0.08);
-    v.widgets.hovered.weak_bg_fill = lift(card, 0.14);
-    v.widgets.hovered.bg_fill = lift(card, 0.14);
-    v.widgets.active.weak_bg_fill = accent.gamma_multiply(0.45);
-    v.widgets.active.bg_fill = accent.gamma_multiply(0.45);
+    let lift = |k: f32| c.card.lerp_to_gamma(c.text, k);
+    v.panel_fill = c.card;
+    v.window_fill = c.card;
+    v.window_stroke = Stroke::new(1.0, c.edge);
+    v.extreme_bg_color = lift(0.04);
+    v.faint_bg_color = lift(0.025);
+    v.override_text_color = Some(c.text);
+    v.weak_text_color = Some(c.muted);
+    v.hyperlink_color = c.accent;
+    v.selection.bg_fill = c.accent.gamma_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0, c.text);
+    v.widgets.noninteractive.bg_stroke.color = c.edge;
+    for (w, k) in [(&mut v.widgets.inactive, 0.08), (&mut v.widgets.hovered, 0.14)] {
+        w.bg_fill = lift(k);
+        w.weak_bg_fill = lift(k);
+    }
+    v.widgets.active.bg_fill = c.accent.gamma_multiply(0.45);
+    v.widgets.active.weak_bg_fill = c.accent.gamma_multiply(0.45);
     ctx.set_visuals(v);
+}
+
+/// The big button (AEAM's Join Server), in the accent.
+pub fn primary(label: &str) -> egui::Button<'static> {
+    let c = colors();
+    egui::Button::new(RichText::new(label.to_string()).strong().color(c.card)).fill(c.accent)
+}
+
+/// A section title, as AEAM's "// ACTIVE ACCOUNT".
+pub fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(format!("// {}", title.to_uppercase())).color(colors().muted).font(FontId::proportional(11.0)).strong());
+}
+
+/// A small label, as AEAM's "GROUP:".
+pub fn tag(text: &str) -> RichText {
+    RichText::new(text.to_uppercase()).color(colors().muted).font(FontId::proportional(11.0)).strong()
 }

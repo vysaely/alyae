@@ -26,8 +26,8 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Ludae")
             .with_app_id("ludae")
-            .with_inner_size([860.0, 560.0])
-            .with_min_inner_size([520.0, 360.0]),
+            .with_inner_size([1000.0, 580.0])
+            .with_min_inner_size([700.0, 400.0]),
         ..Default::default()
     };
     eframe::run_native(

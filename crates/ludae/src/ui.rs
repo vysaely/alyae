@@ -1769,6 +1769,12 @@ fn bookmarks_menu(
     });
 }
 
+/// A small filled circle (drawn, not a glyph: the font has none) before a status.
+fn dot(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.5, color);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1871,10 +1877,4 @@ mod tests {
         assert_eq!(h.state().accounts[0].game, "roblox");
         let _ = std::fs::remove_dir_all(dir);
     }
-}
-
-/// A small filled circle (drawn, not a glyph: the font has none) before a status.
-fn dot(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 3.5, color);
 }

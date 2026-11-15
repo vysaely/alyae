@@ -81,11 +81,14 @@ label = "Refresh"
 id = "login"
 label = "Log in"
 
-# online status of every account, every 15 s while the game is shown
+# online status of every account, every 15 s while the window is shown and focused; the helper
+# gets only the user IDs and asks Roblox without a cookie, so no account vouches for the others
+# (adding secret = "cookie" makes each account ask about itself only, with its own cookie)
 [watch]
 action = "presence"
 every = 15
 column = "Online"
+fields = ["user_id"]
 
 [watch.colors]
 "In game" = "#3dd68c"

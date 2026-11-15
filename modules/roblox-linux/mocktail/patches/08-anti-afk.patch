@@ -1,0 +1,182 @@
+diff --git a/src/window/anti_afk.h b/src/window/anti_afk.h
+new file mode 100644
+index 0000000..fb07a65
+--- /dev/null
++++ b/src/window/anti_afk.h
+@@ -0,0 +1,48 @@
++#ifndef MOCKTAIL_WINDOW_ANTI_AFK_H_
++#define MOCKTAIL_WINDOW_ANTI_AFK_H_
++
++#include <cstdint>
++
++namespace mocktail {
++namespace window {
++
++// Roblox disconnects a player after 20 minutes without input. With
++// MOCKTAIL_ANTI_AFK_SECONDS set, the window layer nudges the pointer by one
++// pixel and back after that many seconds without keyboard or mouse input, so
++// an account left in a game stays connected. The idle clock starts at launch
++// (an account nobody touched is covered too) and pauses while a text box has
++// focus, where a nudge could disturb typing.
++class AntiAfk final {
++ public:
++  explicit AntiAfk(uint64_t interval_ns) : interval_ns_(interval_ns) {}
++
++  bool enabled() const { return interval_ns_ != 0; }
++
++  // Real keyboard or mouse input restarts the idle clock.
++  void OnInput(uint64_t now_ns) { last_input_ns_ = now_ns; }
++
++  // True when a nudge is due; the clock then restarts from `now_ns`.
++  bool Due(uint64_t now_ns, bool typing) {
++    if (!enabled()) {
++      return false;
++    }
++    if (last_input_ns_ == 0 || typing) {
++      last_input_ns_ = now_ns;
++      return false;
++    }
++    if (now_ns - last_input_ns_ < interval_ns_) {
++      return false;
++    }
++    last_input_ns_ = now_ns;
++    return true;
++  }
++
++ private:
++  uint64_t interval_ns_ = 0;
++  uint64_t last_input_ns_ = 0;
++};
++
++}  // namespace window
++}  // namespace mocktail
++
++#endif  // MOCKTAIL_WINDOW_ANTI_AFK_H_
+diff --git a/src/window/window.cc b/src/window/window.cc
+index e833919..6807fa7 100644
+--- a/src/window/window.cc
++++ b/src/window/window.cc
+@@ -34,6 +34,7 @@
+ #include "window/window_fullscreen_request_gate.h"
+ #include "window/window_fullscreen_state_sync.h"
+ #include "window/window_creation_policy.h"
++#include "window/anti_afk.h"
+ #include "window/window_pointer_capture_owner.h"
+ #include "window/window_resize_readiness_gate.h"
+ #include "window/window_state_store.h"
+@@ -2308,11 +2309,45 @@ bool PumpEvents() {
+     SDL_PumpEvents();
+     last_os_pump_ns = now_ns;
+   }
++  static AntiAfk anti_afk = [] {
++    const char* value = GetEnvNonEmpty("MOCKTAIL_ANTI_AFK_SECONDS");
++    char* end = nullptr;
++    const unsigned long long seconds =
++        value != nullptr ? std::strtoull(value, &end, 10) : 0;
++    if (value != nullptr && (end == value || *end != '\0')) {
++      fprintf(stderr, "  [input] MOCKTAIL_ANTI_AFK_SECONDS=%s ignored\n",
++              value);
++      return AntiAfk(0);
++    }
++    if (seconds != 0) {
++      fprintf(stderr, "  [input] anti-AFK after %llus without input\n",
++              seconds);
++    }
++    return AntiAfk(static_cast<uint64_t>(seconds) * 1000000000ULL);
++  }();
++  if (g_state.sdl_window != nullptr &&
++      anti_afk.Due(SDL_GetTicksNS(), g_text_input_owner != nullptr &&
++                                         g_text_input_owner->active())) {
++    SDL_Event nudge{};
++    nudge.type = SDL_EVENT_MOUSE_MOTION;
++    nudge.motion.windowID = SDL_GetWindowID(g_state.sdl_window);
++    nudge.motion.xrel = 1.0f;
++    SDL_PushEvent(&nudge);
++    nudge.motion.xrel = -1.0f;
++    SDL_PushEvent(&nudge);
++    fprintf(stderr, "  [input] anti-AFK nudge\n");
++  }
+   while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_EVENT_FIRST,
+                         SDL_EVENT_LAST) > 0) {
+     if (event.type != SDL_EVENT_MOUSE_MOTION) {
+       flush_motion();
+     }
++    if (event.type == SDL_EVENT_KEY_DOWN ||
++        event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
++        event.type == SDL_EVENT_MOUSE_WHEEL ||
++        (event.type == SDL_EVENT_MOUSE_MOTION && event.motion.which != 0)) {
++      anti_afk.OnInput(SDL_GetTicksNS());
++    }
+     if (SdlEventTraceEnabled()) {
+       fprintf(stderr, "  [window] SDL event type=%u\n", event.type);
+     }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 1f80cd2..180ebd3 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -660,6 +660,15 @@ target_link_libraries(window_text_input_owner_test PRIVATE
+ )
+ mocktail_apply_compile_options(window_text_input_owner_test)
+ 
++add_executable(anti_afk_test
++  anti_afk_test.cc
++)
++target_link_libraries(anti_afk_test PRIVATE
++  mocktail_window
++  GTest::gtest_main
++)
++mocktail_apply_compile_options(anti_afk_test)
++
+ add_executable(window_pointer_capture_owner_test
+   window_pointer_capture_owner_test.cc
+ )
+@@ -1038,6 +1047,7 @@ gtest_discover_tests(roblox_fullscreen_runtime_bridge_test)
+ gtest_discover_tests(roblox_output_device_bridge_test)
+ gtest_discover_tests(window_text_input_owner_test)
+ gtest_discover_tests(window_pointer_capture_owner_test)
++gtest_discover_tests(anti_afk_test)
+ gtest_discover_tests(roblox_text_input_jni_bridge_test)
+ gtest_discover_tests(auth_service_test)
+ gtest_discover_tests(auth_runtime_composition_test)
+diff --git a/tests/anti_afk_test.cc b/tests/anti_afk_test.cc
+new file mode 100644
+index 0000000..6cefda4
+--- /dev/null
++++ b/tests/anti_afk_test.cc
+@@ -0,0 +1,36 @@
++#include "window/anti_afk.h"
++
++#include <gtest/gtest.h>
++
++namespace mocktail::window {
++namespace {
++
++constexpr uint64_t kSecond = 1000000000ULL;
++
++TEST(AntiAfkTest, OffWithoutAnInterval) {
++  AntiAfk afk(0);
++  EXPECT_FALSE(afk.Due(1, false));
++  EXPECT_FALSE(afk.Due(3600 * kSecond, false));
++}
++
++TEST(AntiAfkTest, NudgesAnUntouchedAccountAfterTheInterval) {
++  AntiAfk afk(720 * kSecond);
++  EXPECT_FALSE(afk.Due(1 * kSecond, false));  // launch starts the clock
++  EXPECT_FALSE(afk.Due(700 * kSecond, false));
++  EXPECT_TRUE(afk.Due(722 * kSecond, false));
++  EXPECT_FALSE(afk.Due(723 * kSecond, false));  // restarted
++  EXPECT_TRUE(afk.Due(1443 * kSecond, false));
++}
++
++TEST(AntiAfkTest, InputAndTypingPostponeTheNudge) {
++  AntiAfk afk(720 * kSecond);
++  afk.Due(1 * kSecond, false);
++  afk.OnInput(600 * kSecond);
++  EXPECT_FALSE(afk.Due(1000 * kSecond, false));
++  EXPECT_FALSE(afk.Due(1400 * kSecond, true));  // typing: never nudged
++  EXPECT_FALSE(afk.Due(2000 * kSecond, false));
++  EXPECT_TRUE(afk.Due(2121 * kSecond, false));
++}
++
++}  // namespace
++}  // namespace mocktail::window

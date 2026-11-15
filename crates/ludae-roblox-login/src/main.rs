@@ -44,7 +44,8 @@ const SCRIPT: &str = r#"
     const pass = document.getElementById('login-password');
     const button = document.getElementById('login-button');
     if (!sentLogin && visible(user) && visible(pass) && button) {
-      setValue(user, window.__ludae.username);
+      if (window.__ludae.username && !user.value) setValue(user, window.__ludae.username);
+      if (!window.__ludae.password) { sentLogin = true; return; }
       setValue(pass, window.__ludae.password);
       if (!button.disabled) { sentLogin = true; button.click(); window.ipc.postMessage('sent'); }
     }

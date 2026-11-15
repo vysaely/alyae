@@ -162,10 +162,8 @@ pub fn join_from(req: &Request) -> Join {
 /// password and 2FA secret; the person solves a captcha if one shows. The new cookie is checked
 /// and saved.
 fn login(req: &Request) {
+    // without a saved password the page opens with the username in, for the person to finish
     let (user, pass) = (req.get("username"), req.get("password"));
-    if user.is_empty() || pass.is_empty() {
-        fail("Log in needs the account's username and password saved");
-    }
     let exe = std::env::current_exe()
         .ok()
         .and_then(|e| {

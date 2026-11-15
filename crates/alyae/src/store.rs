@@ -63,7 +63,7 @@ impl Store {
             .map_err(|e| e.to_string())?;
         if version > i64::from(SCHEMA_VERSION) || version < 0 {
             return Err(format!(
-                "the database is from a newer Ludae (version {version}, this one knows {SCHEMA_VERSION})"
+                "the database is from a newer Alyae (version {version}, this one knows {SCHEMA_VERSION})"
             ));
         }
         #[cfg(unix)]
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ludae-{tag}-{}", new_id()));
+        let dir = std::env::temp_dir().join(format!("alyae-{tag}-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -326,7 +326,7 @@ mod tests {
         let err = Store::open(&db_path, Vault::from_key(&[1; 32]))
             .err()
             .expect("newer version must fail");
-        assert!(err.contains("newer Ludae"), "unexpected error: {err}");
+        assert!(err.contains("newer Alyae"), "unexpected error: {err}");
         assert_eq!(user_version(&db_path), 99);
         assert!(!dir.join("t.db-wal").exists());
         let _ = std::fs::remove_dir_all(dir);
@@ -364,13 +364,10 @@ mod tests {
         );
 
         // Bad row stays in the database untouched.
-        let count: i64 = s
-            .db
-            .query_row(
-                "SELECT count(*) FROM accounts WHERE id = 'bad1'",
-                [],
-                |r| r.get(0),
-            )
+        let count: i64 =
+            s.db.query_row("SELECT count(*) FROM accounts WHERE id = 'bad1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
         let _ = std::fs::remove_dir_all(dir);

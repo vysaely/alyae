@@ -140,6 +140,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "alyae"
+version = "0.1.0"
+dependencies = [
+ "alyae-otp",
+ "crypto_secretbox",
+ "dirs 6.0.0",
+ "eframe",
+ "egui_extras",
+ "egui_kittest",
+ "getrandom 0.3.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "toml 1.2.1+spec-1.1.0",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "alyae-otp"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "sha1",
+]
+
+[[package]]
+name = "alyae-roblox"
+version = "0.1.0"
+dependencies = [
+ "alyae-otp",
+ "getrandom 0.3.4",
+ "libc",
+ "serde_json",
+ "ureq",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "alyae-roblox-login"
+version = "0.1.0"
+dependencies = [
+ "alyae-otp",
+ "serde_json",
+ "tao",
+ "wry",
+]
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2493,54 +2541,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "ludae"
-version = "0.1.0"
-dependencies = [
- "crypto_secretbox",
- "dirs 6.0.0",
- "eframe",
- "egui_extras",
- "egui_kittest",
- "getrandom 0.3.4",
- "ludae-otp",
- "rusqlite",
- "serde",
- "serde_json",
- "toml 1.2.1+spec-1.1.0",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ludae-otp"
-version = "0.1.0"
-dependencies = [
- "hmac",
- "sha1",
-]
-
-[[package]]
-name = "ludae-roblox"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
- "ludae-otp",
- "serde_json",
- "ureq",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ludae-roblox-login"
-version = "0.1.0"
-dependencies = [
- "ludae-otp",
- "serde_json",
- "tao",
- "wry",
-]
 
 [[package]]
 name = "markup5ever"

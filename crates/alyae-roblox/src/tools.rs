@@ -1,5 +1,5 @@
 //! The account tools (AEAM's batch tools): sign out everywhere, log out, change password, unblock
-//! everyone, friend requests and friends, who can join. Each runs for one account; Ludae runs it
+//! everyone, friend requests and friends, who can join. Each runs for one account; Alyae runs it
 //! for every chosen account, and `index` (the account's place in that list) spaces them out so
 //! Roblox does not see a burst.
 

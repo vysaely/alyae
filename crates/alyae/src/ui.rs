@@ -3,9 +3,9 @@
 use crate::look;
 use crate::module::{self, Event, Module, Running};
 use crate::store::{self, Account, Store, Values};
+use alyae_otp as totp;
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
-use ludae_otp as totp;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -440,7 +440,7 @@ impl eframe::App for App {
         self.poll();
         if let Some(e) = &self.fatal {
             egui::CentralPanel::default().show(ui, |ui| {
-                ui.heading("Ludae cannot open its accounts");
+                ui.heading("Alyae cannot open its accounts");
                 ui.label(e);
                 ui.label(format!("Folder: {}", self.dir.display()));
             });
@@ -773,10 +773,10 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("Open log")
-                    .on_hover_text(self.dir.join("ludae.log").display().to_string())
+                    .on_hover_text(self.dir.join("alyae.log").display().to_string())
                     .clicked()
                 {
-                    let path = self.dir.join("ludae.log");
+                    let path = self.dir.join("alyae.log");
                     let opener = if cfg!(windows) {
                         "explorer"
                     } else {
@@ -1254,10 +1254,10 @@ impl App {
         egui::Modal::new(egui::Id::unique("remove")).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.heading(format!("Remove {}?", plural(n)));
-            ui.label("Their logins and secrets are deleted from Ludae.");
+            ui.label("Their logins and secrets are deleted from Alyae.");
             if with_files {
                 ui.label(
-                    "Their game files kept by Ludae are deleted too (folders shared with AEAM stay, \
+                    "Their game files kept by Alyae are deleted too (folders shared with AEAM stay, \
                      only the saved sign-in in them goes).",
                 );
             }
@@ -1895,7 +1895,7 @@ mod tests {
     }
 
     fn window_with(game: &str, modules_dir: PathBuf) -> (Harness<'static, App>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("ludae-ui-{}", store::new_id()));
+        let dir = std::env::temp_dir().join(format!("alyae-ui-{}", store::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let s = Store::open(&dir.join("t.db"), crate::vault::Vault::from_key(&[3; 32])).unwrap();
         s.set_setting("last_game", game);
@@ -1932,7 +1932,7 @@ mod tests {
     /// A button with a confirmation opens its form; the form's button runs it, for the chosen accounts.
     #[test]
     fn form_runs_after_confirming() {
-        let mods = std::env::temp_dir().join(format!("ludae-mods-{}", store::new_id()));
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
         std::fs::create_dir_all(mods.join("t")).unwrap();
         let marker = mods.join("ran");
         std::fs::write(
@@ -2008,7 +2008,7 @@ mod tests {
 
     #[test]
     fn corrupt_account_shows_non_fatal_warning() {
-        let dir = std::env::temp_dir().join(format!("ludae-ui-bad-{}", store::new_id()));
+        let dir = std::env::temp_dir().join(format!("alyae-ui-bad-{}", store::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("t.db");
         let s = Store::open(&db_path, crate::vault::Vault::from_key(&[3; 32])).unwrap();
@@ -2042,7 +2042,11 @@ mod tests {
         assert!(h.state().fatal.is_none());
         assert_eq!(h.state().accounts.len(), 1);
         assert_eq!(h.state().accounts[0].id, "good1");
-        let (msg, bad) = h.state().message.as_ref().expect("expected warning message");
+        let (msg, bad) = h
+            .state()
+            .message
+            .as_ref()
+            .expect("expected warning message");
         assert!(*bad);
         assert!(msg.contains("bad1"), "got: {msg}");
         let _ = std::fs::remove_dir_all(dir);

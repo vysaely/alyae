@@ -1,9 +1,9 @@
-//! The few Roblox web calls Ludae needs.
+//! The few Roblox web calls Alyae needs.
 
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const UA: &str = "Ludae/0.1 (game account manager)";
+const UA: &str = "Alyae/0.1 (game account manager)";
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -194,7 +194,7 @@ fn two_step(r: &Response, s: &Session) -> Result<[(&'static str, String); 3], St
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let code = ludae_otp::code(&s.totp, now).ok_or("the saved 2FA secret is not valid")?;
+    let code = alyae_otp::code(&s.totp, now).ok_or("the saved 2FA secret is not valid")?;
     let plain = Session {
         cookie: s.cookie.clone(),
         tracker: s.tracker.clone(),

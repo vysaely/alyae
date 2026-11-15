@@ -418,7 +418,16 @@ pub fn forget(req: &Request) {
                 problems.push(format!("{}: {e}", p.display()));
             }
         }
-        None if profile.is_dir() => gone(&profile.join("data/auth/roblox.cookie")),
+        // a folder shared with AEAM: only the plain-text sign-ins a killed run can leave
+        None if profile.is_dir() => {
+            for f in [
+                "data/auth/roblox.cookie",
+                "roblox.cookie",
+                "data/mocktail/roblox.cookie",
+            ] {
+                gone(&profile.join(f));
+            }
+        }
         None => {}
     }
     if !problems.is_empty() {

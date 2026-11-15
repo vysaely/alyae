@@ -1,5 +1,6 @@
 //! Colours from the desktop: Infynitae's theme when it runs (`LOOK_*` from
-//! `infynitae-edge-apps --print-theme`), else egui's dark look. The layout follows AEAM.
+//! `infynitae-edge-apps --print-theme`), Windows' light/dark mode and accent colour on Windows,
+//! else egui's dark look. The layout follows AEAM.
 
 use eframe::egui::{self, Color32, FontId, RichText, Stroke};
 use std::sync::OnceLock;
@@ -45,10 +46,64 @@ fn infynitae() -> Option<Colors> {
     })
 }
 
+/// A DWORD under HKEY_CURRENT_USER.
+#[cfg(windows)]
+fn reg_dword(key: &str, value: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let w = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (key, value) = (w(key), w(value));
+    let mut data = 0u32;
+    let mut size = 4u32;
+    // SAFETY: NUL-terminated wide strings and a 4-byte buffer for a DWORD
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (r == 0).then_some(data)
+}
+
+/// Windows' app mode (light or dark) and accent colour.
+#[cfg(windows)]
+fn windows() -> Option<Colors> {
+    let light = reg_dword(
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "AppsUseLightTheme",
+    )
+    .is_some_and(|v| v != 0);
+    let v = if light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    // AccentColor is 0xAABBGGRR
+    let accent = reg_dword(r"Software\Microsoft\Windows\DWM", "AccentColor")
+        .map(|c| Color32::from_rgb(c as u8, (c >> 8) as u8, (c >> 16) as u8))
+        .unwrap_or(v.selection.bg_fill);
+    Some(Colors {
+        card: v.panel_fill,
+        edge: v.widgets.noninteractive.bg_stroke.color,
+        text: v.text_color(),
+        muted: v.weak_text_color(),
+        accent,
+    })
+}
+
+#[cfg(not(windows))]
+fn windows() -> Option<Colors> {
+    None
+}
+
 /// The desktop's colours, or egui's own dark look's where the desktop gives none.
 pub fn colors() -> Colors {
     *COLORS.get_or_init(|| {
-        infynitae().unwrap_or_else(|| {
+        infynitae().or_else(windows).unwrap_or_else(|| {
             let v = egui::Visuals::dark();
             Colors {
                 card: v.panel_fill,

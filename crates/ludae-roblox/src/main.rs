@@ -235,37 +235,53 @@ fn check(req: &Request) {
     }
 }
 
-/// Online status of all accounts: one request per 100, signed with the first account's cookie
-/// (Roblox shows presence its privacy settings hide only to a signed-in viewer).
+/// Online status of the accounts. Without cookies (the usual case) one cookie-less request per 100
+/// user IDs: Roblox answers it for everyone whose privacy shows their status publicly. An account
+/// sent with its own cookie asks about itself only, with that cookie, so no account's session is
+/// ever used to look up another (that would tell Roblox the accounts belong together).
 fn presence(v: &Value) {
     let accounts = v["accounts"].as_array().cloned().unwrap_or_default();
     let field = |a: &Value, k: &str| a["account"][k].as_str().unwrap_or("").trim().to_string();
-    let by_user: Vec<(u64, String)> = accounts
-        .iter()
-        .filter_map(|a| {
-            Some((
-                field(a, "user_id").parse().ok()?,
-                a["id"].as_str()?.to_string(),
-            ))
-        })
-        .collect();
-    let cookie = accounts
-        .iter()
-        .map(|a| api::clean_cookie(&field(a, "cookie")))
-        .find(|c| !c.is_empty())
-        .unwrap_or_default();
-    let ids: Vec<u64> = by_user.iter().map(|(u, _)| *u).collect();
-    match api::presence(&ids, &cookie) {
-        Ok(list) => {
-            let mut map = Map::new();
-            for (user, text) in list {
-                for (_, id) in by_user.iter().filter(|(u, _)| *u == user) {
-                    map.insert(id.clone(), json!(text));
-                }
-            }
-            say(json!({ "watch": map }));
+    let mut public: Vec<(u64, String)> = Vec::new();
+    let mut own: Vec<(u64, String, String)> = Vec::new();
+    for a in &accounts {
+        let (Ok(user), Some(id)) = (field(a, "user_id").parse::<u64>(), a["id"].as_str()) else {
+            continue;
+        };
+        let cookie = api::clean_cookie(&field(a, "cookie"));
+        if cookie.is_empty() {
+            public.push((user, id.to_string()));
+        } else {
+            own.push((user, id.to_string(), cookie));
         }
-        Err(e) => fail(&e),
+    }
+    let mut map = Map::new();
+    let mut put = |list: Vec<(u64, String)>, by_user: &[(u64, String)]| {
+        for (user, text) in list {
+            for (_, id) in by_user.iter().filter(|(u, _)| *u == user) {
+                map.insert(id.clone(), json!(text));
+            }
+        }
+    };
+    let mut errors = Vec::new();
+    if !public.is_empty() {
+        let ids: Vec<u64> = public.iter().map(|(u, _)| *u).collect();
+        match api::presence(&ids, "") {
+            Ok(list) => put(list, &public),
+            Err(e) => errors.push(e),
+        }
+    }
+    for (user, id, cookie) in own {
+        match api::presence(&[user], &cookie) {
+            Ok(list) => put(list, &[(user, id)]),
+            Err(e) => errors.push(e),
+        }
+    }
+    if !map.is_empty() || errors.is_empty() {
+        say(json!({ "watch": map }));
+    }
+    if let Some(e) = errors.first() {
+        fail(e);
     }
 }
 

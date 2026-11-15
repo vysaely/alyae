@@ -330,6 +330,8 @@ fn main() {
         "graphics" => linux::graphics(&req),
         #[cfg(target_os = "linux")]
         "reset" => linux::reset(&req),
+        #[cfg(target_os = "linux")]
+        "forget" => linux::forget(&req),
         "signout_all" | "logout" | "change_password" | "unblock_all" | "friends" | "privacy" => {
             tools::run(&action, &req)
         }

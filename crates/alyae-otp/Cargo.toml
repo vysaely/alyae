@@ -1,5 +1,5 @@
 [package]
-name = "ludae-otp"
+name = "alyae-otp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

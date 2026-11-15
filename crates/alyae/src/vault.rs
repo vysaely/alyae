@@ -78,7 +78,7 @@ fn create_key(path: &Path) -> Result<Vec<u8>, String> {
                 .map_err(|e| e.to_string())?;
             Ok(key)
         }
-        // another Ludae started at the same moment and made it first: use theirs
+        // another Alyae started at the same moment and made it first: use theirs
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             fs::read(path).map_err(|e| e.to_string())
         }

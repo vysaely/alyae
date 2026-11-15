@@ -3,7 +3,7 @@ id = "roblox"
 name = "Roblox Linux"
 platform = "linux"
 description = "Several accounts at once, join servers, 2FA"
-helper = "ludae-roblox"
+helper = "alyae-roblox"
 title_field = "username"
 # removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
 # AEAM stays; only Mocktail's saved sign-in in it goes)
@@ -214,7 +214,7 @@ confirm = "Every player these accounts blocked is unblocked."
 [[action]]
 id = "signout_all"
 label = "Sign out everywhere"
-confirm = "Every other session of these accounts ends (other PCs, phones, browsers). Ludae keeps a new cookie."
+confirm = "Every other session of these accounts ends (other PCs, phones, browsers). Alyae keeps a new cookie."
 
 [[action]]
 id = "logout"

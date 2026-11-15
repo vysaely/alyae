@@ -33,13 +33,13 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $out = "Ludae"
+          $out = "Alyae"
           New-Item -ItemType Directory -Force "$out/modules" | Out-Null
-          Copy-Item target/release/ludae.exe, target/release/ludae-roblox.exe, target/release/ludae-roblox-login.exe $out
+          Copy-Item target/release/alyae.exe, target/release/alyae-roblox.exe, target/release/alyae-roblox-login.exe $out
           foreach ($m in Get-ChildItem modules -Directory) {
             if ($m.Name -notlike "*-linux") { Copy-Item -Recurse $m.FullName "$out/modules/" }
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: Ludae-windows
-          path: Ludae
+          name: Alyae-windows
+          path: Alyae

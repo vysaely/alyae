@@ -32,7 +32,7 @@ const SCRIPT: &str = r#"
   };
   const visible = el => el && el.offsetParent !== null;
   let sentLogin = false, askedCode = 0;
-  window.__ludaeCode = code => {
+  window.__alyaeCode = code => {
     const box = twoStepBox();
     if (!box) return;
     setValue(box, code);
@@ -50,14 +50,14 @@ const SCRIPT: &str = r#"
     const user = document.getElementById('login-username');
     const pass = document.getElementById('login-password');
     const button = document.getElementById('login-button');
-    if (!window.__ludae) {
+    if (!window.__alyae) {
       if (!askedCreds && visible(user)) { askedCreds = true; window.ipc.postMessage('creds'); }
       return;
     }
     if (!sentLogin && visible(user) && visible(pass) && button) {
-      if (window.__ludae.username && !user.value) setValue(user, window.__ludae.username);
-      if (!window.__ludae.password) { sentLogin = true; return; }
-      setValue(pass, window.__ludae.password);
+      if (window.__alyae.username && !user.value) setValue(user, window.__alyae.username);
+      if (!window.__alyae.password) { sentLogin = true; return; }
+      setValue(pass, window.__alyae.password);
       if (!button.disabled) { sentLogin = true; button.click(); window.ipc.postMessage('sent'); }
     }
     // one request per Roblox code window: a rejected code waits for the next one
@@ -169,7 +169,7 @@ fn main() {
                 // only into a page still on Roblox's login site
                 if webview.url().is_ok_and(|u| is_roblox(&u)) {
                     let _ = webview.evaluate_script(&format!(
-                        "if (location.origin === '{ORIGIN}') window.__ludae = {creds};"
+                        "if (location.origin === '{ORIGIN}') window.__alyae = {creds};"
                     ));
                 }
             }
@@ -183,10 +183,10 @@ fn main() {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs());
-                match ludae_otp::code(&totp, now) {
+                match alyae_otp::code(&totp, now) {
                     Some(code) => {
                         let _ = webview
-                            .evaluate_script(&format!("window.__ludaeCode({})", json!(code)));
+                            .evaluate_script(&format!("window.__alyaeCode({})", json!(code)));
                         println!("{}", json!({ "status": "2FA code filled in" }));
                     }
                     None => println!(

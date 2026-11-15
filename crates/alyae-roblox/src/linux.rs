@@ -40,7 +40,7 @@ fn find_mocktail() -> Option<Mocktail> {
         "/usr/local/lib/mocktail".into(),
         "/opt/mocktail/lib".into(),
     ];
-    let mut bins: Vec<PathBuf> = std::env::var_os("LUDAE_MOCKTAIL")
+    let mut bins: Vec<PathBuf> = std::env::var_os("ALYAE_MOCKTAIL")
         .map(PathBuf::from)
         .into_iter()
         .collect();
@@ -75,7 +75,7 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("ludae-tmp");
+    let tmp = path.with_extension("alyae-tmp");
     let _ = fs::remove_file(&tmp);
     fs::OpenOptions::new()
         .write(true)
@@ -108,7 +108,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// The file name of the account's own copy of the Mocktail program.
 fn program_name(req: &Request) -> String {
-    format!("mocktail_ludae_{}", &req.id[..req.id.len().min(12)])
+    format!("mocktail_alyae_{}", &req.id[..req.id.len().min(12)])
 }
 
 /// The account's own copy of the Mocktail program (a hard link where it can be one): Mocktail
@@ -131,7 +131,7 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
                 let s = n.to_string_lossy();
                 if (s.contains(".so") || s.starts_with("mocktail_"))
                     && !s.starts_with("mocktail_acc_")
-                    && !s.starts_with("mocktail_ludae_")
+                    && !s.starts_with("mocktail_alyae_")
                 {
                     let dest = dir.join(&n);
                     if fs::symlink_metadata(&dest).is_err() {
@@ -349,7 +349,7 @@ fn clear(dir: &Path, keep: &[&str]) -> u64 {
 
 /// What Reset files removes from a profile: Roblox's app storage, its caches and downloaded
 /// assets, Mocktail's saved sign-in and logs; all are made again on the next launch, the sign-in
-/// from Ludae's vault. Kept: Roblox's settings file, the device ID, the window and Mocktail
+/// from Alyae's vault. Kept: Roblox's settings file, the device ID, the window and Mocktail
 /// settings, the links to the shared client. Returns the bytes freed.
 fn reset_profile(profile: &Path) -> u64 {
     let data = profile.join("data");
@@ -381,7 +381,7 @@ pub fn reset(req: &Request) {
     status(&format!("files reset, {} MB freed", freed / 1_000_000));
 }
 
-/// The resolved profile folder when it is one of Ludae's own (inside `data_dir/profiles`, links
+/// The resolved profile folder when it is one of Alyae's own (inside `data_dir/profiles`, links
 /// resolved, so a link pointing out of it does not count); None for AEAM's folders and the like.
 fn owned_profile(profile: &Path, data_dir: &Path) -> Option<PathBuf> {
     let root = fs::canonicalize(data_dir.join("profiles")).ok()?;
@@ -389,8 +389,8 @@ fn owned_profile(profile: &Path, data_dir: &Path) -> Option<PathBuf> {
     (p != root && p.starts_with(&root)).then_some(p)
 }
 
-/// Run before the account is removed from Ludae: its copy of the Mocktail program goes, and its
-/// profile folder when Ludae made it; a folder shared with AEAM stays, only Mocktail's saved
+/// Run before the account is removed from Alyae: its copy of the Mocktail program goes, and its
+/// profile folder when Alyae made it; a folder shared with AEAM stays, only Mocktail's saved
 /// sign-in in it goes.
 pub fn forget(req: &Request) {
     let name = program_name(req);
@@ -436,7 +436,7 @@ pub fn forget(req: &Request) {
     status("files deleted");
 }
 
-/// The account's folder: Ludae's own, or AEAM's when the account came from there (its in-game
+/// The account's folder: Alyae's own, or AEAM's when the account came from there (its in-game
 /// settings and caches stay).
 fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
     let p = req.get("profile");
@@ -542,7 +542,7 @@ fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> Vec<Path
 fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
     let host = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let dir = match &host {
-        Some(h) if h.is_dir() => h.join("ludae").join(&req.id),
+        Some(h) if h.is_dir() => h.join("alyae").join(&req.id),
         _ => profile.join("run"),
     };
     mkdir(&dir);
@@ -695,7 +695,7 @@ pub fn play(req: &Request) {
         flags.clone(),
     ));
     env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
-    // Ludae's Mocktail build (anti-AFK patch): a nudge after this many seconds without input
+    // Alyae's Mocktail build (anti-AFK patch): a nudge after this many seconds without input
     let afk_minutes: u64 = req.get("anti_afk").parse().unwrap_or(0);
     if afk_minutes > 0 {
         env.push((
@@ -775,9 +775,9 @@ pub fn play(req: &Request) {
         cmd.env_remove(key);
     }
     cmd.envs(env);
-    let log_path = profile.join("ludae.log");
+    let log_path = profile.join("alyae.log");
     if fs::metadata(&log_path).is_ok_and(|m| m.len() > 8 << 20) {
-        let _ = fs::rename(&log_path, profile.join("ludae.log.1"));
+        let _ = fs::rename(&log_path, profile.join("alyae.log.1"));
     }
     let log = fs::OpenOptions::new()
         .create(true)
@@ -788,7 +788,7 @@ pub fn play(req: &Request) {
     let log_start = log.metadata().map_or(0, |m| m.len());
     let _ = std::io::Write::write_all(
         &mut &log,
-        format!("\n=== Ludae launch {} ===\n", std::process::id()).as_bytes(),
+        format!("\n=== Alyae launch {} ===\n", std::process::id()).as_bytes(),
     );
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone().unwrap_or_else(|e| fail(&e.to_string())))
@@ -821,7 +821,7 @@ pub fn play(req: &Request) {
     let pid = child.id() as i32;
     say(json!({ "status": "running" }));
 
-    // a stop from Ludae ends the game; Ludae closing leaves it running
+    // a stop from Alyae ends the game; Alyae closing leaves it running
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if wait_for_stop() {
@@ -918,7 +918,7 @@ mod tests {
     /// Reset keeps the settings file, the device ID and the shared folders behind links.
     #[test]
     fn reset_keeps_what_it_should() {
-        let root = std::env::temp_dir().join(format!("ludae-reset-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("alyae-reset-{}", std::process::id()));
         let (p, shared) = (root.join("profile"), root.join("shared"));
         for d in [
             "data/files/appData/LocalStorage",
@@ -974,11 +974,11 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// Only folders inside Ludae's own profiles folder are Ludae's to delete; AEAM's and links
+    /// Only folders inside Alyae's own profiles folder are Alyae's to delete; AEAM's and links
     /// pointing out are not.
     #[test]
     fn owned_profiles_only() {
-        let root = std::env::temp_dir().join(format!("ludae-forget-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("alyae-forget-{}", std::process::id()));
         let (data, aeam) = (root.join("data"), root.join("aeam/profile"));
         let own = data.join("profiles/abc");
         fs::create_dir_all(&own).unwrap();
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn frame_cap_kept_in_step() {
-        let dir = std::env::temp_dir().join(format!("ludae-rbx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("alyae-rbx-{}", std::process::id()));
         engine_settings(&dir, false, 6);
         let f = dir.join("data/files/appData/GlobalBasicSettings_13.xml");
         assert!(

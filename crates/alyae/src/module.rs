@@ -65,7 +65,7 @@ impl Action {
     }
 }
 
-/// A helper action Ludae runs for all of a game's accounts every `every` seconds while the game is
+/// A helper action Alyae runs for all of a game's accounts every `every` seconds while the game is
 /// shown; its answers fill the column `column`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Watch {
@@ -127,7 +127,7 @@ pub struct Module {
     pub platform: String,
     #[serde(default)]
     pub description: String,
-    /// helper program: a path beside module.toml, beside Ludae, or a name on PATH
+    /// helper program: a path beside module.toml, beside Alyae, or a name on PATH
     #[serde(default)]
     pub helper: String,
     /// the field an account is named after when it gets no name of its own
@@ -187,10 +187,10 @@ impl Module {
         if beside_module.is_file() {
             return Some(beside_module);
         }
-        let beside_ludae = std::env::current_exe()
+        let beside_alyae = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|d| exe(d.join(&self.helper))));
-        if let Some(p) = beside_ludae.filter(|p| p.is_file()) {
+        if let Some(p) = beside_alyae.filter(|p| p.is_file()) {
             return Some(p);
         }
         Some(PathBuf::from(&self.helper))
@@ -362,7 +362,7 @@ fn spawn_helper(
         .arg(action)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // the helper's own messages (and Mocktail's, through it) land in Ludae's log
+        // the helper's own messages (and Mocktail's, through it) land in Alyae's log
         .stderr(crate::log::file().map_or_else(Stdio::null, Stdio::from))
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", helper.display()))?;

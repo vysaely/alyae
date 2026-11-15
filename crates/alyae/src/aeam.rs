@@ -39,7 +39,7 @@ pub struct ImportResult {
     pub bad_secrets: Vec<(String, usize)>,
 }
 
-/// AEAM's accounts as Ludae's, and the place AEAM last joined.
+/// AEAM's accounts as Alyae's, and the place AEAM last joined.
 #[cfg(test)]
 pub fn read(dir: &Path) -> Result<(Vec<Account>, Option<String>), String> {
     let (items, place) = read_accounts(dir)?;
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn import_reports_undecryptable_secrets_by_account_name() {
-        let base = std::env::temp_dir().join(format!("ludae-aeam-bad-{}", crate::store::new_id()));
+        let base = std::env::temp_dir().join(format!("alyae-aeam-bad-{}", crate::store::new_id()));
         let aeam_dir = base.join("aeam");
         let key = [4u8; 32];
         let vault = Vault::from_key(&key);
@@ -348,7 +348,7 @@ mod tests {
             ],
         );
 
-        let store = Store::open(&base.join("ludae.db"), Vault::from_key(&[5u8; 32])).unwrap();
+        let store = Store::open(&base.join("alyae.db"), Vault::from_key(&[5u8; 32])).unwrap();
         let report = import_from(&aeam_dir, &store, &[]).unwrap();
         assert_eq!(report.added, 2);
         assert_eq!(report.skipped, 0);
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn import_rolls_back_on_failure() {
         let base =
-            std::env::temp_dir().join(format!("ludae-aeam-rollback-{}", crate::store::new_id()));
+            std::env::temp_dir().join(format!("alyae-aeam-rollback-{}", crate::store::new_id()));
         let aeam_dir = base.join("aeam");
         let key = [4u8; 32];
         let vault = Vault::from_key(&key);
@@ -393,7 +393,7 @@ mod tests {
             ],
         );
 
-        let db_path = base.join("ludae.db");
+        let db_path = base.join("alyae.db");
         let store = Store::open(&db_path, Vault::from_key(&[5u8; 32])).unwrap();
         {
             let db = Connection::open(&db_path).unwrap();

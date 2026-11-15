@@ -1,12 +1,12 @@
-# Ludae plan
+# Alyae plan
 
-Ludae is AEAM's successor: a small game account manager for Linux and Windows. The core knows
-nothing about any game; each game is a module. AEAM keeps working untouched until Ludae
+Alyae is AEAM's successor: a small game account manager for Linux and Windows. The core knows
+nothing about any game; each game is a module. AEAM keeps working untouched until Alyae
 replaces it.
 
 ## Shape
 
-- **Core (`ludae`)**: one Rust program with an egui window. It opens on a game picker and
+- **Core (`alyae`)**: one Rust program with an egui window. It opens on a game picker and
   remembers the last game. Each game uses AEAM's layout:
   - group picker, account table (Username, Alias, Group, Mode, Description);
   - launch boxes and the main button on the right, with the active account below;
@@ -18,14 +18,14 @@ replaces it.
   - `[[action]]`: its buttons. An action runs a command template (`{login}` ...) or the
     module's helper. `primary` makes it the big button, and `runs` means the account counts
     as running while the action lasts.
-- **Helper protocol**: Ludae runs `helper <action>`.
+- **Helper protocol**: Alyae runs `helper <action>`.
   - stdin: one JSON line, `{id, account, inputs, data_dir}`.
   - stdout: JSON lines, `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`.
-  - A `stop` line on stdin ends the game. Closing Ludae leaves games running.
+  - A `stop` line on stdin ends the game. Closing Alyae leaves games running.
 - **Modules shipped**:
   - `generic`: login, password, 2FA, a launch command.
   - `roblox-linux` / `roblox-windows`: both use the game id `roblox`, so they share accounts.
-    The helper is `ludae-roblox`, with the actions Join Server, Follow and Refresh.
+    The helper is `alyae-roblox`, with the actions Join Server, Follow and Refresh.
 
 ## Status
 

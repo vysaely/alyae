@@ -3,7 +3,7 @@ id = "roblox"
 name = "Roblox Windows"
 platform = "windows"
 description = "Several accounts at once, join servers, 2FA"
-helper = "ludae-roblox"
+helper = "alyae-roblox"
 title_field = "username"
 
 [[field]]
@@ -95,6 +95,88 @@ fields = ["user_id"]
 "Online" = "#4aa8ff"
 "In Studio" = "#f0a030"
 
+# Roblox's own settings (GlobalBasicSettings_13.xml): each chosen account keeps its own copy, put in
+# place when it starts; its Roblox must be closed;
+# every value starts at "keep"
+[[action]]
+id = "graphics"
+label = "Settings"
+
+[[action.input]]
+key = "fps"
+label = "FPS limit"
+choices = ["keep", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+
+[[action.input]]
+key = "quality"
+label = "Graphics level"
+choices = ["keep", "Automatic", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+
+[[action.input]]
+key = "sensitivity"
+label = "Camera sensitivity"
+hint = "keep, or 0.1 to 4 as in Roblox's menu"
+
+[[action.input]]
+key = "camera_inverted"
+label = "Invert camera"
+choices = ["keep", "on", "off"]
+
+[[action.input]]
+key = "shift_lock"
+label = "Shift lock switch"
+choices = ["keep", "on", "off"]
+
+[[action.input]]
+key = "camera_mode"
+label = "Camera mode"
+choices = ["keep", "Default", "Classic", "Follow", "Orbital"]
+
+[[action.input]]
+key = "movement_mode"
+label = "Movement mode"
+choices = ["keep", "Default", "Keyboard", "Click to move"]
+
+[[action.input]]
+key = "volume"
+label = "Volume"
+choices = ["keep", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+
+[[action.input]]
+key = "voice_volume"
+label = "Voice chat volume"
+choices = ["keep", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+
+[[action.input]]
+key = "chat"
+label = "Chat visible"
+choices = ["keep", "on", "off"]
+
+[[action.input]]
+key = "stats"
+label = "Performance stats"
+choices = ["keep", "on", "off"]
+
+[[action.input]]
+key = "reduced_motion"
+label = "Reduced motion"
+choices = ["keep", "on", "off"]
+
+[[action.input]]
+key = "translation"
+label = "Chat translation"
+choices = ["keep", "on", "off"]
+
+[[action.input]]
+key = "transparency"
+label = "UI background transparency"
+hint = "keep, or 0 to 1"
+
+[[action.input]]
+key = "text_size"
+label = "Text size"
+choices = ["keep", "Medium", "Large", "Larger", "Largest"]
+
 # account tools: each chosen account in turn, 4 s apart
 
 [[action]]
@@ -123,7 +205,7 @@ confirm = "Every player these accounts blocked is unblocked."
 [[action]]
 id = "signout_all"
 label = "Sign out everywhere"
-confirm = "Every other session of these accounts ends (other PCs, phones, browsers). Ludae keeps a new cookie."
+confirm = "Every other session of these accounts ends (other PCs, phones, browsers). Alyae keeps a new cookie."
 
 [[action]]
 id = "logout"

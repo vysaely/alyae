@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "Ludae"
+          New-Item -ItemType Directory -Force "$out/modules" | Out-Null
+          Copy-Item target/release/ludae.exe, target/release/ludae-roblox.exe, target/release/ludae-roblox-login.exe $out
+          foreach ($m in Get-ChildItem modules -Directory) {
+            if ($m.Name -notlike "*-linux") { Copy-Item -Recurse $m.FullName "$out/modules/" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ludae-windows
+          path: Ludae

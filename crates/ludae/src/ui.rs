@@ -228,27 +228,23 @@ impl App {
                         .keys()
                         .map(|k| self.module(&a.game).is_some_and(|m| m.is_secret(k)))
                         .collect();
-                    for ((k, v), secret) in values.into_iter().zip(secret) {
-                        if k == "name" {
-                            a.name = v;
-                            continue;
-                        }
-                        let (to, from) = if secret {
-                            (&mut a.secrets, &mut a.fields)
-                        } else {
-                            (&mut a.fields, &mut a.secrets)
-                        };
-                        from.remove(&k);
-                        if v.is_empty() {
-                            to.remove(&k);
-                        } else {
-                            to.insert(k, v);
-                        }
-                    }
                     let clean = self.draft.as_ref().is_some_and(|d| d.id == a.id)
                         && self.accounts.iter().any(|x| Some(x) == self.draft.as_ref());
-                    if self.save(&a) && clean {
-                        self.draft = Some(a);
+                    for ((k, v), secret) in values.iter().zip(&secret) {
+                        set_value(&mut a, k, v, *secret);
+                    }
+                    if self.save(&a) {
+                        match self.draft.as_mut() {
+                            Some(_) if clean => self.draft = Some(a),
+                            // unsaved edits stay, with the helper's new values (a renewed cookie
+                            // or password) on top, so Save does not write the old ones back
+                            Some(d) if d.id == a.id => {
+                                for ((k, v), secret) in values.iter().zip(&secret) {
+                                    set_value(d, k, v, *secret);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 Event::Status { account, text } => {
@@ -1784,6 +1780,27 @@ fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 3.5, color);
     resp
+}
+
+
+/// One value from a helper into an account: `name`, a secret or a plain field (an empty value
+/// removes it).
+fn set_value(a: &mut crate::store::Account, k: &str, v: &str, secret: bool) {
+    if k == "name" {
+        a.name = v.to_string();
+        return;
+    }
+    let (to, from) = if secret {
+        (&mut a.secrets, &mut a.fields)
+    } else {
+        (&mut a.fields, &mut a.secrets)
+    };
+    from.remove(k);
+    if v.is_empty() {
+        to.remove(k);
+    } else {
+        to.insert(k.to_string(), v.to_string());
+    }
 }
 
 #[cfg(test)]

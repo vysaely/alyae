@@ -15,7 +15,13 @@ pub fn dir() -> Option<PathBuf> {
 fn sanitize(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let s = s.trim_matches(['.', '_']).to_string();
     if s.is_empty() { "unnamed".into() } else { s }
@@ -68,15 +74,31 @@ pub fn read(dir: &Path) -> Result<(Vec<Account>, Option<String>), String> {
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, username, display, user_id, cookie, group, notes, tags, created, last, sort, password, totp) =
-            row.map_err(|e| e.to_string())?;
+        let (
+            id,
+            username,
+            display,
+            user_id,
+            cookie,
+            group,
+            notes,
+            tags,
+            created,
+            last,
+            sort,
+            password,
+            totp,
+        ) = row.map_err(|e| e.to_string())?;
         let tags: Vec<String> = serde_json::from_str::<Vec<String>>(&tags.unwrap_or_default())
             .unwrap_or_default()
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
         // AEAM's rule: tags decide, then mains.txt
-        let main = if tags.iter().any(|t| ["main", "165fps", "320fps", "330fps"].contains(&t.as_str())) {
+        let main = if tags
+            .iter()
+            .any(|t| ["main", "165fps", "320fps", "330fps"].contains(&t.as_str()))
+        {
             true
         } else if tags.iter().any(|t| t == "alt" || t == "24fps") {
             false
@@ -92,12 +114,20 @@ pub fn read(dir: &Path) -> Result<(Vec<Account>, Option<String>), String> {
         if let Some(fps) = tags.iter().find_map(|t| t.strip_prefix("fps:")) {
             fields.insert("fps".into(), fps.to_string());
         }
-        let profile = dir.join("instances").join(format!("{}_{}", sanitize(&username), id.chars().take(8).collect::<String>()));
+        let profile = dir.join("instances").join(format!(
+            "{}_{}",
+            sanitize(&username),
+            id.chars().take(8).collect::<String>()
+        ));
         if profile.is_dir() {
             fields.insert("profile".into(), profile.to_string_lossy().into_owned());
         }
         let mut secrets = Values::new();
-        for (k, v) in [("cookie", open(cookie)), ("password", open(password)), ("totp", open(totp))] {
+        for (k, v) in [
+            ("cookie", open(cookie)),
+            ("password", open(password)),
+            ("totp", open(totp)),
+        ] {
             if let Some(v) = v {
                 secrets.insert(k.into(), v);
             }
@@ -105,7 +135,11 @@ pub fn read(dir: &Path) -> Result<(Vec<Account>, Option<String>), String> {
         out.push(Account {
             id,
             game: "roblox".into(),
-            name: if display != username { display } else { String::new() },
+            name: if display != username {
+                display
+            } else {
+                String::new()
+            },
             group: group.filter(|g| g != "Default").unwrap_or_default(),
             notes: notes.unwrap_or_default(),
             sort: sort.unwrap_or(0),
@@ -116,7 +150,11 @@ pub fn read(dir: &Path) -> Result<(Vec<Account>, Option<String>), String> {
         });
     }
     let place = db
-        .query_row("SELECT value FROM settings WHERE key = 'SavedPlaceId'", [], |r| r.get::<_, String>(0))
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'SavedPlaceId'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
         .ok();
     Ok((out, place))
 }
@@ -128,7 +166,10 @@ pub fn import(store: &Store, have: &[Account]) -> Result<(usize, usize), String>
     let (mut added, mut skipped) = (0, 0);
     for a in accounts {
         let dup = have.iter().any(|h| {
-            h.id == a.id || (h.game == "roblox" && !a.value("user_id").is_empty() && h.value("user_id") == a.value("user_id"))
+            h.id == a.id
+                || (h.game == "roblox"
+                    && !a.value("user_id").is_empty()
+                    && h.value("user_id") == a.value("user_id"))
         });
         if dup {
             skipped += 1;
@@ -138,7 +179,10 @@ pub fn import(store: &Store, have: &[Account]) -> Result<(usize, usize), String>
         added += 1;
     }
     if let Some(p) = place.filter(|_| store.setting("inputs.roblox").is_none()) {
-        store.set_setting("inputs.roblox", &serde_json::json!({ "place": p }).to_string());
+        store.set_setting(
+            "inputs.roblox",
+            &serde_json::json!({ "place": p }).to_string(),
+        );
     }
     store.set_setting("aeam_imported", "1");
     Ok((added, skipped))
@@ -154,9 +198,27 @@ mod tests {
         let Some(d) = dir() else { return };
         let (accounts, _) = read(&d).unwrap();
         assert!(!accounts.is_empty());
-        assert!(accounts.iter().all(|a| a.game == "roblox" && !a.value("username").is_empty()));
-        assert!(accounts.iter().filter(|a| !a.value("cookie").is_empty()).count() * 2 >= accounts.len());
+        assert!(
+            accounts
+                .iter()
+                .all(|a| a.game == "roblox" && !a.value("username").is_empty())
+        );
+        assert!(
+            accounts
+                .iter()
+                .filter(|a| !a.value("cookie").is_empty())
+                .count()
+                * 2
+                >= accounts.len()
+        );
         assert!(accounts.iter().any(|a| a.value("role") == "main"));
-        assert!(accounts.iter().filter(|a| !a.value("profile").is_empty()).count() * 2 >= accounts.len());
+        assert!(
+            accounts
+                .iter()
+                .filter(|a| !a.value("profile").is_empty())
+                .count()
+                * 2
+                >= accounts.len()
+        );
     }
 }

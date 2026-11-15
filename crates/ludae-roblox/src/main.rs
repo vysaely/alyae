@@ -22,17 +22,27 @@ pub struct Request {
 
 impl Request {
     pub fn get(&self, key: &str) -> &str {
-        self.account.get(key).and_then(Value::as_str).unwrap_or("").trim()
+        self.account
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
     }
     pub fn input(&self, key: &str) -> &str {
-        self.inputs.get(key).and_then(Value::as_str).unwrap_or("").trim()
+        self.inputs
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
     }
     pub fn is_main(&self) -> bool {
         self.get("role") == "main"
     }
     /// 0 means no cap
     pub fn fps(&self) -> u32 {
-        self.get("fps").parse().unwrap_or(if self.is_main() { 330 } else { 6 })
+        self.get("fps")
+            .parse()
+            .unwrap_or(if self.is_main() { 330 } else { 6 })
     }
     pub fn cookie(&self) -> String {
         api::clean_cookie(self.get("cookie"))
@@ -68,8 +78,16 @@ pub fn place_id(input: &str) -> Option<u64> {
     if let Ok(n) = s.parse() {
         return Some(n);
     }
-    let after = s.split("/games/").nth(1).or_else(|| s.split("placeId=").nth(1))?;
-    after.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
+    let after = s
+        .split("/games/")
+        .nth(1)
+        .or_else(|| s.split("placeId=").nth(1))?;
+    after
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 fn query_value<'a>(link: &'a str, key: &str) -> Option<&'a str> {
@@ -79,13 +97,21 @@ fn query_value<'a>(link: &'a str, key: &str) -> Option<&'a str> {
 }
 
 pub fn join_from(req: &Request) -> Join {
-    let mut j = Join { place: place_id(req.input("place")), job: None, link_code: None, follow: None };
+    let mut j = Join {
+        place: place_id(req.input("place")),
+        job: None,
+        link_code: None,
+        follow: None,
+    };
     let server = req.input("server");
     if !server.is_empty() {
-        let is_job = server.len() == 36 && server.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        let is_job =
+            server.len() == 36 && server.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
         if is_job {
             j.job = Some(server.to_string());
-        } else if let Some(code) = query_value(server, "privateServerLinkCode").or_else(|| query_value(server, "linkCode")) {
+        } else if let Some(code) =
+            query_value(server, "privateServerLinkCode").or_else(|| query_value(server, "linkCode"))
+        {
             j.link_code = Some(code.to_string());
             j.place = j.place.or_else(|| place_id(server));
         } else if server.contains("share?code=") || server.contains("/share") {
@@ -96,7 +122,11 @@ pub fn join_from(req: &Request) -> Join {
                 }
                 Err(e) => fail(&format!("private server link: {e}")),
             }
-        } else if server.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && server.len() > 15 {
+        } else if server
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && server.len() > 15
+        {
             j.link_code = Some(server.to_string());
         } else {
             fail("Server: a job ID or a private server link");
@@ -119,12 +149,8 @@ fn check(req: &Request) {
         fail("no cookie: paste the .ROBLOSECURITY value into Cookie");
     }
     match api::authenticated(&cookie) {
-        Ok((id, name, display)) => {
-            let mut set = json!({ "username": name, "user_id": id.to_string() });
-            if display != name {
-                set["display_name"] = json!(display);
-            }
-            say(json!({ "set": set }));
+        Ok((id, name)) => {
+            say(json!({ "set": { "username": name, "user_id": id.to_string() } }));
             status("signed in");
         }
         Err(e) => fail(&e),
@@ -139,15 +165,30 @@ fn main() {
         fail("no request on stdin");
     }
     drop(stdin);
-    let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| fail(&format!("bad request: {e}")));
-    let obj = |k: &str| v.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
+    let v: Value =
+        serde_json::from_str(&line).unwrap_or_else(|e| fail(&format!("bad request: {e}")));
+    let obj = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
     let req = Request {
-        id: v.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+        id: v
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         account: obj("account"),
         inputs: obj("inputs"),
         data_dir: PathBuf::from(v.get("data_dir").and_then(Value::as_str).unwrap_or(".")),
     };
-    if req.id.is_empty() || !req.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if req.id.is_empty()
+        || !req
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         fail("bad account id");
     }
     match action.as_str() {
@@ -184,10 +225,16 @@ mod tests {
     #[test]
     fn places_and_codes() {
         assert_eq!(place_id("1818"), Some(1818));
-        assert_eq!(place_id("https://www.roblox.com/games/1818/Classic-Crossroads"), Some(1818));
+        assert_eq!(
+            place_id("https://www.roblox.com/games/1818/Classic-Crossroads"),
+            Some(1818)
+        );
         assert_eq!(place_id("crossroads"), None);
         let link = "https://www.roblox.com/games/123/x?privateServerLinkCode=abcDEF123456789012";
-        assert_eq!(query_value(link, "privateServerLinkCode"), Some("abcDEF123456789012"));
+        assert_eq!(
+            query_value(link, "privateServerLinkCode"),
+            Some("abcDEF123456789012")
+        );
         assert_eq!(query_value(link, "linkCode"), None);
     }
 }

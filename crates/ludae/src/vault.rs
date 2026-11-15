@@ -21,7 +21,13 @@ impl Vault {
     pub fn open(path: &Path) -> Result<Self, String> {
         let key = match fs::read(path) {
             Ok(k) if k.len() == KEY_LEN => k,
-            Ok(k) => return Err(format!("{} holds {} bytes, not a key", path.display(), k.len())),
+            Ok(k) => {
+                return Err(format!(
+                    "{} holds {} bytes, not a key",
+                    path.display(),
+                    k.len()
+                ));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_key(path)?,
             Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
         };
@@ -29,7 +35,9 @@ impl Vault {
     }
 
     pub fn from_key(key: &[u8]) -> Self {
-        Self { cipher: XSalsa20Poly1305::new(Key::from_slice(key)) }
+        Self {
+            cipher: XSalsa20Poly1305::new(Key::from_slice(key)),
+        }
     }
 
     pub fn seal(&self, plain: &[u8]) -> Vec<u8> {
@@ -65,7 +73,9 @@ fn create_key(path: &Path) -> Result<Vec<u8>, String> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     match opts.open(path) {
         Ok(mut f) => {
-            f.write_all(&key).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
+            f.write_all(&key)
+                .and_then(|_| f.sync_all())
+                .map_err(|e| e.to_string())?;
             Ok(key)
         }
         // another Ludae started at the same moment and made it first: use theirs

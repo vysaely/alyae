@@ -1624,6 +1624,99 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     );
 }
 
+/// Saved values for the main button's boxes (AEAM's Bookmarks), kept per game.
+fn bookmarks_menu(
+    ui: &mut egui::Ui,
+    store: Option<&Store>,
+    game: &str,
+    primary: &module::Action,
+    inputs: &mut Values,
+    name: &mut String,
+    width: f32,
+) {
+    let Some(store) = store else { return };
+    let key = format!("bookmarks.{game}");
+    let load = || -> Vec<(String, Values)> {
+        store
+            .setting(&key)
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default()
+    };
+    let save = |list: &Vec<(String, Values)>| {
+        store.set_setting(
+            &key,
+            &serde_json::to_string(list).expect("a list of strings serializes"),
+        );
+    };
+    ui.allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
+        ui.menu_button("Bookmarks", |ui| {
+            let mut list = load();
+            let mut changed = false;
+            let mut remove = None;
+            for (i, (label, values)) in list.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button(label).clicked() {
+                        for inp in &primary.inputs {
+                            inputs.insert(
+                                inp.key.clone(),
+                                values.get(&inp.key).cloned().unwrap_or_default(),
+                            );
+                        }
+                        ui.close();
+                    }
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                list.remove(i);
+                changed = true;
+            }
+            if !list.is_empty() {
+                ui.separator();
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(name)
+                        .hint_text("Name")
+                        .desired_width(140.0),
+                );
+                let has_values = primary
+                    .inputs
+                    .iter()
+                    .any(|i| inputs.get(&i.key).is_some_and(|v| !v.trim().is_empty()));
+                if ui
+                    .add_enabled(
+                        has_values && !name.trim().is_empty(),
+                        egui::Button::new("Save"),
+                    )
+                    .clicked()
+                {
+                    let values: Values = primary
+                        .inputs
+                        .iter()
+                        .filter_map(|i| {
+                            inputs
+                                .get(&i.key)
+                                .map(|v| (i.key.clone(), v.trim().to_string()))
+                        })
+                        .collect();
+                    list.retain(|(l, _)| l != name.trim());
+                    list.push((name.trim().to_string(), values));
+                    name.clear();
+                    changed = true;
+                }
+            });
+            if changed {
+                save(&list);
+            }
+        })
+        .response
+        .on_hover_text("Saved places and servers");
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1726,97 +1819,4 @@ mod tests {
         assert_eq!(h.state().accounts[0].game, "roblox");
         let _ = std::fs::remove_dir_all(dir);
     }
-}
-
-/// Saved values for the main button's boxes (AEAM's Bookmarks), kept per game.
-fn bookmarks_menu(
-    ui: &mut egui::Ui,
-    store: Option<&Store>,
-    game: &str,
-    primary: &module::Action,
-    inputs: &mut Values,
-    name: &mut String,
-    width: f32,
-) {
-    let Some(store) = store else { return };
-    let key = format!("bookmarks.{game}");
-    let load = || -> Vec<(String, Values)> {
-        store
-            .setting(&key)
-            .and_then(|v| serde_json::from_str(&v).ok())
-            .unwrap_or_default()
-    };
-    let save = |list: &Vec<(String, Values)>| {
-        store.set_setting(
-            &key,
-            &serde_json::to_string(list).expect("a list of strings serializes"),
-        );
-    };
-    ui.allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
-        ui.menu_button("Bookmarks", |ui| {
-            let mut list = load();
-            let mut changed = false;
-            let mut remove = None;
-            for (i, (label, values)) in list.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.button(label).clicked() {
-                        for inp in &primary.inputs {
-                            inputs.insert(
-                                inp.key.clone(),
-                                values.get(&inp.key).cloned().unwrap_or_default(),
-                            );
-                        }
-                        ui.close();
-                    }
-                    if ui.small_button("Remove").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                list.remove(i);
-                changed = true;
-            }
-            if !list.is_empty() {
-                ui.separator();
-            }
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(name)
-                        .hint_text("Name")
-                        .desired_width(140.0),
-                );
-                let has_values = primary
-                    .inputs
-                    .iter()
-                    .any(|i| inputs.get(&i.key).is_some_and(|v| !v.trim().is_empty()));
-                if ui
-                    .add_enabled(
-                        has_values && !name.trim().is_empty(),
-                        egui::Button::new("Save"),
-                    )
-                    .clicked()
-                {
-                    let values: Values = primary
-                        .inputs
-                        .iter()
-                        .filter_map(|i| {
-                            inputs
-                                .get(&i.key)
-                                .map(|v| (i.key.clone(), v.trim().to_string()))
-                        })
-                        .collect();
-                    list.retain(|(l, _)| l != name.trim());
-                    list.push((name.trim().to_string(), values));
-                    name.clear();
-                    changed = true;
-                }
-            });
-            if changed {
-                save(&list);
-            }
-        })
-        .response
-        .on_hover_text("Saved places and servers");
-    });
 }

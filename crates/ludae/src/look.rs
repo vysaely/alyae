@@ -15,7 +15,7 @@ pub struct Colors {
 
 static COLORS: OnceLock<Colors> = OnceLock::new();
 
-fn hex(s: &str) -> Option<Color32> {
+pub fn hex(s: &str) -> Option<Color32> {
     let s = s.trim().trim_matches('"').strip_prefix('#')?;
     let v = u32::from_str_radix(s.get(..6)?, 16).ok()?;
     Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))

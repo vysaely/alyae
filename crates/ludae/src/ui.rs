@@ -121,7 +121,18 @@ impl App {
     }
 
     fn say(&mut self, text: impl Into<String>, bad: bool) {
-        self.message = Some((text.into(), bad));
+        let text = text.into();
+        crate::log::line("", &text);
+        self.message = Some((text, bad));
+    }
+
+    /// An account's name for the log, by id.
+    fn name_of(&self, id: &str) -> String {
+        self.accounts
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| self.title(a))
+            .unwrap_or_else(|| id.to_string())
     }
 
     fn title(&self, a: &Account) -> String {
@@ -199,6 +210,12 @@ impl App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Event::Set { account, values } => {
+                    // field names only: the values may be secrets
+                    let keys: Vec<&str> = values.keys().map(String::as_str).collect();
+                    crate::log::line(
+                        &self.name_of(&account),
+                        &format!("saved {}", keys.join(", ")),
+                    );
                     let Some(mut a) = self.accounts.iter().find(|a| a.id == account).cloned()
                     else {
                         continue;
@@ -231,6 +248,7 @@ impl App {
                     }
                 }
                 Event::Status { account, text } => {
+                    crate::log::line(&self.name_of(&account), &text);
                     self.status.insert(account, (text, false));
                 }
                 Event::Error { account, text } => {
@@ -254,6 +272,10 @@ impl App {
                     action,
                     ok,
                 } => {
+                    crate::log::line(
+                        &self.name_of(&account),
+                        &format!("{action} ended{}", if ok { "" } else { " with an error" }),
+                    );
                     if self
                         .running
                         .get(&account)
@@ -340,6 +362,7 @@ impl App {
                 },
             ) {
                 Ok(r) => {
+                    crate::log::line(&self.title(&a), &format!("{} started", action.label));
                     started += 1;
                     self.status.remove(&id);
                     match r {
@@ -699,6 +722,23 @@ impl App {
                 ui.label(RichText::new(format!("{running} running")).color(look::colors().accent));
             }
             self.message_line(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Open log")
+                    .on_hover_text(self.dir.join("ludae.log").display().to_string())
+                    .clicked()
+                {
+                    let path = self.dir.join("ludae.log");
+                    let opener = if cfg!(windows) {
+                        "explorer"
+                    } else {
+                        "xdg-open"
+                    };
+                    if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
+                        self.say(format!("cannot open {}: {e}", path.display()), true);
+                    }
+                }
+            });
         });
     }
 
@@ -765,7 +805,8 @@ impl App {
             .field(&m.title_field)
             .map_or("Account".to_string(), |f| f.label.clone());
         let has_mode = m.field("role").is_some();
-        let watch_col = m.watch.as_ref().map(|w| w.column.clone());
+        let watch = m.watch.clone();
+        let watch_col = watch.as_ref().map(|w| w.column.clone());
         let show_group = self.group_filter.is_none();
         let mut clicked: Option<(String, bool)> = None; // (id, secondary)
         let mut double = None;
@@ -776,13 +817,21 @@ impl App {
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .sense(egui::Sense::click())
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(
-                Column::initial(170.0)
-                    .at_least(80.0)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        if watch_col.is_some() {
+            table = table.column(
+                Column::initial(140.0)
+                    .at_least(60.0)
                     .clip(true)
                     .resizable(true),
             );
+        }
+        table = table.column(
+            Column::initial(170.0)
+                .at_least(80.0)
+                .clip(true)
+                .resizable(true),
+        );
         if show_group {
             table = table.column(
                 Column::initial(80.0)
@@ -799,18 +848,13 @@ impl App {
                     .resizable(true),
             );
         }
-        if watch_col.is_some() {
-            table = table.column(
-                Column::initial(140.0)
-                    .at_least(60.0)
-                    .clip(true)
-                    .resizable(true),
-            );
-        }
         table
             .column(Column::remainder().at_least(60.0).clip(true))
             .auto_shrink(false)
             .header(20.0, |mut h| {
+                if let Some(c) = &watch_col {
+                    h.col(|ui| self.sort_heading(ui, c, Sort::Watch));
+                }
                 h.col(|ui| {
                     self.sort_heading(ui, &first_label, Sort::User);
                     ui.label(look::tag("·"));
@@ -822,9 +866,6 @@ impl App {
                 if has_mode {
                     h.col(|ui| self.sort_heading(ui, "Mode", Sort::Mode));
                 }
-                if let Some(c) = &watch_col {
-                    h.col(|ui| self.sort_heading(ui, c, Sort::Watch));
-                }
                 h.col(|ui| self.sort_heading(ui, "Description", Sort::Notes));
             })
             .body(|body| {
@@ -832,6 +873,18 @@ impl App {
                     let (id, user, alias, group, mode, notes, watched) = &rows[row.index()];
                     row.set_selected(selected.contains(id));
                     let on = running.contains(id);
+                    if let Some(w) = &watch {
+                        row.col(|ui| {
+                            if !watched.is_empty() {
+                                let c = w
+                                    .color_of(watched)
+                                    .and_then(look::hex)
+                                    .unwrap_or(look::colors().muted);
+                                dot(ui, c);
+                                ui.label(watched);
+                            }
+                        });
+                    }
                     row.col(|ui| {
                         // the accent marks what runs
                         ui.label(if on {
@@ -853,11 +906,6 @@ impl App {
                             ui.label(RichText::new(mode).weak());
                         });
                     }
-                    if watch_col.is_some() {
-                        row.col(|ui| {
-                            ui.label(watched);
-                        });
-                    }
                     row.col(|ui| match self.status.get(id) {
                         Some((s, bad)) => {
                             let c = if *bad {
@@ -865,6 +913,7 @@ impl App {
                             } else {
                                 look::colors().accent
                             };
+                            dot(ui, c);
                             ui.label(RichText::new(s).color(c));
                         }
                         None => {
@@ -1822,4 +1871,10 @@ mod tests {
         assert_eq!(h.state().accounts[0].game, "roblox");
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// A small filled circle (drawn, not a glyph: the font has none) before a status.
+fn dot(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.5, color);
 }

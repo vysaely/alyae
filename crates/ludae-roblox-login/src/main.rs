@@ -1,8 +1,9 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 //! Roblox's own login page in a window of its own, with a fresh browser profile: the username and
 //! password are filled in and sent, a captcha is left to the person, and the 2FA code is filled
-//! in from the saved secret when Roblox asks for it. The `.ROBLOSECURITY` cookie Roblox then sets
-//! is printed as `{"cookie":"..."}` and the window closes. Closing the window prints nothing.
+//! in from the saved secret when Roblox asks for it. Each step is printed as `{"status":"..."}`;
+//! the `.ROBLOSECURITY` cookie Roblox then sets is printed as `{"cookie":"..."}` and the window
+//! closes. Closing the window prints no cookie.
 //!
 //! Input (one JSON line on stdin): {"username", "password", "totp"}.
 
@@ -45,7 +46,7 @@ const SCRIPT: &str = r#"
     if (!sentLogin && visible(user) && visible(pass) && button) {
       setValue(user, window.__ludae.username);
       setValue(pass, window.__ludae.password);
-      if (!button.disabled) { sentLogin = true; button.click(); }
+      if (!button.disabled) { sentLogin = true; button.click(); window.ipc.postMessage('sent'); }
     }
     // one request per Roblox code window: a rejected code waits for the next one
     if (twoStepBox() && Date.now() - askedCode > 30000) {
@@ -58,6 +59,7 @@ const SCRIPT: &str = r#"
 "#;
 
 enum Msg {
+    Sent,
     Code,
 }
 
@@ -83,9 +85,11 @@ fn main() {
         .with_incognito(true)
         .with_initialization_script(&format!("window.__ludae = {creds};\n{SCRIPT}"))
         .with_ipc_handler(move |m| {
-            if m.body() == "code" {
-                let _ = proxy.send_event(Msg::Code);
-            }
+            let _ = match m.body().as_str() {
+                "code" => proxy.send_event(Msg::Code),
+                "sent" => proxy.send_event(Msg::Sent),
+                _ => Ok(()),
+            };
         });
     #[cfg(not(target_os = "linux"))]
     let webview = builder.build(&window).expect("a web view");
@@ -116,13 +120,23 @@ fn main() {
                     *flow = ControlFlow::Exit;
                 }
             }
+            Event::UserEvent(Msg::Sent) => {
+                println!("{}", json!({ "status": "username and password sent" }))
+            }
             Event::UserEvent(Msg::Code) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs());
-                if let Some(code) = ludae_otp::code(&totp, now) {
-                    let _ =
-                        webview.evaluate_script(&format!("window.__ludaeCode({})", json!(code)));
+                match ludae_otp::code(&totp, now) {
+                    Some(code) => {
+                        let _ = webview
+                            .evaluate_script(&format!("window.__ludaeCode({})", json!(code)));
+                        println!("{}", json!({ "status": "2FA code filled in" }));
+                    }
+                    None => println!(
+                        "{}",
+                        json!({ "status": "Roblox asks for a 2FA code: none saved, type it in" })
+                    ),
                 }
             }
             Event::WindowEvent {

@@ -72,6 +72,20 @@ pub struct Watch {
     pub action: String,
     pub every: u64,
     pub column: String,
+    /// the colour of the dot beside a value, by how the value starts ("In game" = "#3dd68c");
+    /// values matching none get a grey dot
+    #[serde(default)]
+    pub colors: std::collections::BTreeMap<String, String>,
+}
+
+impl Watch {
+    pub fn color_of(&self, value: &str) -> Option<&str> {
+        self.colors
+            .iter()
+            .filter(|(start, _)| value.starts_with(start.as_str()))
+            .max_by_key(|(start, _)| start.len())
+            .map(|(_, c)| c.as_str())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -295,7 +309,8 @@ fn spawn_helper(
         .arg(action)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        // the helper's own messages (and Mocktail's, through it) land in Ludae's log
+        .stderr(crate::log::file().map_or_else(Stdio::null, Stdio::from))
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", helper.display()))?;
     Ok((child, dir, helper))
@@ -494,5 +509,13 @@ label = "Place"
         .unwrap();
         assert!(f.actions.iter().all(Action::needs_form));
         assert_eq!(f.watch.unwrap().column, "Online");
+        // the longest matching start decides a value's colour
+        let w: Watch = toml::from_str(
+            "action = \"p\"\nevery = 15\ncolumn = \"Online\"\n[colors]\n\"In game\" = \"#00ff00\"\n\"In\" = \"#000000\"\n",
+        )
+        .unwrap();
+        assert_eq!(w.color_of("In game: Rogue Lineage"), Some("#00ff00"));
+        assert_eq!(w.color_of("In Studio"), Some("#000000"));
+        assert_eq!(w.color_of("Offline"), None);
     }
 }

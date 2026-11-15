@@ -118,6 +118,39 @@ pub fn resolve_share_link(link: &str, cookie: &str) -> Result<(u64, String), Str
     }
 }
 
+/// Online status by user ID, for up to 100 users per request, as the account with `cookie` sees
+/// it: "Offline", "Online", "In game: <place>", "In Studio", "Invisible".
+pub fn presence(user_ids: &[u64], cookie: &str) -> Result<Vec<(u64, String)>, String> {
+    let mut out = Vec::new();
+    for chunk in user_ids.chunks(100) {
+        let mut r = post_signed(
+            "https://presence.roblox.com/v1/presence/users",
+            cookie,
+            &json!({ "userIds": chunk }),
+        )?;
+        if r.status() != 200 {
+            return Err(answer(r.status().as_u16(), "online status"));
+        }
+        let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+        for p in v["userPresences"].as_array().into_iter().flatten() {
+            let Some(id) = p["userId"].as_u64() else {
+                continue;
+            };
+            let place = p["lastLocation"].as_str().unwrap_or("").trim();
+            let text = match p["userPresenceType"].as_u64() {
+                Some(1) => "Online".to_string(),
+                Some(2) if place.is_empty() => "In game".to_string(),
+                Some(2) => format!("In game: {place}"),
+                Some(3) => "In Studio".to_string(),
+                Some(4) => "Invisible".to_string(),
+                _ => "Offline".to_string(),
+            };
+            out.push((id, text));
+        }
+    }
+    Ok(out)
+}
+
 /// A new device identity (`RBXEventTrackerV2` value), as the Roblox app makes on its first start.
 /// Some requests (blocking a player, for one) fail from sessions without one.
 pub fn new_browser_tracker() -> Option<String> {

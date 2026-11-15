@@ -582,7 +582,12 @@ impl App {
                     Sort::Group => lower(&a.group),
                     Sort::Mode => self.mode(m, a),
                     Sort::Notes => lower(a.notes.lines().next().unwrap_or("")),
-                    Sort::Watch => lower(self.watch_values.get(&a.id).map_or("", String::as_str)),
+                    // a coloured status (in game, online) before one without (offline), then by text
+                    Sort::Watch => {
+                        let v = self.watch_values.get(&a.id).map_or("", String::as_str);
+                        let lit = m.watch.as_ref().and_then(|w| w.color_of(v)).is_some();
+                        format!("{}{}", if lit { 0 } else { 1 }, lower(v))
+                    }
                 };
                 (v.is_empty(), v, user(a))
             };

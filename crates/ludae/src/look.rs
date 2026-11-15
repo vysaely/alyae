@@ -91,6 +91,8 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.active.bg_fill = c.accent.gamma_multiply(0.45);
     v.widgets.active.weak_bg_fill = c.accent.gamma_multiply(0.45);
     ctx.set_visuals(v);
+    // labels are not text to select: rows and cards take the click, Copy buttons copy
+    ctx.global_style_mut(|style| style.interaction.selectable_labels = false);
 }
 
 /// The big button (AEAM's Join Server), in the accent.

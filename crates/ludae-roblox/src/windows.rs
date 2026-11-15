@@ -84,12 +84,18 @@ fn enc(s: &str) -> String {
 /// Roblox's settings file, shared by every client.
 fn live_settings() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(Path::new(&base).join("Roblox").join("GlobalBasicSettings_13.xml"))
+    Some(
+        Path::new(&base)
+            .join("Roblox")
+            .join("GlobalBasicSettings_13.xml"),
+    )
 }
 
 /// This account's own copy of the settings file.
 fn own_settings(req: &Request) -> PathBuf {
-    req.data_dir.join("settings").join(format!("{}.xml", req.id))
+    req.data_dir
+        .join("settings")
+        .join(format!("{}.xml", req.id))
 }
 
 /// Who launched last: only that account's settings are still in the shared file at its exit.
@@ -105,7 +111,9 @@ fn settings_before_launch(req: &Request, live: &Path) {
     }
     if own.is_file() {
         if let Err(e) = std::fs::copy(&own, live) {
-            fail(&format!("cannot put this account's Roblox settings in place: {e}"));
+            fail(&format!(
+                "cannot put this account's Roblox settings in place: {e}"
+            ));
         }
     }
     let fps = req.fps();
@@ -137,7 +145,11 @@ impl LaunchTurn {
     fn take() -> Self {
         // SAFETY: named mutex; the wait returns when this process owns it (or its owner died)
         unsafe {
-            let h = CreateMutexW(std::ptr::null(), 0, wide("Local\\LudaeRobloxLaunch").as_ptr());
+            let h = CreateMutexW(
+                std::ptr::null(),
+                0,
+                wide("Local\\LudaeRobloxLaunch").as_ptr(),
+            );
             if h.is_null() {
                 fail("cannot create the launch lock");
             }

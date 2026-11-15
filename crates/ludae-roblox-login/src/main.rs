@@ -91,11 +91,16 @@ fn may_open(url: &str) -> bool {
         return false;
     };
     let host = rest.split(['/', '?', '#', ':']).next().unwrap_or("");
-    ["roblox.com", "rbxcdn.com", "arkoselabs.com", "funcaptcha.com", "hcaptcha.com"]
-        .iter()
-        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+    [
+        "roblox.com",
+        "rbxcdn.com",
+        "arkoselabs.com",
+        "funcaptcha.com",
+        "hcaptcha.com",
+    ]
+    .iter()
+    .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
-
 
 fn main() {
     let mut line = String::new();

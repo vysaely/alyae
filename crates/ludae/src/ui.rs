@@ -54,6 +54,8 @@ pub struct App {
     form: Option<(String, Vec<String>)>,
     /// the name typed for a new bookmark
     bookmark_name: String,
+    /// the watch column shows its text (else only the dot, the text on hover)
+    watch_text: bool,
 }
 
 const NO_GROUP: &str = "Ungrouped";
@@ -99,10 +101,12 @@ impl App {
             last_watch: None,
             form: None,
             bookmark_name: String::new(),
+            watch_text: true,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, list)) => {
                 app.accounts = list;
+                app.watch_text = s.setting("watch_text").is_none_or(|v| v != "0");
                 let last = s
                     .setting("last_game")
                     .filter(|g| app.modules.iter().any(|m| &m.id == g));
@@ -602,7 +606,7 @@ impl App {
     }
 
     /// A column heading that sorts by `by`: first click A→Z, second Z→A, third back to no sort.
-    fn sort_heading(&mut self, ui: &mut egui::Ui, label: &str, by: Sort) {
+    fn sort_heading(&mut self, ui: &mut egui::Ui, label: &str, by: Sort) -> egui::Response {
         let arrow = match self.sort_by {
             Some((b, false)) if b == by => " A-Z",
             Some((b, true)) if b == by => " Z-A",
@@ -621,6 +625,7 @@ impl App {
                 _ => Some((by, false)),
             };
         }
+        resp
     }
 
     fn groups(&self, game: &str) -> Vec<String> {
@@ -807,6 +812,7 @@ impl App {
         let has_mode = m.field("role").is_some();
         let watch = m.watch.clone();
         let watch_col = watch.as_ref().map(|w| w.column.clone());
+        let show_text = self.watch_text;
         let show_group = self.group_filter.is_none();
         let mut clicked: Option<(String, bool)> = None; // (id, secondary)
         let mut double = None;
@@ -819,12 +825,14 @@ impl App {
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if watch_col.is_some() {
-            table = table.column(
+            table = table.column(if self.watch_text {
                 Column::initial(140.0)
                     .at_least(60.0)
                     .clip(true)
-                    .resizable(true),
-            );
+                    .resizable(true)
+            } else {
+                Column::exact(70.0).clip(true)
+            });
         }
         table = table.column(
             Column::initial(170.0)
@@ -853,7 +861,18 @@ impl App {
             .auto_shrink(false)
             .header(20.0, |mut h| {
                 if let Some(c) = &watch_col {
-                    h.col(|ui| self.sort_heading(ui, c, Sort::Watch));
+                    h.col(|ui| {
+                        let mut show = self.watch_text;
+                        self.sort_heading(ui, c, Sort::Watch).context_menu(|ui| {
+                            ui.checkbox(&mut show, "Show text");
+                        });
+                        if show != self.watch_text {
+                            self.watch_text = show;
+                            if let Some(s) = &self.store {
+                                s.set_setting("watch_text", if show { "1" } else { "0" });
+                            }
+                        }
+                    });
                 }
                 h.col(|ui| {
                     self.sort_heading(ui, &first_label, Sort::User);
@@ -861,12 +880,18 @@ impl App {
                     self.sort_heading(ui, "Alias", Sort::Alias);
                 });
                 if show_group {
-                    h.col(|ui| self.sort_heading(ui, "Group", Sort::Group));
+                    h.col(|ui| {
+                        self.sort_heading(ui, "Group", Sort::Group);
+                    });
                 }
                 if has_mode {
-                    h.col(|ui| self.sort_heading(ui, "Mode", Sort::Mode));
+                    h.col(|ui| {
+                        self.sort_heading(ui, "Mode", Sort::Mode);
+                    });
                 }
-                h.col(|ui| self.sort_heading(ui, "Description", Sort::Notes));
+                h.col(|ui| {
+                    self.sort_heading(ui, "Description", Sort::Notes);
+                });
             })
             .body(|body| {
                 body.rows(22.0, rows.len(), |mut row| {
@@ -880,8 +905,12 @@ impl App {
                                     .color_of(watched)
                                     .and_then(look::hex)
                                     .unwrap_or(look::colors().muted);
-                                dot(ui, c);
-                                ui.label(watched);
+                                if show_text {
+                                    dot(ui, c);
+                                    ui.label(watched);
+                                } else {
+                                    dot(ui, c).on_hover_text(watched);
+                                }
                             }
                         });
                     }
@@ -1770,9 +1799,10 @@ fn bookmarks_menu(
 }
 
 /// A small filled circle (drawn, not a glyph: the font has none) before a status.
-fn dot(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 3.5, color);
+    resp
 }
 
 #[cfg(test)]
@@ -1860,6 +1890,19 @@ mod tests {
         assert!(marker.exists(), "the confirmed action did not run");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// Right-clicking the Online heading switches its text off and on.
+    #[test]
+    fn online_text_toggles() {
+        let (mut h, dir) = window("roblox");
+        assert!(h.state().watch_text);
+        h.get_by_label("ONLINE").click_secondary();
+        h.run();
+        h.get_by_label("Show text").click();
+        h.run();
+        assert!(!h.state().watch_text, "Show text did not switch off");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

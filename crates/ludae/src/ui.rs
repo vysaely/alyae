@@ -107,7 +107,7 @@ impl App {
             watch_text: true,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
-            Ok((s, list)) => {
+            Ok((s, (list, problems))) => {
                 app.accounts = list;
                 app.watch_text = s.setting("watch_text").is_none_or(|v| v != "0");
                 let last = s
@@ -116,6 +116,9 @@ impl App {
                 app.store = Some(s);
                 if last.is_some() {
                     app.choose_game(last);
+                }
+                if !problems.is_empty() {
+                    app.say(problems.join("; "), true);
                 }
             }
             Err(e) => app.fatal = Some(e),
@@ -190,15 +193,37 @@ impl App {
 
     fn import_aeam(&mut self) {
         let Some(s) = &self.store else { return };
-        let result = crate::aeam::import(s, &self.accounts).and_then(|n| s.list().map(|l| (n, l)));
+        let result = crate::aeam::import(s, &self.accounts).and_then(|r| s.list().map(|l| (r, l)));
         match result {
-            Ok(((added, skipped), list)) => {
+            Ok((report, (list, problems))) => {
                 self.accounts = list;
-                let mut text = format!("Brought in {added} Roblox accounts from AEAM");
-                if skipped > 0 {
-                    text += &format!(" ({skipped} were here already)");
+                let mut text = format!("Brought in {} Roblox accounts from AEAM", report.added);
+                if report.skipped > 0 {
+                    text += &format!(" ({} were here already)", report.skipped);
                 }
-                self.say(text, false);
+                let bad_total: usize = report.bad_secrets.iter().map(|(_, n)| *n).sum();
+                if bad_total > 0 {
+                    let who: Vec<String> = report
+                        .bad_secrets
+                        .iter()
+                        .map(|(name, n)| {
+                            if *n > 1 {
+                                format!("{name} ({n})")
+                            } else {
+                                name.clone()
+                            }
+                        })
+                        .collect();
+                    text += &format!(
+                        "; {bad_total} secret{} could not be decrypted ({})",
+                        if bad_total == 1 { "" } else { "s" },
+                        who.join(", ")
+                    );
+                }
+                if !problems.is_empty() {
+                    text += &format!("; {}", problems.join("; "));
+                }
+                self.say(text, bad_total > 0 || !problems.is_empty());
             }
             Err(e) => self.say(format!("AEAM accounts not brought in: {e}"), true),
         }
@@ -1957,6 +1982,48 @@ mod tests {
             "Add did not save the new account"
         );
         assert_eq!(h.state().accounts[0].game, "roblox");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn corrupt_account_shows_non_fatal_warning() {
+        let dir = std::env::temp_dir().join(format!("ludae-ui-bad-{}", store::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("t.db");
+        let s = Store::open(&db_path, crate::vault::Vault::from_key(&[3; 32])).unwrap();
+        s.save(&Account {
+            id: "good1".into(),
+            game: "generic".into(),
+            name: "good".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_setting("last_game", "generic");
+        {
+            let db = rusqlite::Connection::open(&db_path).unwrap();
+            let bad_blob = crate::vault::Vault::from_key(&[9; 32]).seal(b"{\"password\":\"x\"}");
+            db.execute(
+                "INSERT INTO accounts (id, game, name, secrets) VALUES ('bad1', 'generic', 'bad', ?1)",
+                rusqlite::params![bad_blob],
+            )
+            .unwrap();
+        }
+        let modules = module::load_all(&[PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../modules"
+        ))]);
+        let d = dir.clone();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1000.0, 580.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, Ok(s), d, modules));
+        h.run();
+        assert!(h.state().fatal.is_none());
+        assert_eq!(h.state().accounts.len(), 1);
+        assert_eq!(h.state().accounts[0].id, "good1");
+        let (msg, bad) = h.state().message.as_ref().expect("expected warning message");
+        assert!(*bad);
+        assert!(msg.contains("bad1"), "got: {msg}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -42,6 +42,13 @@ choices = ["alt", "main"]
 hint = "main: full FPS and quality; alt: small, muted, low FPS"
 
 [[field]]
+key = "anti_afk"
+label = "Anti-AFK"
+kind = "choice"
+choices = ["off", "12", "15", "18"]
+hint = "minutes without input before a 1 px nudge (Roblox kicks after 20)"
+
+[[field]]
 key = "fps"
 label = "FPS cap"
 hint = "empty: 330 for a main, 6 for an alt; 0: no cap"

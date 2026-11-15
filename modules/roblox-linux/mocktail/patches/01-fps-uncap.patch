@@ -1,0 +1,220 @@
+diff --git a/src/legacy/legacy_runtime.cc b/src/legacy/legacy_runtime.cc
+index e57e4de..04509af 100644
+--- a/src/legacy/legacy_runtime.cc
++++ b/src/legacy/legacy_runtime.cc
+@@ -1858,6 +1858,207 @@ extern "C" void MocktailConstructorWrapper() {
+   MaybePrintLibRobloxConstructorSummary(idx);
+ }
+ 
++// The Android payload clamps DFIntTaskSchedulerTargetFps to 240 even though
++// the desktop client honours higher Basic Settings caps. Raise only clamps
++// that read that flag's value before JNI_OnLoad, so a configured
++// frame_rate_limit above 240 applies. The same "mov ecx, 240; cmp; cmov"
++// shape also clamps network send rates (S2PhysicsSenderRate,
++// ISRBandwidthSendLimiterHz), which must keep Roblox's limits. The flag's
++// storage is found from its registration: the name string's address is stored
++// 8 bytes after the value. MOCKTAIL_KEEP_ROBLOX_FPS_CLAMP disables this.
++namespace {
++
++struct LibRobloxMapping {
++  unsigned char* begin;
++  std::size_t length;
++  bool executable;
++};
++
++std::vector<LibRobloxMapping> LibRobloxMappings() {
++  std::vector<LibRobloxMapping> mappings;
++  FILE* maps = std::fopen("/proc/self/maps", "r");
++  if (maps == nullptr) {
++    return mappings;
++  }
++  char line[1024];
++  while (std::fgets(line, sizeof(line), maps) != nullptr) {
++    uintptr_t start = 0;
++    uintptr_t end = 0;
++    char perms[8] = {};
++    if (std::strstr(line, "libroblox.so") == nullptr ||
++        std::sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3 ||
++        perms[0] != 'r' || end <= start) {
++      continue;
++    }
++    mappings.push_back({reinterpret_cast<unsigned char*>(start), end - start,
++                        perms[2] == 'x'});
++  }
++  std::fclose(maps);
++  return mappings;
++}
++
++int32_t ReadDisplacement(const unsigned char* at) {
++  int32_t value = 0;
++  std::memcpy(&value, at, sizeof(value));
++  return value;
++}
++
++// lea r64, [rip + disp32] / mov [rip + disp32], r64 with a REX.W prefix.
++bool IsRipLea(const unsigned char* at) {
++  return (at[0] == 0x48 || at[0] == 0x4c) && at[1] == 0x8d &&
++         (at[2] & 0xc7) == 0x05;
++}
++
++bool IsRipStoreOfSameRegister(const unsigned char* at,
++                              const unsigned char* lea) {
++  return at[0] == lea[0] && at[1] == 0x89 && (at[2] & 0xc7) == 0x05 &&
++         ((at[2] >> 3) & 7) == ((lea[2] >> 3) & 7);
++}
++
++uintptr_t FindTaskSchedulerTargetFpsValue(
++    const std::vector<LibRobloxMapping>& mappings) {
++  static constexpr char kName[] = "\0TaskSchedulerTargetFps";
++  uintptr_t name = 0;
++  for (const LibRobloxMapping& mapping : mappings) {
++    const void* found = memmem(mapping.begin, mapping.length, kName,
++                               sizeof(kName));  // includes the trailing NUL
++    if (found != nullptr) {
++      name = reinterpret_cast<uintptr_t>(found) + 1;
++      break;
++    }
++  }
++  if (name == 0) {
++    return 0;
++  }
++  for (const LibRobloxMapping& mapping : mappings) {
++    if (!mapping.executable || mapping.length < 64) {
++      continue;
++    }
++    for (std::size_t i = 0; i + 64 <= mapping.length; ++i) {
++      const unsigned char* lea = mapping.begin + i;
++      if (!IsRipLea(lea) ||
++          reinterpret_cast<uintptr_t>(lea) + 7 + ReadDisplacement(lea + 3) !=
++              name) {
++        continue;
++      }
++      for (std::size_t k = 7; k < 40; ++k) {
++        const unsigned char* store = lea + k;
++        if (IsRipStoreOfSameRegister(store, lea)) {
++          return reinterpret_cast<uintptr_t>(store) + 7 +
++                 ReadDisplacement(store + 3) - 8;
++        }
++      }
++    }
++  }
++  return 0;
++}
++
++// The register a "mov r32, [rip + disp32]" (optional REX without W) at `at`
++// loads the flag value into, or -1.
++int LoadedRegister(const unsigned char* at, uintptr_t value) {
++  int rex = 0;
++  if (at[0] >= 0x40 && at[0] <= 0x47) {
++    rex = at[0];
++    ++at;
++  }
++  if (at[0] != 0x8b || (at[1] & 0xc7) != 0x05 ||
++      reinterpret_cast<uintptr_t>(at) + 6 + ReadDisplacement(at + 2) != value) {
++    return -1;
++  }
++  return ((at[1] >> 3) & 7) | ((rex & 4) << 1);
++}
++
++// AEAM: a 240 clamp of the flag value. "mov r32, 240" then "cmp" of that
++// register with another (optional REX), then a cmov; the other register was
++// loaded from the flag within 160 bytes before. Roblox 2.742 moved one clamp
++// to r12d with the load ~80 bytes earlier ("mov eax, 240; cmp r12d, eax;
++// cmovae r12d, eax"), which the fixed ecx/eax pattern missed.
++bool IsFlagClamp(const unsigned char* clamp, uintptr_t value) {
++  if (clamp[0] < 0xb8 || clamp[0] > 0xbf || clamp[1] != 0xf0 ||
++      clamp[2] != 0 || clamp[3] != 0 || clamp[4] != 0) {
++    return false;
++  }
++  const int imm = clamp[0] - 0xb8;
++  const unsigned char* p = clamp + 5;
++  int rex = 0;
++  if (*p == 0x41 || *p == 0x44 || *p == 0x45) {
++    rex = *p++;
++  }
++  if (p[0] != 0x39 || (p[1] >> 6) != 3) {
++    return false;
++  }
++  const int reg = ((p[1] >> 3) & 7) | ((rex & 4) << 1);
++  const int rm = (p[1] & 7) | ((rex & 1) << 3);
++  if (imm != reg && imm != rm) {
++    return false;
++  }
++  const int other = imm == reg ? rm : reg;
++  const unsigned char* q = p + 2;
++  if (*q == 0x41 || *q == 0x44 || *q == 0x45) {
++    ++q;
++  }
++  if (q[0] != 0x0f || !(q[1] == 0x4c || q[1] == 0x43 || q[1] == 0x4f ||
++                        q[1] == 0x42 || q[1] == 0x4e || q[1] == 0x46)) {
++    return false;
++  }
++  for (std::size_t back = 6; back <= 160; ++back) {
++    if (LoadedRegister(clamp - back, value) == other) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
++static void RaiseLibRobloxFrameRateClamps() {
++  if (IsEnabled("MOCKTAIL_KEEP_ROBLOX_FPS_CLAMP")) {
++    return;
++  }
++  const std::vector<LibRobloxMapping> mappings = LibRobloxMappings();
++  const uintptr_t value = FindTaskSchedulerTargetFpsValue(mappings);
++  if (value == 0) {
++    std::cout << "  [runtime] TaskSchedulerTargetFps not located; libroblox "
++                 "240 FPS clamp left in place\n"
++              << std::flush;
++    return;
++  }
++  constexpr uint32_t kRaisedLimit = 10000;
++  const long page_size_value = sysconf(_SC_PAGESIZE);
++  const uintptr_t page_size =
++      page_size_value > 0 ? static_cast<uintptr_t>(page_size_value) : 4096;
++  int patched = 0;
++  for (const LibRobloxMapping& mapping : mappings) {
++    if (!mapping.executable || mapping.length < 64) {
++      continue;
++    }
++    for (std::size_t i = 160; i + 16 <= mapping.length; ++i) {
++      unsigned char* const clamp = mapping.begin + i;
++      if ((clamp[0] & 0xf8) != 0xb8 || clamp[1] != 0xf0 ||
++          !IsFlagClamp(clamp, value)) {
++        continue;
++      }
++      const uintptr_t page = reinterpret_cast<uintptr_t>(clamp) &
++                             ~(page_size - 1);
++      const uintptr_t page_end =
++          (reinterpret_cast<uintptr_t>(clamp + 5) + page_size - 1) &
++          ~(page_size - 1);
++      void* const page_ptr = reinterpret_cast<void*>(page);
++      if (mprotect(page_ptr, page_end - page,
++                   PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
++        continue;
++      }
++      std::memcpy(clamp + 1, &kRaisedLimit, sizeof(kRaisedLimit));
++      mprotect(page_ptr, page_end - page, PROT_READ | PROT_EXEC);
++      ++patched;
++    }
++  }
++  std::cout << "  [runtime] libroblox TaskSchedulerTargetFps 240 clamps "
++               "raised: "
++            << patched << '\n'
++            << std::flush;
++}
++
+ extern "C" void mocktail_before_soinfo_constructors(const char* realpath,
+                                                     uintptr_t base) {
+   if (realpath == nullptr || std::strstr(realpath, "libroblox.so") == nullptr ||
+@@ -5734,6 +5935,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
+     return EXIT_FAILURE;
+   }
+ 
++  RaiseLibRobloxFrameRateClamps();
+   PrintStage(5, "Invoking JNI_OnLoad in libroblox.so");
+ 
+   auto* jni_onload =

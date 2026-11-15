@@ -597,10 +597,15 @@ pub fn play(req: &Request) {
         flags.clone(),
     ));
     env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
-    if main {
-        // the desktop's hardware cursor instead of one drawn in the frame (AEAM's Mocktail build)
-        env.push(("MOCKTAIL_HOST_CURSOR".into(), "1".into()));
-    } else {
+    // Ludae's Mocktail build (anti-AFK patch): a nudge after this many seconds without input
+    let afk_minutes: u64 = req.get("anti_afk").parse().unwrap_or(0);
+    if afk_minutes > 0 {
+        env.push((
+            "MOCKTAIL_ANTI_AFK_SECONDS".into(),
+            (afk_minutes.min(19) * 60).to_string(),
+        ));
+    }
+    if !main {
         env.push(("SDL_AUDIODRIVER".into(), "dummy".into()));
         env.push(("PULSE_SERVER".into(), "/dev/null".into()));
         env.push(("ALSA_CARD".into(), "Dummy".into()));

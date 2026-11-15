@@ -2,6 +2,7 @@
 //! Ludae: game accounts in one small window. Games come as modules (see PLAN.md).
 
 mod aeam;
+mod log;
 mod look;
 mod module;
 mod paths;
@@ -19,6 +20,8 @@ fn main() -> eframe::Result {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
+    log::init(&dir);
+    log::line("", "Ludae started");
     let opened = vault::Vault::open(&dir.join("vault.key"))
         .and_then(|v| store::Store::open(&dir.join("ludae.db"), v));
     let options = eframe::NativeOptions {

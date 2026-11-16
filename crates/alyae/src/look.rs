@@ -1,6 +1,6 @@
 //! Colours from the desktop: Infynitae's theme when it runs (`LOOK_*` from
 //! `infynitae-edge-apps --print-theme`), Windows' light/dark mode and accent colour on Windows,
-//! else egui's dark look. The layout follows AEAM.
+//! another Linux desktop's through the desktop portal, else egui's dark look. The layout follows AEAM.
 
 use eframe::egui::{self, Color32, FontId, RichText, Stroke};
 use std::sync::OnceLock;
@@ -100,19 +100,104 @@ fn windows() -> Option<Colors> {
     None
 }
 
+/// One `org.freedesktop.appearance` value from the desktop portal, as busctl prints it
+/// (`v u 1`, `v (ddd) 0.8 0.44 0.66`): the words after the type.
+#[cfg(not(windows))]
+fn portal_value(key: &str) -> Option<Vec<String>> {
+    let out = std::process::Command::new("busctl")
+        .args([
+            "--user",
+            "--timeout=1",
+            "call",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings",
+            "ReadOne",
+            "ss",
+            "org.freedesktop.appearance",
+            key,
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(text.split_whitespace().skip(2).map(str::to_owned).collect())
+}
+
+/// Any other Linux desktop (GNOME, KDE, ...): its light or dark preference and accent colour
+/// through the desktop portal, as Windows' come from the registry.
+#[cfg(not(windows))]
+fn portal() -> Option<Colors> {
+    let scheme = portal_value("color-scheme")?;
+    let accent = portal_value("accent-color");
+    match portal_from(&scheme, accent.as_deref()) {
+        (Some(_), colors) => Some(colors),
+        (None, _) => None,
+    }
+}
+
+/// The colours from the portal's words: `color-scheme` 1 is dark, 2 light, 0 no preference
+/// (`None`, egui's dark look is used then); `accent-color` three 0-1 floats, out of range = none.
+#[cfg(not(windows))]
+fn portal_from(scheme: &[String], accent: Option<&[String]>) -> (Option<bool>, Colors) {
+    let light = match scheme.first().map(String::as_str) {
+        Some("2") => Some(true),
+        Some("1") => Some(false),
+        _ => None,
+    };
+    let v = if light == Some(true) {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    let accent = accent
+        .map(|w| {
+            w.iter()
+                .map(|x| x.parse::<f64>().ok().filter(|f| (0.0..=1.0).contains(f)))
+                .collect::<Option<Vec<_>>>()
+        })
+        .and_then(|c| c.filter(|c| c.len() == 3))
+        .map(|c| {
+            Color32::from_rgb(
+                (c[0] * 255.0).round() as u8,
+                (c[1] * 255.0).round() as u8,
+                (c[2] * 255.0).round() as u8,
+            )
+        })
+        .unwrap_or(v.selection.bg_fill);
+    (
+        light,
+        Colors {
+            card: v.panel_fill,
+            edge: v.widgets.noninteractive.bg_stroke.color,
+            text: v.text_color(),
+            muted: v.weak_text_color(),
+            accent,
+        },
+    )
+}
+
+#[cfg(windows)]
+fn portal() -> Option<Colors> {
+    None
+}
+
 /// The desktop's colours, or egui's own dark look's where the desktop gives none.
 pub fn colors() -> Colors {
     *COLORS.get_or_init(|| {
-        infynitae().or_else(windows).unwrap_or_else(|| {
-            let v = egui::Visuals::dark();
-            Colors {
-                card: v.panel_fill,
-                edge: v.widgets.noninteractive.bg_stroke.color,
-                text: v.text_color(),
-                muted: v.weak_text_color(),
-                accent: v.selection.bg_fill,
-            }
-        })
+        infynitae()
+            .or_else(windows)
+            .or_else(portal)
+            .unwrap_or_else(|| {
+                let v = egui::Visuals::dark();
+                Colors {
+                    card: v.panel_fill,
+                    edge: v.widgets.noninteractive.bg_stroke.color,
+                    text: v.text_color(),
+                    muted: v.weak_text_color(),
+                    accent: v.selection.bg_fill,
+                }
+            })
     })
 }
 
@@ -162,4 +247,25 @@ pub fn tag(text: &str) -> RichText {
         .color(colors().muted)
         .font(FontId::proportional(11.0))
         .strong()
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    fn words(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn portal_scheme_and_accent_are_read() {
+        let (light, c) = portal_from(&words("2"), Some(&words("0.8 0.439216 0.662745")));
+        assert_eq!(light, Some(true));
+        assert_eq!(c.accent, Color32::from_rgb(204, 112, 169));
+        assert_eq!(c.card, egui::Visuals::light().panel_fill);
+        let (light, c) = portal_from(&words("1"), Some(&words("2 0 0")));
+        assert_eq!(light, Some(false));
+        assert_eq!(c.accent, egui::Visuals::dark().selection.bg_fill);
+        assert_eq!(portal_from(&words("0"), None).0, None);
+    }
 }

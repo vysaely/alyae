@@ -46,8 +46,6 @@ To uninstall, run `./install.sh --uninstall`. Your accounts in `~/.local/share/a
 **Accounts file** (bottom right) saves every account into one file locked with a password. Open it
 on another PC with Add Account → From an accounts file.
 
-The same dialog also reads Roblox Account Manager's `AccountData.json` and AEAM's data folder.
-
 ## License
 
 [GPL-3.0](LICENSE). The patches in `modules/roblox-linux/mocktail/` change Mocktail, which is

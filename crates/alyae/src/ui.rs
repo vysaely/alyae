@@ -68,6 +68,12 @@ pub struct App {
     watch_text: bool,
     /// the accounts-file dialog, when open
     transfer: Option<Transfer>,
+    /// the Edit Account window (every field of the chosen account) is open
+    edit_open: bool,
+    /// the Alias and Description boxes on the right, and the account they were filled from
+    side_for: Option<String>,
+    alias_buf: String,
+    notes_buf: String,
 }
 
 /// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
@@ -128,6 +134,10 @@ impl App {
             bookmark_name: String::new(),
             watch_text: true,
             transfer: None,
+            edit_open: false,
+            side_for: None,
+            alias_buf: String::new(),
+            notes_buf: String::new(),
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -488,6 +498,7 @@ impl eframe::App for App {
                 self.game_view(ui, &g);
             }
         }
+        self.edit_dialog(&ctx);
         self.remove_dialog(&ctx);
         self.form_dialog(&ctx);
         // an accounts file dropped on the window opens the import
@@ -632,15 +643,69 @@ impl App {
             self.choose_game(None);
             return;
         };
+        // AEAM's layout: the status line along the bottom, the account's controls on the right,
+        // the list on the left
+        egui::Panel::bottom("status")
+            .exact_size(26.0)
+            .show(ui, |ui| self.status_bar(ui, &m));
         egui::Panel::right("deck")
-            .default_size(300.0)
-            .min_size(240.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| self.deck(ui, &m));
-            });
+            .default_size(340.0)
+            .min_size(280.0)
+            .show(ui, |ui| self.deck(ui, &m));
         egui::CentralPanel::default().show(ui, |ui| self.accounts_side(ui, &m));
+    }
+
+    /// The bottom line: the last message on the left; counts, the accounts file and the log on
+    /// the right.
+    fn status_bar(&mut self, ui: &mut egui::Ui, m: &Module) {
+        ui.horizontal_centered(|ui| {
+            self.message_line(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Open log")
+                    .on_hover_text(self.dir.join("alyae.log").display().to_string())
+                    .clicked()
+                {
+                    let path = self.dir.join("alyae.log");
+                    let opener = if cfg!(windows) {
+                        "explorer"
+                    } else {
+                        "xdg-open"
+                    };
+                    if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
+                        self.say(format!("cannot open {}: {e}", path.display()), true);
+                    }
+                }
+                // moving accounts to another PC (or a backup): every game's accounts in one file
+                if ui
+                    .small_button("Accounts file")
+                    .on_hover_text(
+                        "Save all accounts to a password-sealed file, or bring one in \
+                         (an .alyae file can also be dropped on the window)",
+                    )
+                    .clicked()
+                {
+                    self.transfer = Some(Transfer {
+                        export: true,
+                        path: crate::transfer::default_path().display().to_string(),
+                        ..Default::default()
+                    });
+                }
+                let total = self.accounts.iter().filter(|a| a.game == m.id).count();
+                let running = self
+                    .accounts
+                    .iter()
+                    .filter(|a| a.game == m.id && self.running.contains_key(&a.id))
+                    .count();
+                let text = format!("Total: {total}  \u{2022}  Running: {running}");
+                let color = if running > 0 {
+                    look::colors().accent
+                } else {
+                    look::colors().muted
+                };
+                ui.label(RichText::new(text).color(color));
+            });
+        });
     }
 
     /// The last message (an error in red); clicking it dismisses it.
@@ -780,9 +845,10 @@ impl App {
                 ),
             };
             let groups = self.groups(&m.id);
+            ui.label(look::tag("Group:"));
             egui::ComboBox::from_id_salt("group_filter")
                 .selected_text(label)
-                .width(170.0)
+                .width(200.0)
                 .show_ui(ui, |ui| {
                     if ui
                         .selectable_label(
@@ -810,13 +876,22 @@ impl App {
                         }
                     }
                 });
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Search")
-                    .desired_width(ui.available_width() - 90.0),
-            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(format!("{} selected", self.selected.len())).weak());
+                // AEAM's "1 selected" box
+                egui::Frame::new()
+                    .stroke(egui::Stroke::new(1.0, look::colors().edge))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("{} selected", self.selected.len())).strong(),
+                        );
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text("Search")
+                        .desired_width(ui.available_width().clamp(80.0, 220.0)),
+                );
             });
             if let Some(g) = switch.filter(|g| g != &m.id) {
                 self.choose_game(Some(g));
@@ -829,93 +904,74 @@ impl App {
         });
         ui.horizontal(|ui| {
             let flow = m.add.clone().unwrap_or_default();
-            if flow.action.is_empty() {
-                if ui.button("Add account").clicked() {
-                    self.add_account(m);
-                }
-            } else {
-                let busy = self.adding.len();
-                let label = if busy > 0 {
-                    format!("Add account ({busy} signing in)")
+            let import = (!flow.import_field.is_empty()).then(|| {
+                if flow.import_label.is_empty() {
+                    "Import".to_string()
                 } else {
-                    "Add account".to_string()
-                };
-                // one button: a click opens the login page, its right-click menu has the rest
-                let import = (!flow.import_field.is_empty()).then(|| {
-                    if flow.import_label.is_empty() {
-                        "Import".to_string()
-                    } else {
-                        flow.import_label.clone()
-                    }
-                });
-                let hover = match &import {
-                    Some(i) => format!(
-                        "Opens the login page: sign in, and the account is added.\nRight-click: {i}, Add manually"
-                    ),
-                    None => "Opens the login page: sign in, and the account is added.\nRight-click: Add manually".to_string(),
-                };
-                let b = ui.button(label).on_hover_text(hover);
-                if b.clicked() {
-                    self.add_via(m, &flow.action);
-                }
-                b.context_menu(|ui| {
-                    if let Some(i) = &import
-                        && ui.button(i).clicked()
-                    {
-                        self.import_text = Some(String::new());
-                        ui.close();
-                    }
-                    if ui.button("Add manually").clicked() {
-                        self.add_account(m);
-                        ui.close();
-                    }
-                });
-            }
-            let ids: Vec<String> = self.selected.iter().cloned().collect();
-            if !ids.is_empty() && ui.button("Remove").clicked() {
-                self.confirm_remove = ids.clone();
-            }
-            let running = self
-                .accounts
-                .iter()
-                .filter(|a| a.game == m.id && self.running.contains_key(&a.id))
-                .count();
-            if running > 0 {
-                ui.label(RichText::new(format!("{running} running")).color(look::colors().accent));
-            }
-            self.message_line(ui);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // moving accounts to another PC (or a backup): every game's accounts in one file
-                if ui
-                    .small_button("Accounts file")
-                    .on_hover_text(
-                        "Save all accounts to a password-sealed file, or bring one in \
-                         (an .alyae file can also be dropped on the window)",
-                    )
-                    .clicked()
-                {
-                    self.transfer = Some(Transfer {
-                        export: true,
-                        path: crate::transfer::default_path().display().to_string(),
-                        ..Default::default()
-                    });
-                }
-                if ui
-                    .small_button("Open log")
-                    .on_hover_text(self.dir.join("alyae.log").display().to_string())
-                    .clicked()
-                {
-                    let path = self.dir.join("alyae.log");
-                    let opener = if cfg!(windows) {
-                        "explorer"
-                    } else {
-                        "xdg-open"
-                    };
-                    if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
-                        self.say(format!("cannot open {}: {e}", path.display()), true);
-                    }
+                    flow.import_label.clone()
                 }
             });
+            let busy = self.adding.len();
+            let label = if busy > 0 {
+                format!("Add Account ({busy} signing in)")
+            } else {
+                "Add Account".to_string()
+            };
+            // AEAM's Add Account: the button does the usual way (sign in on the game's page when
+            // the game has one), its arrow and right-click hold the other ways
+            let more = |ui: &mut egui::Ui, app: &mut App| {
+                if !flow.action.is_empty() && ui.button("Sign in with browser").clicked() {
+                    app.add_via(m, &flow.action);
+                    ui.close();
+                }
+                if let Some(i) = &import
+                    && ui.button(i).clicked()
+                {
+                    app.import_text = Some(String::new());
+                    ui.close();
+                }
+                if ui.button("Add manually").clicked() {
+                    app.add_account(m);
+                    ui.close();
+                }
+                if ui.button("From an accounts file").clicked() {
+                    app.transfer = Some(Transfer::default());
+                    ui.close();
+                }
+            };
+            let hover = if flow.action.is_empty() {
+                "Fill in a new account".to_string()
+            } else {
+                "Opens the login page: sign in, and the account is added".to_string()
+            };
+            let b = ui.button(label).on_hover_text(hover);
+            if b.clicked() {
+                if flow.action.is_empty() {
+                    self.add_account(m);
+                } else {
+                    self.add_via(m, &flow.action);
+                }
+            }
+            b.context_menu(|ui| more(ui, self));
+            let arrow = ui.menu_button("    ", |ui| more(ui, self)).response;
+            caret(ui, &arrow);
+            arrow.on_hover_text("Other ways to add");
+            let ids: Vec<String> = self.selected.iter().cloned().collect();
+            if ui
+                .add_enabled(!ids.is_empty(), egui::Button::new("Remove"))
+                .clicked()
+            {
+                self.confirm_remove = ids.clone();
+            }
+            if let Some(browser) = m.actions.iter().find(|a| a.id == "browser")
+                && ui
+                    .add_enabled(!ids.is_empty(), egui::Button::new("Open Browser"))
+                    .on_hover_text("roblox.com signed in as the chosen account, in its own window")
+                    .clicked()
+            {
+                let id = browser.id.clone();
+                self.start_action(m, &id, ids);
+            }
         });
     }
 
@@ -1176,9 +1232,12 @@ impl App {
         // with its text hidden the status is a dot at the start of the name: no column of its own
         let watch_column = watch_col.is_some() && self.watch_text;
         if watch_column {
-            table = table.column(Column::initial(140.0).at_least(60.0).clip(true));
+            table = table.column(Column::initial(90.0).at_least(60.0).clip(true));
         }
-        table = table.column(Column::initial(170.0).at_least(80.0).clip(true));
+        // AEAM's columns: Username, Alias, Group, Mode, Description
+        table = table
+            .column(Column::initial(130.0).at_least(80.0).clip(true))
+            .column(Column::initial(100.0).at_least(50.0).clip(true));
         if show_group {
             table = table.column(Column::initial(80.0).at_least(50.0).clip(true));
         }
@@ -1213,7 +1272,8 @@ impl App {
                     }
                     self.sort_heading(ui, &first_label, Sort::User)
                         .context_menu(|ui| watch_menu(ui, &mut show, &mut sort_watch));
-                    ui.label(look::tag("·"));
+                });
+                h.col(|ui| {
                     self.sort_heading(ui, "Alias", Sort::Alias);
                 });
                 if show != self.watch_text {
@@ -1278,9 +1338,9 @@ impl App {
                         } else {
                             RichText::new(user)
                         });
-                        if !alias.is_empty() {
-                            ui.label(RichText::new(format!("· {alias}")).weak());
-                        }
+                    });
+                    row.col(|ui| {
+                        ui.label(alias);
                     });
                     if show_group {
                         row.col(|ui| {
@@ -1855,6 +1915,8 @@ impl App {
 
     // --- right: launch and the chosen account -----------------------------------------------
 
+    /// The right side, as AEAM's: the join boxes and Join Server, Follow, Alias, Description,
+    /// and the four buttons under it.
     fn deck(&mut self, ui: &mut egui::Ui, m: &Module) {
         let ids: Vec<String> = self
             .selected
@@ -1870,49 +1932,75 @@ impl App {
                 label.to_string()
             }
         };
+        // the Alias and Description boxes follow the account last clicked
+        if self.side_for != self.focus {
+            self.side_for = self.focus.clone();
+            let a = self
+                .focus
+                .as_ref()
+                .and_then(|id| self.accounts.iter().find(|a| &a.id == id));
+            self.alias_buf = a.map(|a| a.name.clone()).unwrap_or_default();
+            self.notes_buf = a.map(|a| a.notes.clone()).unwrap_or_default();
+        }
         let mut run = None;
+        let full = ui.available_width();
+        let gap = ui.spacing().item_spacing.x;
+        let half = ((full - gap) / 2.0).floor();
+        let h = 28.0;
         {
             let inputs = self.inputs.entry(m.id.clone()).or_default();
-            let full = ui.available_width();
-            // the big button's boxes side by side (Place ID | Job ID), the boxes saying what they are
             if let Some(p) = m.actions.iter().find(|a| a.primary) {
                 if !p.inputs.is_empty() {
-                    let gap = ui.spacing().item_spacing.x;
                     let n = p.inputs.len() as f32;
-                    let mark_w = 84.0;
-                    let w = ((full - gap * n - mark_w) / n - 1.0).floor().max(60.0);
+                    let w = ((full - gap * (n - 1.0)) / n).floor();
+                    // AEAM's labels over the boxes, the bookmarks at the end of the line
                     ui.horizontal(|ui| {
-                        bookmarks_menu(
-                            ui,
-                            self.store.as_ref(),
-                            &m.id,
-                            p,
-                            inputs,
-                            &mut self.bookmark_name,
-                            mark_w,
-                        );
+                        for (k, i) in p.inputs.iter().enumerate() {
+                            if k + 1 < p.inputs.len() {
+                                ui.allocate_ui(egui::vec2(w, 16.0), |ui| {
+                                    ui.set_width(w);
+                                    ui.label(look::tag(&i.label));
+                                });
+                            } else {
+                                ui.label(look::tag(&i.label));
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            bookmarks_menu(
+                                ui,
+                                self.store.as_ref(),
+                                &m.id,
+                                p,
+                                inputs,
+                                &mut self.bookmark_name,
+                                84.0,
+                            );
+                        });
+                    });
+                    ui.horizontal(|ui| {
                         for i in &p.inputs {
                             let v = inputs.entry(i.key.clone()).or_default();
-                            ui.add(
+                            ui.add_sized(
+                                [w, h],
                                 egui::TextEdit::singleline(v)
                                     .hint_text(&i.label)
-                                    .desired_width(w),
+                                    .align(egui::Align2::LEFT_CENTER),
                             )
                             .on_hover_text(&i.hint);
                         }
                     });
                 }
                 if ui
-                    .add_enabled(
-                        can_run,
-                        look::primary(&count(&p.label)).min_size(egui::vec2(full - 1.0, 28.0)),
-                    )
+                    .add_enabled_ui(can_run, |ui| {
+                        ui.add_sized([full, 30.0], look::primary(&count(&p.label)))
+                    })
+                    .inner
                     .clicked()
                 {
                     run = Some(p.id.clone());
                 }
             }
-            // one-box buttons as a row: [box][Follow]
+            // one-box buttons: [box][Follow]
             for a in m
                 .actions
                 .iter()
@@ -1923,7 +2011,7 @@ impl App {
                     if ui
                         .add_enabled(
                             can_run,
-                            egui::Button::new(&a.label).min_size(egui::vec2(80.0, 0.0)),
+                            egui::Button::new(&a.label).min_size(egui::vec2(96.0, h)),
                         )
                         .clicked()
                     {
@@ -1933,17 +2021,222 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(v)
                             .hint_text(&i.hint)
-                            .desired_width(ui.available_width()),
+                            .desired_width(ui.available_width())
+                            .min_size(egui::vec2(0.0, h)),
                     );
                 });
             }
         }
-        // every other button (Refresh, Settings, the account tools, Stop) is in the right-click menu
         if let Some(a) = run {
             self.start_action(m, &a, ids.clone());
         }
-        ui.separator();
-        self.editor(ui, m);
+        let one = self.focus.is_some() && !ids.is_empty();
+        // Alias: [box][Set Alias]
+        let mut set_alias = false;
+        row(ui, |ui| {
+            set_alias = ui
+                .add_enabled(
+                    one,
+                    egui::Button::new(count("Set Alias")).min_size(egui::vec2(96.0, h)),
+                )
+                .clicked();
+            ui.add_enabled(
+                one,
+                egui::TextEdit::singleline(&mut self.alias_buf)
+                    .hint_text("Alias")
+                    .desired_width(ui.available_width())
+                    .min_size(egui::vec2(0.0, h)),
+            );
+        });
+        if set_alias {
+            let v = self.alias_buf.trim().to_string();
+            self.edit_all(&ids, |a| a.name = v.clone());
+            self.say(format!("Alias set for {}", plural(ids.len())), false);
+        }
+        // Description fills the height left over the four buttons
+        let buttons_h = 2.0 * h + 3.0 * ui.spacing().item_spacing.y;
+        let note_h = (ui.available_height() - buttons_h).max(60.0);
+        ui.add_enabled_ui(one, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("description")
+                .max_height(note_h)
+                .min_scrolled_height(note_h)
+                .show(ui, |ui| {
+                    ui.add_sized(
+                        egui::vec2(ui.available_width(), note_h),
+                        egui::TextEdit::multiline(&mut self.notes_buf).hint_text("Description"),
+                    );
+                });
+        });
+        let mut choice = None;
+        let mut set_notes = false;
+        let mut edit = false;
+        ui.horizontal(|ui| {
+            set_notes = ui
+                .add_enabled(
+                    one,
+                    egui::Button::new(count("Set Description")).min_size(egui::vec2(half, h)),
+                )
+                .clicked();
+            ui.add_enabled_ui(!ids.is_empty(), |ui| {
+                ui.allocate_ui(egui::vec2(half, h), |ui| {
+                    let r = ui.add_sized([half, h], egui::Button::new("Account Utilities"));
+                    caret(ui, &r);
+                    egui::Popup::menu(&r).show(|ui| {
+                        choice = self.actions_menu(ui, m, &ids, false);
+                    });
+                });
+            });
+        });
+        ui.horizontal(|ui| {
+            edit = ui
+                .add_enabled(
+                    ids.len() == 1,
+                    egui::Button::new("Edit Account").min_size(egui::vec2(half, h)),
+                )
+                .on_hover_text("every field: cookie, password, 2FA, mode, FPS")
+                .clicked();
+            ui.add_enabled_ui(!ids.is_empty(), |ui| {
+                ui.allocate_ui(egui::vec2(half, h), |ui| {
+                    let r = ui.add_sized([half, h], egui::Button::new("Account Control"));
+                    caret(ui, &r);
+                    egui::Popup::menu(&r).show(|ui| {
+                        choice = choice.take().or(self.actions_menu(ui, m, &ids, true));
+                    });
+                });
+            });
+        });
+        if set_notes {
+            let v = self.notes_buf.clone();
+            self.edit_all(&ids, |a| a.notes = v.clone());
+            self.say(format!("Description set for {}", plural(ids.len())), false);
+        }
+        if edit {
+            self.edit_open = true;
+        }
+        if let Some(c) = choice {
+            self.apply_menu(m, ids, c);
+        }
+    }
+
+    /// Account Utilities (`control` false): the game's everyday buttons, Mode, groups, Copy.
+    /// Account Control (`control` true): Stop, the buttons that change the account on the
+    /// game's side (each asks first), Remove.
+    fn actions_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        m: &Module,
+        ids: &[String],
+        control: bool,
+    ) -> Option<MenuChoice> {
+        let n = ids.len();
+        let count = |label: &str| {
+            if n > 1 {
+                format!("{label} ({n})")
+            } else {
+                label.to_string()
+            }
+        };
+        let mut choice = None;
+        // the buttons already on the right (Join Server, Follow) and the left (Open Browser) stay off
+        let on_deck = |a: &module::Action| {
+            a.primary || a.id == "browser" || (a.inputs.len() == 1 && !a.needs_form())
+        };
+        for a in m
+            .actions
+            .iter()
+            .filter(|a| !on_deck(a) && a.confirm.is_empty() != control)
+        {
+            if ui.button(count(&a.label)).clicked() {
+                choice = Some(MenuChoice::Run(a.id.clone()));
+            }
+        }
+        if control {
+            if ids.iter().any(|id| self.running.contains_key(id))
+                && ui.button(count("Stop")).clicked()
+            {
+                choice = Some(MenuChoice::Stop);
+            }
+            ui.separator();
+            if ui
+                .button(RichText::new(count("Remove")).color(ui.visuals().error_fg_color))
+                .clicked()
+            {
+                choice = Some(MenuChoice::Remove);
+            }
+        } else {
+            ui.separator();
+            if let Some(role) = m.field("role").filter(|f| !f.choices.is_empty()) {
+                ui.menu_button("Mode", |ui| {
+                    for c in &role.choices {
+                        let label = match c.as_str() {
+                            "main" => "High (main)".to_string(),
+                            "alt" => "Low (alt)".to_string(),
+                            o => o.to_string(),
+                        };
+                        if ui.button(label).clicked() {
+                            choice = Some(MenuChoice::Set(role.key.clone(), c.clone()));
+                        }
+                    }
+                });
+            }
+            ui.menu_button("Move to group", |ui| {
+                for g in self.groups(&m.id) {
+                    if ui.button(&g).clicked() {
+                        choice = Some(MenuChoice::Group(g));
+                    }
+                }
+                if ui.button(RichText::new(NO_GROUP).weak()).clicked() {
+                    choice = Some(MenuChoice::Group(String::new()));
+                }
+            });
+        }
+        if choice.is_some() {
+            ui.close();
+        }
+        choice
+    }
+
+    /// Edit Account: every field of the chosen account in a window of its own (a new account
+    /// from Add manually opens here too).
+    fn edit_dialog(&mut self, ctx: &egui::Context) {
+        if !(self.edit_open || self.draft_new) || self.draft.is_none() {
+            self.edit_open = false;
+            return;
+        }
+        let Some(m) = self.game.clone().and_then(|g| self.module(&g).cloned()) else {
+            return;
+        };
+        let mut close = false;
+        egui::Modal::new(egui::Id::unique("edit")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.heading(if self.draft_new {
+                "Add Account"
+            } else {
+                "Edit Account"
+            });
+            egui::ScrollArea::vertical()
+                .max_height(520.0)
+                .show(ui, |ui| {
+                    self.editor(ui, &m);
+                });
+            if !self.draft_new
+                && (ui.button("Close").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)))
+            {
+                close = true;
+            }
+        });
+        if close {
+            // unsaved edits go: the window shows the saved account again
+            if let Some(id) = self.draft.as_ref().map(|d| d.id.clone()) {
+                self.draft = self.accounts.iter().find(|a| a.id == id).cloned();
+            }
+            self.edit_open = false;
+        }
+        // the new account was added or cancelled
+        if !self.draft_new && self.draft.is_none() {
+            self.edit_open = false;
+        }
     }
 
     fn editor(&mut self, ui: &mut egui::Ui, m: &Module) {
@@ -2275,6 +2568,25 @@ fn bookmarks_menu(
     });
 }
 
+/// AEAM's small down arrow at the right end of a menu button (drawn: the font has no arrow).
+fn caret(ui: &egui::Ui, r: &egui::Response) {
+    let c = egui::pos2(r.rect.right() - 12.0, r.rect.center().y);
+    let color = if r.enabled() {
+        look::colors().text
+    } else {
+        look::colors().muted
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(4.0, -2.0),
+            c + egui::vec2(0.0, 3.0),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
 /// A small filled circle (drawn, not a glyph: the font has none) before a status.
 fn dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
@@ -2424,7 +2736,7 @@ mod tests {
     #[test]
     fn add_account() {
         let (mut h, dir) = window("generic");
-        h.get_by_label("Add account").click();
+        h.get_by_label("Add Account").click();
         h.run();
         h.get_by_label("Add").click();
         h.run();
@@ -2460,7 +2772,7 @@ mod tests {
         )
         .unwrap();
         let (mut h, dir) = window_with("t", mods.clone());
-        h.get_by_label("Add account").click();
+        h.get_by_label("Add Account").click();
         h.run();
         h.get_by_label("Add").click();
         h.run();
@@ -2520,6 +2832,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// AEAM's right side: Set Alias and Set Description write to the chosen account, Edit
+    /// Account opens every field in its own window.
+    #[test]
+    fn set_alias_description_and_edit() {
+        let (mut h, dir) = window("generic");
+        let mut a = Account {
+            id: "g1".into(),
+            game: "generic".into(),
+            ..Default::default()
+        };
+        a.fields.insert("login".into(), "me@x".into());
+        h.state_mut().save(&a);
+        h.run();
+        h.get_by_label("me@x").click();
+        h.run();
+        h.state_mut().alias_buf = "Main".into();
+        h.state_mut().notes_buf = "farm alt".into();
+        h.get_by_label("Set Alias").click();
+        h.run();
+        h.get_by_label("Set Description").click();
+        h.run();
+        let saved = h.state().store.as_ref().unwrap().list().unwrap().0;
+        assert_eq!(
+            (saved[0].name.as_str(), saved[0].notes.as_str()),
+            ("Main", "farm alt")
+        );
+        h.get_by_label("Edit Account").click();
+        h.run();
+        assert!(h.state().edit_open);
+        h.get_by_label("Close").click();
+        h.run();
+        assert!(!h.state().edit_open);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn add_roblox_account() {
         let (mut h, dir) = window("roblox");
@@ -2531,11 +2878,11 @@ mod tests {
             .and_then(|m| m.add.as_ref())
             .is_some_and(|f| !f.action.is_empty());
         if has_login {
-            h.get_by_label("Add account").click_secondary();
+            h.get_by_label("Add Account").click_secondary();
             h.run();
             h.get_by_label("Add manually").click();
         } else {
-            h.get_by_label("Add account").click();
+            h.get_by_label("Add Account").click();
         }
         h.run();
         h.get_by_label("Add").click();

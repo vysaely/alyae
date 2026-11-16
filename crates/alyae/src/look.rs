@@ -263,16 +263,15 @@ pub fn tag(text: &str) -> RichText {
         .strong()
 }
 
-#[cfg(test)]
+// the portal is Linux's: on Windows there is nothing here to test
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 
-    #[cfg(not(windows))]
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn portal_scheme_and_accent_are_read() {
         let (light, c) = portal_from(&words("2"), Some(&words("0.8 0.439216 0.662745")));

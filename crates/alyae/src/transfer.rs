@@ -191,6 +191,23 @@ pub fn import(store: &Store, have: &[Account], accounts: Vec<Account>) -> Result
     })
 }
 
+/// Another manager's accounts, by name: Roblox Account Manager's AccountData.json (or its backup)
+/// or AEAM's manager.db.
+pub fn foreign(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|f| f.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|f| {
+            matches!(
+                f.as_str(),
+                "accountdata.json"
+                    | "accountdata.json.backup"
+                    | "accountdata.json.bak"
+                    | "manager.db"
+            )
+        })
+}
+
 /// Where a new export goes by default: Documents (else home), named by today's date.
 pub fn default_path() -> std::path::PathBuf {
     let day = std::time::SystemTime::now()

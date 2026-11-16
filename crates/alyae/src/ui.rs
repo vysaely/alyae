@@ -653,10 +653,16 @@ impl App {
                 look::grid(ui);
                 self.status_bar(ui, &m)
             });
+        // AEAM's look: no line between the sides, the list's own box parts them; the right side
+        // keeps no left margin, so the box and the right column are one margin apart
         egui::Panel::right("deck")
             .default_size(340.0)
             .min_size(280.0)
-            .frame(frame)
+            .show_separator_line(false)
+            .frame(frame.inner_margin(egui::Margin {
+                left: 0,
+                ..egui::Margin::same(look::MARGIN)
+            }))
             .show(ui, |ui| {
                 look::grid(ui);
                 self.deck(ui, &m)
@@ -907,9 +913,19 @@ impl App {
         });
         // the table ends one gap over the buttons, which end on the panel's margin
         let table_h = (ui.available_height() - look::H - look::GAP).max(80.0);
-        ui.allocate_ui(egui::vec2(ui.available_width(), table_h), |ui| {
-            self.table(ui, m)
-        });
+        // the list in a box of its own, as AEAM's
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(1.0, look::colors().edge))
+            .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+            .inner_margin(egui::Margin::symmetric(6, 1))
+            .show(ui, |ui| {
+                // the box's outline and margin are inside table_h, so it ends where the right
+                // side's controls do
+                ui.allocate_ui(egui::vec2(ui.available_width(), table_h - 4.0), |ui| {
+                    self.table(ui, m)
+                });
+            });
         ui.horizontal(|ui| {
             let flow = m.add.clone().unwrap_or_default();
             let import = (!flow.import_field.is_empty()).then(|| {

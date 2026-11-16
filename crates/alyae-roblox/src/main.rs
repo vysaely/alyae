@@ -37,14 +37,14 @@ impl Request {
             .unwrap_or("")
             .trim()
     }
-    pub fn is_main(&self) -> bool {
-        self.get("role") == "main"
+    /// An alt runs small, muted and slow; a main or an account with no role runs as Roblox would.
+    pub fn is_alt(&self) -> bool {
+        self.get("role") == "alt"
     }
-    /// 0 means no cap
-    pub fn fps(&self) -> u32 {
-        self.get("fps")
-            .parse()
-            .unwrap_or(if self.is_main() { 330 } else { 6 })
+    /// The FPS cap Alyae sets (its default by role comes filled in from the module); None: no
+    /// cap of Alyae's, 0: no cap at all.
+    pub fn fps(&self) -> Option<u32> {
+        self.get("fps").parse().ok()
     }
     pub fn cookie(&self) -> String {
         api::clean_cookie(self.get("cookie"))

@@ -117,6 +117,66 @@ fn session_cookie(webview: &wry::WebView) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// The web view's browser profile. WebView2 (Windows) needs a folder to write in; by default it
+/// is beside the program, which a portable copy on a read-only stick or a locked-down work PC may
+/// not allow. A folder in the temp directory, removed when the window closes, keeps the profile
+/// fresh and the program folder untouched. WebKitGTK (Linux) needs none: the view is incognito.
+struct Profile {
+    #[cfg(not(target_os = "linux"))]
+    context: wry::WebContext,
+    #[cfg(not(target_os = "linux"))]
+    dir: std::path::PathBuf,
+}
+
+impl Profile {
+    fn new() -> Self {
+        #[cfg(not(target_os = "linux"))]
+        {
+            remove_old_profiles(&std::env::temp_dir());
+            let dir = std::env::temp_dir().join(format!("alyae-login-{}", std::process::id()));
+            Profile {
+                context: wry::WebContext::new(Some(dir.clone())),
+                dir,
+            }
+        }
+        #[cfg(target_os = "linux")]
+        Profile {}
+    }
+
+    /// Removes the profile's folder (when the window has closed).
+    fn remove(&self) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// An incognito web view in `window` with `profile`, set up by `setup`.
+fn web_view<'a>(
+    window: &tao::window::Window,
+    profile: &'a mut Profile,
+    setup: impl FnOnce(WebViewBuilder<'a>) -> WebViewBuilder<'a>,
+) -> wry::WebView {
+    #[cfg(not(target_os = "linux"))]
+    let builder = WebViewBuilder::new_with_web_context(&mut profile.context);
+    #[cfg(target_os = "linux")]
+    let builder = {
+        let _ = profile;
+        WebViewBuilder::new()
+    };
+    let builder = setup(builder.with_incognito(true));
+    #[cfg(not(target_os = "linux"))]
+    let view = builder.build(window).expect("a web view");
+    #[cfg(target_os = "linux")]
+    let view = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        builder
+            .build_gtk(window.default_vbox().expect("a GTK box"))
+            .expect("a web view")
+    };
+    view
+}
+
 /// Roblox's site signed in as the account, from its saved cookie.
 fn browse(username: &str, cookie: String) {
     let event_loop = EventLoopBuilder::new().build();
@@ -125,32 +185,11 @@ fn browse(username: &str, cookie: String) {
         .with_inner_size(tao::dpi::LogicalSize::new(1200.0, 800.0))
         .build(&event_loop)
         .expect("a window");
-    // as for the login window: WebView2's folder in temp, not beside the program
-    #[cfg(not(target_os = "linux"))]
-    let profile = {
-        remove_old_profiles(&std::env::temp_dir());
-        std::env::temp_dir().join(format!("alyae-login-{}", std::process::id()))
-    };
-    #[cfg(not(target_os = "linux"))]
-    let mut context = wry::WebContext::new(Some(profile.clone()));
-    #[cfg(not(target_os = "linux"))]
-    let builder = WebViewBuilder::new_with_web_context(&mut context);
-    #[cfg(target_os = "linux")]
-    let builder = WebViewBuilder::new();
-    let builder = builder
-        .with_url("about:blank")
-        .with_incognito(true)
-        .with_navigation_handler(|url| may_open(&url));
-    #[cfg(not(target_os = "linux"))]
-    let webview = builder.build(&window).expect("a web view");
-    #[cfg(target_os = "linux")]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        builder
-            .build_gtk(window.default_vbox().expect("a GTK box"))
-            .expect("a web view")
-    };
+    let mut profile = Profile::new();
+    let webview = web_view(&window, &mut profile, |b| {
+        b.with_url("about:blank")
+            .with_navigation_handler(|url| may_open(&url))
+    });
     let c = wry::cookie::Cookie::build((".ROBLOSECURITY", cookie.clone()))
         .domain(".roblox.com")
         .path("/")
@@ -178,11 +217,7 @@ fn browse(username: &str, cookie: String) {
                 }
                 *flow = ControlFlow::Exit;
             }
-            #[cfg(not(target_os = "linux"))]
-            Event::LoopDestroyed => {
-                let _ = &context;
-                let _ = std::fs::remove_dir_all(&profile);
-            }
+            Event::LoopDestroyed => profile.remove(),
             _ => {}
         }
     });
@@ -214,48 +249,24 @@ fn main() {
         .with_inner_size(tao::dpi::LogicalSize::new(480.0, 720.0))
         .build(&event_loop)
         .expect("a window");
-    // WebView2 needs a folder to write in; by default it is beside the program, which a portable
-    // copy on a read-only stick or a locked-down work PC may not allow. A folder in the temp
-    // directory, removed when the window closes, keeps the profile fresh and the program folder
-    // untouched. (WebKitGTK on Linux needs none: the view is incognito.)
-    #[cfg(not(target_os = "linux"))]
-    let profile = {
-        remove_old_profiles(&std::env::temp_dir());
-        std::env::temp_dir().join(format!("alyae-login-{}", std::process::id()))
-    };
-    #[cfg(not(target_os = "linux"))]
-    let mut context = wry::WebContext::new(Some(profile.clone()));
-    #[cfg(not(target_os = "linux"))]
-    let builder = WebViewBuilder::new_with_web_context(&mut context);
-    #[cfg(target_os = "linux")]
-    let builder = WebViewBuilder::new();
-    let builder = builder
-        .with_url("https://www.roblox.com/login")
-        .with_incognito(true)
-        .with_initialization_script(SCRIPT)
-        // the window stays on Roblox: links elsewhere do not open in it
-        .with_navigation_handler(|url| may_open(&url))
-        .with_ipc_handler(move |m| {
-            if !is_roblox(&m.uri().to_string()) {
-                return;
-            }
-            let _ = match m.body().as_str() {
-                "creds" => proxy.send_event(Msg::Creds),
-                "code" => proxy.send_event(Msg::Code),
-                "sent" => proxy.send_event(Msg::Sent),
-                _ => Ok(()),
-            };
-        });
-    #[cfg(not(target_os = "linux"))]
-    let webview = builder.build(&window).expect("a web view");
-    #[cfg(target_os = "linux")]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        builder
-            .build_gtk(window.default_vbox().expect("a GTK box"))
-            .expect("a web view")
-    };
+    let mut profile = Profile::new();
+    let webview = web_view(&window, &mut profile, |b| {
+        b.with_url("https://www.roblox.com/login")
+            .with_initialization_script(SCRIPT)
+            // the window stays on Roblox: links elsewhere do not open in it
+            .with_navigation_handler(|url| may_open(&url))
+            .with_ipc_handler(move |m| {
+                if !is_roblox(&m.uri().to_string()) {
+                    return;
+                }
+                let _ = match m.body().as_str() {
+                    "creds" => proxy.send_event(Msg::Creds),
+                    "code" => proxy.send_event(Msg::Code),
+                    "sent" => proxy.send_event(Msg::Sent),
+                    _ => Ok(()),
+                };
+            })
+    });
 
     let mut next_check = Instant::now();
     event_loop.run(move |event, _, flow| {
@@ -304,11 +315,7 @@ fn main() {
                 ..
             } => *flow = ControlFlow::Exit,
             // the web view may still hold some files: what is left goes at a later login
-            #[cfg(not(target_os = "linux"))]
-            Event::LoopDestroyed => {
-                let _ = &context;
-                let _ = std::fs::remove_dir_all(&profile);
-            }
+            Event::LoopDestroyed => profile.remove(),
             _ => {}
         }
     });

@@ -12,7 +12,8 @@ mod vault;
 
 fn main() -> eframe::Result {
     let dir = paths::data_dir();
-    let moved = if std::env::var_os("ALYAE_DATA").is_some() {
+    // a portable copy or a chosen folder has no older Ludae data next to it
+    let moved = if std::env::var_os("ALYAE_DATA").is_some() || paths::portable_dir().is_some() {
         Ok(())
     } else {
         paths::move_old_data(&dir)

@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -39,7 +42,31 @@ jobs:
           foreach ($m in Get-ChildItem modules -Directory) {
             if ($m.Name -notlike "*-linux") { Copy-Item -Recurse $m.FullName "$out/modules/" }
           }
+      - name: Portable package
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse Alyae Alyae-portable
+          New-Item -ItemType File -Force Alyae-portable/portable | Out-Null
+          New-Item -ItemType Directory -Force Alyae-portable/data | Out-Null
+          Copy-Item packaging/PORTABLE.txt Alyae-portable/README.txt
+          Compress-Archive -Path Alyae-portable -DestinationPath Alyae-portable.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Alyae-windows
           path: Alyae
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Alyae-windows-portable
+          path: Alyae-portable
+      # the newest main build, always at the same address: the "portable" release
+      - name: Publish portable release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view portable 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create portable --prerelease --title "Alyae portable (Windows, newest main)" --notes "Unzip, start alyae.exe. Built from the newest main; see README.txt inside."
+          }
+          gh release upload portable Alyae-portable.zip --clobber

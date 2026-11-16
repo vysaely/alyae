@@ -89,8 +89,8 @@ runs = true
 
 [[action.input]]
 key = "follow"
-label = "Follow"
-hint = "username or follow target..."
+label = "Username"
+hint = "the Roblox user whose server to join"
 
 [[action]]
 id = "check"

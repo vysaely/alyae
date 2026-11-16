@@ -201,6 +201,28 @@ pub fn colors() -> Colors {
     })
 }
 
+/// The one grid everything sits on: every button, box and menu is `H` tall, `GAP` apart, and the
+/// panels keep `MARGIN` to their edges, so edges line up across the window.
+pub const H: f32 = 28.0;
+pub const GAP: f32 = 6.0;
+pub const MARGIN: i8 = 8;
+/// A table row, and the status line's own smaller controls.
+pub const ROW: f32 = 26.0;
+pub const SMALL: f32 = 20.0;
+
+/// A panel's frame on the grid: the same margin on every side.
+pub fn panel(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::central_panel(&ctx.global_style()).inner_margin(egui::Margin::same(MARGIN))
+}
+
+/// The main window's controls on the grid (dialogs and menus keep egui's compact sizes).
+pub fn grid(ui: &mut egui::Ui) {
+    let sp = ui.spacing_mut();
+    sp.item_spacing = egui::vec2(GAP, GAP);
+    sp.interact_size.y = H;
+    sp.button_padding = egui::vec2(10.0, 0.0);
+}
+
 pub fn apply(ctx: &egui::Context) {
     let c = colors();
     let dark = c.card.r() as u32 + c.card.g() as u32 + c.card.b() as u32 <= 384;

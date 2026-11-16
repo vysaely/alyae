@@ -645,24 +645,38 @@ impl App {
         };
         // AEAM's layout: the status line along the bottom, the account's controls on the right,
         // the list on the left
+        let frame = look::panel(ui.ctx());
         egui::Panel::bottom("status")
-            .exact_size(26.0)
-            .show(ui, |ui| self.status_bar(ui, &m));
+            .exact_size(look::SMALL + 2.0 * look::GAP)
+            .frame(frame.inner_margin(egui::Margin::symmetric(look::MARGIN, 0)))
+            .show(ui, |ui| {
+                look::grid(ui);
+                self.status_bar(ui, &m)
+            });
         egui::Panel::right("deck")
             .default_size(340.0)
             .min_size(280.0)
-            .show(ui, |ui| self.deck(ui, &m));
-        egui::CentralPanel::default().show(ui, |ui| self.accounts_side(ui, &m));
+            .frame(frame)
+            .show(ui, |ui| {
+                look::grid(ui);
+                self.deck(ui, &m)
+            });
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            look::grid(ui);
+            self.accounts_side(ui, &m)
+        });
     }
 
     /// The bottom line: the last message on the left; counts, the accounts file and the log on
     /// the right.
     fn status_bar(&mut self, ui: &mut egui::Ui, m: &Module) {
+        ui.spacing_mut().interact_size.y = look::SMALL;
+        ui.spacing_mut().button_padding.x = 8.0;
         ui.horizontal_centered(|ui| {
             self.message_line(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("Open log")
+                    .button("Open log")
                     .on_hover_text(self.dir.join("alyae.log").display().to_string())
                     .clicked()
                 {
@@ -678,7 +692,7 @@ impl App {
                 }
                 // moving accounts to another PC (or a backup): every game's accounts in one file
                 if ui
-                    .small_button("Accounts file")
+                    .button("Accounts file")
                     .on_hover_text(
                         "Save all accounts to a password-sealed file, or bring one in \
                          (an .alyae file can also be dropped on the window)",
@@ -877,19 +891,13 @@ impl App {
                     }
                 });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // AEAM's "1 selected" box
-                egui::Frame::new()
-                    .stroke(egui::Stroke::new(1.0, look::colors().edge))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(8, 3))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("{} selected", self.selected.len())).strong(),
-                        );
-                    });
+                // AEAM's "1 selected" box, as tall as the boxes beside it
+                outlined(ui, &format!("{} selected", self.selected.len()));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
                         .hint_text("Search")
+                        .align(egui::Align2::LEFT_CENTER)
+                        .min_size(egui::vec2(0.0, look::H))
                         .desired_width(ui.available_width().clamp(80.0, 220.0)),
                 );
             });
@@ -897,8 +905,8 @@ impl App {
                 self.choose_game(Some(g));
             }
         });
-        let bar_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-        let table_h = (ui.available_height() - bar_h).max(80.0);
+        // the table ends one gap over the buttons, which end on the panel's margin
+        let table_h = (ui.available_height() - look::H - look::GAP).max(80.0);
         ui.allocate_ui(egui::vec2(ui.available_width(), table_h), |ui| {
             self.table(ui, m)
         });
@@ -953,9 +961,13 @@ impl App {
                 }
             }
             b.context_menu(|ui| more(ui, self));
-            let arrow = ui.menu_button("    ", |ui| more(ui, self)).response;
-            caret(ui, &arrow);
-            arrow.on_hover_text("Other ways to add");
+            // the arrow sits against Add Account, a square of the row's height
+            ui.add_space(2.0 - look::GAP);
+            let arrow = ui
+                .add_sized([look::H, look::H], egui::Button::new(""))
+                .on_hover_text("Other ways to add");
+            caret_at(ui, &arrow, arrow.rect.center().x);
+            egui::Popup::menu(&arrow).show(|ui| more(ui, self));
             let ids: Vec<String> = self.selected.iter().cloned().collect();
             if ui
                 .add_enabled(!ids.is_empty(), egui::Button::new("Remove"))
@@ -1224,6 +1236,8 @@ impl App {
         let mut menu_actions: Option<MenuChoice> = None;
         let selected = self.selected.clone();
         let running: HashSet<String> = self.running.keys().cloned().collect();
+        // rows touch: the grid's gap is between controls, not between rows
+        ui.spacing_mut().item_spacing.y = 0.0;
         // every row the same colour; the chosen ones stand out in the accent (look::apply)
         let mut table = TableBuilder::new(ui)
             .striped(false)
@@ -1247,7 +1261,7 @@ impl App {
         table
             .column(Column::remainder().at_least(60.0).clip(true))
             .auto_shrink(false)
-            .header(20.0, |mut h| {
+            .header(look::H, |mut h| {
                 let mut show = self.watch_text;
                 let mut sort_watch = false;
                 let watch_menu = |ui: &mut egui::Ui, show: &mut bool, sort_watch: &mut bool| {
@@ -1300,7 +1314,7 @@ impl App {
                 });
             })
             .body(|body| {
-                body.rows(22.0, rows.len(), |mut row| {
+                body.rows(look::ROW, rows.len(), |mut row| {
                     let (id, user, alias, group, mode, notes, watched) = &rows[row.index()];
                     row.set_selected(selected.contains(id));
                     let on = running.contains(id);
@@ -1943,56 +1957,72 @@ impl App {
             self.notes_buf = a.map(|a| a.notes.clone()).unwrap_or_default();
         }
         let mut run = None;
-        let full = ui.available_width();
-        let gap = ui.spacing().item_spacing.x;
+        // two equal columns: every box and button on the right starts on one of two edges
+        let full = ui.available_width().floor();
+        let gap = look::GAP;
         let half = ((full - gap) / 2.0).floor();
-        let h = 28.0;
+        // the right column takes the odd pixel, so it ends on the margin like everything else
+        let second = full - gap - half;
+        let h = look::H;
         {
             let inputs = self.inputs.entry(m.id.clone()).or_default();
             if let Some(p) = m.actions.iter().find(|a| a.primary) {
                 if !p.inputs.is_empty() {
                     let n = p.inputs.len() as f32;
                     let w = ((full - gap * (n - 1.0)) / n).floor();
-                    // AEAM's labels over the boxes, the bookmarks at the end of the line
+                    // AEAM's labels over the boxes, Bookmarks at the end of the same line
                     ui.horizontal(|ui| {
-                        for (k, i) in p.inputs.iter().enumerate() {
-                            if k + 1 < p.inputs.len() {
-                                ui.allocate_ui(egui::vec2(w, 16.0), |ui| {
+                        ui.spacing_mut().interact_size.y = h;
+                        for i in &p.inputs {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(w, h),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
                                     ui.set_width(w);
                                     ui.label(look::tag(&i.label));
-                                });
-                            } else {
-                                ui.label(look::tag(&i.label));
-                            }
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            bookmarks_menu(
-                                ui,
-                                self.store.as_ref(),
-                                &m.id,
-                                p,
-                                inputs,
-                                &mut self.bookmark_name,
-                                84.0,
+                                },
                             );
-                        });
+                        }
+                        ui.put(
+                            egui::Rect::from_min_size(
+                                egui::pos2(ui.max_rect().left() + full - 84.0, ui.min_rect().top()),
+                                egui::vec2(84.0, h),
+                            ),
+                            |ui: &mut egui::Ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        bookmarks_menu(
+                                            ui,
+                                            self.store.as_ref(),
+                                            &m.id,
+                                            p,
+                                            inputs,
+                                            &mut self.bookmark_name,
+                                        );
+                                    },
+                                )
+                                .response
+                            },
+                        );
                     });
                     ui.horizontal(|ui| {
-                        for i in &p.inputs {
+                        for (k, i) in p.inputs.iter().enumerate() {
+                            // the last box takes what rounding left over
+                            let w = if k + 1 == p.inputs.len() {
+                                full - (w + gap) * (n - 1.0)
+                            } else {
+                                w
+                            };
                             let v = inputs.entry(i.key.clone()).or_default();
-                            ui.add_sized(
-                                [w, h],
-                                egui::TextEdit::singleline(v)
-                                    .hint_text(&i.label)
-                                    .align(egui::Align2::LEFT_CENTER),
-                            )
-                            .on_hover_text(&i.hint);
+                            ui.add_sized([w, h], boxed(v, &i.label))
+                                .on_hover_text(&i.hint);
                         }
                     });
                 }
                 if ui
                     .add_enabled_ui(can_run, |ui| {
-                        ui.add_sized([full, 30.0], look::primary(&count(&p.label)))
+                        ui.add_sized([full, h], look::primary(&count(&p.label)))
                     })
                     .inner
                     .clicked()
@@ -2007,23 +2037,19 @@ impl App {
                 .filter(|a| !a.primary && a.inputs.len() == 1 && !a.needs_form())
             {
                 let i = &a.inputs[0];
-                row(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let v = inputs.entry(i.key.clone()).or_default();
+                    ui.add_sized([half, h], boxed(v, &i.label))
+                        .on_hover_text(&i.hint);
                     if ui
-                        .add_enabled(
-                            can_run,
-                            egui::Button::new(&a.label).min_size(egui::vec2(96.0, h)),
-                        )
+                        .add_enabled_ui(can_run, |ui| {
+                            ui.add_sized([second, h], egui::Button::new(&a.label))
+                        })
+                        .inner
                         .clicked()
                     {
                         run = Some(a.id.clone());
                     }
-                    let v = inputs.entry(i.key.clone()).or_default();
-                    ui.add(
-                        egui::TextEdit::singleline(v)
-                            .hint_text(&i.hint)
-                            .desired_width(ui.available_width())
-                            .min_size(egui::vec2(0.0, h)),
-                    );
                 });
             }
         }
@@ -2033,76 +2059,71 @@ impl App {
         let one = self.focus.is_some() && !ids.is_empty();
         // Alias: [box][Set Alias]
         let mut set_alias = false;
-        row(ui, |ui| {
-            set_alias = ui
-                .add_enabled(
-                    one,
-                    egui::Button::new(count("Set Alias")).min_size(egui::vec2(96.0, h)),
-                )
-                .clicked();
-            ui.add_enabled(
-                one,
-                egui::TextEdit::singleline(&mut self.alias_buf)
-                    .hint_text("Alias")
-                    .desired_width(ui.available_width())
-                    .min_size(egui::vec2(0.0, h)),
-            );
+        ui.add_enabled_ui(one, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_sized([half, h], boxed(&mut self.alias_buf, "Alias"));
+                set_alias = ui
+                    .add_sized([second, h], egui::Button::new(count("Set Alias")))
+                    .clicked();
+            });
         });
         if set_alias {
             let v = self.alias_buf.trim().to_string();
             self.edit_all(&ids, |a| a.name = v.clone());
             self.say(format!("Alias set for {}", plural(ids.len())), false);
         }
-        // Description fills the height left over the four buttons
-        let buttons_h = 2.0 * h + 3.0 * ui.spacing().item_spacing.y;
-        let note_h = (ui.available_height() - buttons_h).max(60.0);
+        // Description fills the height down to the two rows of buttons, which end on the margin
+        let note_h = (ui.available_height() - 2.0 * (h + gap)).floor().max(60.0);
         ui.add_enabled_ui(one, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("description")
-                .max_height(note_h)
-                .min_scrolled_height(note_h)
-                .show(ui, |ui| {
-                    ui.add_sized(
-                        egui::vec2(ui.available_width(), note_h),
-                        egui::TextEdit::multiline(&mut self.notes_buf).hint_text("Description"),
-                    );
-                });
+            ui.allocate_ui(egui::vec2(full, note_h), |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("description")
+                    .max_height(note_h)
+                    .min_scrolled_height(note_h)
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        ui.add_sized(
+                            egui::vec2(ui.available_width(), note_h),
+                            egui::TextEdit::multiline(&mut self.notes_buf).hint_text("Description"),
+                        );
+                    });
+            });
         });
         let mut choice = None;
         let mut set_notes = false;
         let mut edit = false;
+        // a menu button of the grid: a half-width button with AEAM's arrow at its end
+        let menu = |ui: &mut egui::Ui, label: &str| {
+            let r = ui.add_sized([second, h], egui::Button::new(label));
+            caret_at(ui, &r, r.rect.right() - 14.0);
+            r
+        };
         ui.horizontal(|ui| {
             set_notes = ui
-                .add_enabled(
-                    one,
-                    egui::Button::new(count("Set Description")).min_size(egui::vec2(half, h)),
-                )
+                .add_enabled_ui(one, |ui| {
+                    ui.add_sized([half, h], egui::Button::new(count("Set Description")))
+                })
+                .inner
                 .clicked();
             ui.add_enabled_ui(!ids.is_empty(), |ui| {
-                ui.allocate_ui(egui::vec2(half, h), |ui| {
-                    let r = ui.add_sized([half, h], egui::Button::new("Account Utilities"));
-                    caret(ui, &r);
-                    egui::Popup::menu(&r).show(|ui| {
-                        choice = self.actions_menu(ui, m, &ids, false);
-                    });
+                let r = menu(ui, "Account Utilities");
+                egui::Popup::menu(&r).show(|ui| {
+                    choice = self.actions_menu(ui, m, &ids, false);
                 });
             });
         });
         ui.horizontal(|ui| {
             edit = ui
-                .add_enabled(
-                    ids.len() == 1,
-                    egui::Button::new("Edit Account").min_size(egui::vec2(half, h)),
-                )
+                .add_enabled_ui(ids.len() == 1, |ui| {
+                    ui.add_sized([half, h], egui::Button::new("Edit Account"))
+                })
+                .inner
                 .on_hover_text("every field: cookie, password, 2FA, mode, FPS")
                 .clicked();
             ui.add_enabled_ui(!ids.is_empty(), |ui| {
-                ui.allocate_ui(egui::vec2(half, h), |ui| {
-                    let r = ui.add_sized([half, h], egui::Button::new("Account Control"));
-                    caret(ui, &r);
-                    egui::Popup::menu(&r).show(|ui| {
-                        choice = choice.take().or(self.actions_menu(ui, m, &ids, true));
-                    });
+                let r = menu(ui, "Account Control");
+                egui::Popup::menu(&r).show(|ui| {
+                    choice = choice.take().or(self.actions_menu(ui, m, &ids, true));
                 });
             });
         });
@@ -2465,6 +2486,14 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// A one-line box of the grid's height, its text centred up and down.
+fn boxed<'t>(v: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(v)
+        .hint_text(hint.to_string())
+        .align(egui::Align2::LEFT_CENTER)
+        .min_size(egui::vec2(0.0, look::H))
+}
+
 /// A row filling the width it has, laid out from the right: buttons first, then a box taking the rest.
 fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let h = ui.spacing().interact_size.y;
@@ -2472,6 +2501,29 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         egui::vec2(ui.available_width(), h),
         egui::Layout::right_to_left(egui::Align::Center),
         add,
+    );
+}
+
+/// A box of the grid's height with `text` in it, outlined (AEAM's "1 selected").
+fn outlined(ui: &mut egui::Ui, text: &str) {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        look::colors().text,
+    );
+    let size = egui::vec2((galley.size().x + 20.0).ceil(), look::H);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_stroke(
+        rect,
+        ui.visuals().widgets.inactive.corner_radius,
+        egui::Stroke::new(1.0, look::colors().edge),
+        egui::StrokeKind::Inside,
+    );
+    p.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        look::colors().text,
     );
 }
 
@@ -2483,7 +2535,6 @@ fn bookmarks_menu(
     primary: &module::Action,
     inputs: &mut Values,
     name: &mut String,
-    width: f32,
 ) {
     let Some(store) = store else { return };
     let key = format!("bookmarks.{game}");
@@ -2499,8 +2550,10 @@ fn bookmarks_menu(
             &serde_json::to_string(list).expect("a list of strings serializes"),
         );
     };
-    ui.allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
-        ui.menu_button("Bookmarks", |ui| {
+    {
+        // a small word in the labels' line, not a button of its own height
+        ui.visuals_mut().button_frame = false;
+        ui.menu_button(look::tag("Bookmarks"), |ui| {
             let mut list = load();
             let mut changed = false;
             let mut remove = None;
@@ -2565,12 +2618,12 @@ fn bookmarks_menu(
         })
         .response
         .on_hover_text("Saved places and servers");
-    });
+    }
 }
 
-/// AEAM's small down arrow at the right end of a menu button (drawn: the font has no arrow).
-fn caret(ui: &egui::Ui, r: &egui::Response) {
-    let c = egui::pos2(r.rect.right() - 12.0, r.rect.center().y);
+/// AEAM's small down arrow on a menu button, centred on `x` (drawn: the font has no arrow).
+fn caret_at(ui: &egui::Ui, r: &egui::Response, x: f32) {
+    let c = egui::pos2(x.round(), r.rect.center().y.round());
     let color = if r.enabled() {
         look::colors().text
     } else {

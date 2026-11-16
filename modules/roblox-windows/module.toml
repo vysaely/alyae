@@ -5,6 +5,8 @@ platform = "windows"
 description = "Several accounts at once, join servers, 2FA"
 helper = "alyae-roblox"
 title_field = "username"
+# "Add with browser": a new account from signing in on Roblox's own page (the Log in window)
+add_with = "login"
 
 [[field]]
 key = "username"

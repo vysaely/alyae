@@ -1,0 +1,15 @@
+Alyae, portable
+
+Unzip this folder anywhere you can write: your Documents, the Desktop, a USB stick.
+Start alyae.exe. Nothing is installed and nothing is written outside this folder:
+accounts and settings stay in the "data" folder beside it (the file "portable" tells Alyae
+so; delete it and Alyae uses %APPDATA%\Alyae instead). The Log in window keeps its browser
+profile in the temp folder and removes it when it closes.
+
+Your accounts from another PC: copy alyae.db and vault.key from that PC's data folder
+(%APPDATA%\Alyae, or its portable "data" folder) into this "data" folder while Alyae is closed.
+vault.key unlocks the saved passwords and cookies: keep the two files together and private.
+
+Needs: Windows 10 or 11 with the Roblox app installed for Join, and Microsoft Edge WebView2
+(part of Windows 11 and current Windows 10) for Log in. Windows may warn that the program is
+from an unknown publisher: More info, Run anyway.

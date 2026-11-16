@@ -60,6 +60,8 @@ pub struct App {
     watch_text: bool,
     /// the accounts-file dialog, when open
     transfer: Option<Transfer>,
+    /// accounts made by "Add with browser" whose sign-in has not come back yet
+    adding: HashSet<String>,
 }
 
 /// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
@@ -117,6 +119,7 @@ impl App {
             bookmark_name: String::new(),
             watch_text: true,
             transfer: None,
+            adding: HashSet::new(),
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -346,6 +349,7 @@ impl App {
                     {
                         let _ = self.tasks.swap_remove(i).1.child.wait();
                     }
+                    self.finish_adding(&account);
                     if ok && self.status.get(&account).is_some_and(|(_, bad)| !bad) {
                         self.status.remove(&account);
                     }
@@ -811,6 +815,14 @@ impl App {
             if ui.button("Add account").clicked() {
                 self.add_account(m);
             }
+            if !m.add_with.is_empty()
+                && ui
+                    .button("Add with browser")
+                    .on_hover_text("sign in on the game's own page: the account is added from that")
+                    .clicked()
+            {
+                self.add_with_browser(m);
+            }
             let ids: Vec<String> = self.selected.iter().cloned().collect();
             if !ids.is_empty() && ui.button("Remove").clicked() {
                 self.confirm_remove = ids.clone();
@@ -857,6 +869,86 @@ impl App {
         self.selected = [a.id.clone()].into();
         self.draft = Some(a);
         self.draft_new = true;
+    }
+
+    /// An empty account, saved so the sign-in's values have somewhere to go, and the module's
+    /// sign-in action run for it. `finish_adding` keeps or drops it when the action ends.
+    fn add_with_browser(&mut self, m: &Module) {
+        let a = Account {
+            id: store::new_id(),
+            game: m.id.clone(),
+            group: self.group_filter.clone().unwrap_or_default(),
+            created: store::now(),
+            sort: self.accounts.iter().map(|a| a.sort).max().unwrap_or(0) + 1,
+            ..Default::default()
+        };
+        if !self.save(&a) {
+            return;
+        }
+        self.adding.insert(a.id.clone());
+        self.selected = [a.id.clone()].into();
+        self.status.insert(
+            a.id.clone(),
+            ("signing in in the browser window".into(), false),
+        );
+        self.run_action(&m.add_with, vec![a.id]);
+    }
+
+    /// The sign-in of an "Add with browser" account ended: without a sign-in the empty account
+    /// goes; one that turned out to be an account already here gives that account its new
+    /// sign-in and goes too.
+    fn finish_adding(&mut self, id: &str) {
+        if !self.adding.remove(id) {
+            return;
+        }
+        let Some(a) = self.accounts.iter().find(|a| a.id == id).cloned() else {
+            return;
+        };
+        let user = a.value("user_id").to_string();
+        let signed_in = !a.value("cookie").is_empty();
+        let existing = self
+            .accounts
+            .iter()
+            .find(|o| {
+                o.id != a.id && o.game == a.game && !user.is_empty() && o.value("user_id") == user
+            })
+            .cloned();
+        let text = match (&existing, signed_in) {
+            (_, false) => {
+                "No account added: the browser window closed before signing in".to_string()
+            }
+            (Some(o), true) => {
+                let mut o = o.clone();
+                for (k, v) in &a.secrets {
+                    o.secrets.insert(k.clone(), v.clone());
+                }
+                for (k, v) in &a.fields {
+                    o.fields.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                self.save(&o);
+                format!("{} is here already: its sign-in is renewed", self.title(&o))
+            }
+            (None, true) => {
+                self.focus_on(id);
+                format!("Added {}", self.title(&a))
+            }
+        };
+        if !signed_in || existing.is_some() {
+            if let Some(s) = &self.store
+                && let Err(e) = s.delete(id)
+            {
+                self.say(format!("the empty account stays: {e}"), true);
+                return;
+            }
+            self.accounts.retain(|x| x.id != id);
+            self.selected.remove(id);
+            self.status.remove(id);
+            if let Some(o) = existing {
+                self.selected = [o.id.clone()].into();
+                self.focus_on(&o.id);
+            }
+        }
+        self.say(text, !signed_in);
     }
 
     fn stop(&mut self, ids: &[String]) {
@@ -2065,6 +2157,49 @@ mod tests {
             .build_eframe(move |cc| App::new(&cc.egui_ctx, Ok(s), d, modules));
         h.run();
         (h, dir)
+    }
+
+    /// "Add with browser" keeps the new account only when the sign-in came back, and gives an
+    /// account already here its renewed sign-in instead of a second copy.
+    #[test]
+    fn add_with_browser_keeps_only_a_signed_in_new_account() {
+        let (mut h, dir) = window("roblox");
+        assert!(h.query_by_label("Add with browser").is_some());
+        let placeholder = |app: &mut App, cookie: &str, user: &str| {
+            let id = store::new_id();
+            let mut a = Account {
+                id: id.clone(),
+                game: "roblox".into(),
+                ..Default::default()
+            };
+            if !cookie.is_empty() {
+                a.secrets.insert("cookie".into(), cookie.into());
+                a.fields.insert("user_id".into(), user.into());
+                a.fields.insert("username".into(), format!("user{user}"));
+            }
+            assert!(app.save(&a));
+            app.adding.insert(id.clone());
+            id
+        };
+        let app = h.state_mut();
+        // the window closed before signing in: nothing is added
+        let gone = placeholder(app, "", "");
+        app.finish_adding(&gone);
+        assert!(app.accounts.is_empty());
+        // signed in as someone new: kept
+        let kept = placeholder(app, "c1", "11");
+        app.finish_adding(&kept);
+        assert_eq!(app.accounts.len(), 1);
+        // signed in again as the same user: the first account gets the new cookie
+        let again = placeholder(app, "c2", "11");
+        app.finish_adding(&again);
+        assert_eq!(app.accounts.len(), 1);
+        assert_eq!(app.accounts[0].id, kept);
+        assert_eq!(app.accounts[0].value("cookie"), "c2");
+        let stored = app.store.as_ref().unwrap().list().unwrap().0;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].value("cookie"), "c2");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

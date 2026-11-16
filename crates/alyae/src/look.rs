@@ -69,26 +69,13 @@ fn reg_dword(key: &str, value: &str) -> Option<u32> {
     (r == 0).then_some(data)
 }
 
-/// Alyae's own accent, used when the desktop gives none or a grey one.
-const ACCENT: Color32 = Color32::from_rgb(0x8e, 0x7c, 0xff);
-
-/// An accent with real colour in it: not grey, not near black or white.
-fn colorful(c: Color32) -> bool {
-    let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
-    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-    max >= 80.0 && min <= 235.0 && (max - min) / max >= 0.25
-}
-
-/// egui's light or dark look, its greys tinted with the accent so panels are not flat grey.
-fn tinted(v: &egui::Visuals, accent: Color32) -> Colors {
-    let accent = if colorful(accent) { accent } else { ACCENT };
-    let card = v.panel_fill.lerp_to_gamma(accent, 0.07);
-    let text = v.text_color().lerp_to_gamma(accent, 0.06);
+/// egui's light or dark look as Alyae's colours, with the desktop's accent.
+fn plain(v: &egui::Visuals, accent: Color32) -> Colors {
     Colors {
-        card,
-        edge: card.lerp_to_gamma(accent, 0.28),
-        text,
-        muted: card.lerp_to_gamma(text, 0.6).lerp_to_gamma(accent, 0.15),
+        card: v.panel_fill,
+        edge: v.widgets.noninteractive.bg_stroke.color,
+        text: v.text_color(),
+        muted: v.weak_text_color(),
         accent,
     }
 }
@@ -106,11 +93,11 @@ fn windows() -> Option<Colors> {
     } else {
         egui::Visuals::dark()
     };
-    // AccentColor is 0xAABBGGRR; a grey one (as Windows' dark default) gives way to Alyae's
+    // AccentColor is 0xAABBGGRR
     let accent = reg_dword(r"Software\Microsoft\Windows\DWM", "AccentColor")
         .map(|c| Color32::from_rgb(c as u8, (c >> 8) as u8, (c >> 16) as u8))
-        .unwrap_or(ACCENT);
-    Some(tinted(&v, accent))
+        .unwrap_or(v.selection.bg_fill);
+    Some(plain(&v, accent))
 }
 
 #[cfg(not(windows))]
@@ -182,8 +169,8 @@ fn portal_from(scheme: &[String], accent: Option<&[String]>) -> (Option<bool>, C
                 (c[2] * 255.0).round() as u8,
             )
         })
-        .unwrap_or(ACCENT);
-    (light, tinted(&v, accent))
+        .unwrap_or(v.selection.bg_fill);
+    (light, plain(&v, accent))
 }
 
 #[cfg(windows)]
@@ -197,7 +184,10 @@ pub fn colors() -> Colors {
         infynitae()
             .or_else(windows)
             .or_else(portal)
-            .unwrap_or_else(|| tinted(&egui::Visuals::dark(), ACCENT))
+            .unwrap_or_else(|| {
+                let v = egui::Visuals::dark();
+                plain(&v, v.selection.bg_fill)
+            })
     })
 }
 
@@ -231,12 +221,7 @@ pub fn apply(ctx: &egui::Context) {
     } else {
         egui::Visuals::light()
     };
-    // raised surfaces lean toward the accent as well as the text, so they keep the tint
-    let lift = |k: f32| {
-        c.card
-            .lerp_to_gamma(c.text, k)
-            .lerp_to_gamma(c.accent, k * 0.6)
-    };
+    let lift = |k: f32| c.card.lerp_to_gamma(c.text, k);
     v.panel_fill = c.card;
     v.window_fill = c.card;
     v.window_stroke = Stroke::new(1.0, c.edge);
@@ -250,8 +235,6 @@ pub fn apply(ctx: &egui::Context) {
     v.selection.bg_fill = c.card.lerp_to_gamma(c.accent, 0.45);
     v.selection.stroke = Stroke::new(1.0, c.text);
     v.widgets.noninteractive.bg_stroke.color = c.edge;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, c.accent.gamma_multiply(0.7));
-    v.widgets.active.bg_stroke = Stroke::new(1.0, c.accent);
     for (w, k) in [
         (&mut v.widgets.inactive, 0.08),
         (&mut v.widgets.hovered, 0.14),
@@ -269,35 +252,26 @@ pub fn apply(ctx: &egui::Context) {
 /// The big button (AEAM's Join Server), in the accent.
 pub fn primary(label: &str) -> egui::Button<'static> {
     let c = colors();
-    // dark text on a light accent, white on a dark one
-    let light =
-        c.accent.r() as u32 * 299 + c.accent.g() as u32 * 587 + c.accent.b() as u32 * 114 > 150_000;
-    let ink = if light {
-        Color32::from_rgb(0x14, 0x10, 0x24)
-    } else {
-        Color32::WHITE
-    };
-    egui::Button::new(RichText::new(label.to_string()).strong().color(ink)).fill(c.accent)
+    egui::Button::new(RichText::new(label.to_string()).strong().color(c.card)).fill(c.accent)
 }
 
 /// A small label, as AEAM's "GROUP:".
 pub fn tag(text: &str) -> RichText {
     RichText::new(text.to_uppercase())
-        .color(colors().accent.lerp_to_gamma(colors().muted, 0.35))
+        .color(colors().muted)
         .font(FontId::proportional(11.0))
         .strong()
 }
 
-#[cfg(test)]
+// the portal is Linux's: on Windows there is nothing here to test
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 
-    #[cfg(not(windows))]
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn portal_scheme_and_accent_are_read() {
         let (light, c) = portal_from(&words("2"), Some(&words("0.8 0.439216 0.662745")));
@@ -305,21 +279,9 @@ mod tests {
         assert_eq!(c.accent, Color32::from_rgb(204, 112, 169));
         let (light, c) = portal_from(&words("1"), Some(&words("2 0 0")));
         assert_eq!(light, Some(false));
-        // no usable accent from the desktop: Alyae's own
-        assert_eq!(c.accent, ACCENT);
+        // no usable accent from the desktop: egui's own
+        assert_eq!(c.accent, egui::Visuals::dark().selection.bg_fill);
+        assert_eq!(c.card, egui::Visuals::dark().panel_fill);
         assert_eq!(portal_from(&words("0"), None).0, None);
-    }
-
-    #[test]
-    fn grey_accent_gives_way() {
-        // Windows' dark default accent
-        assert!(!colorful(Color32::from_rgb(0x2b, 0x2b, 0x2b)));
-        assert!(!colorful(Color32::from_rgb(0xf0, 0xf0, 0xf0)));
-        assert!(colorful(Color32::from_rgb(0x00, 0x78, 0xd4)));
-        assert!(colorful(ACCENT));
-        let c = tinted(&egui::Visuals::dark(), Color32::from_rgb(0x2b, 0x2b, 0x2b));
-        assert_eq!(c.accent, ACCENT);
-        // the panels lean toward the accent: blue above red and green
-        assert!(c.card.b() > c.card.r() && c.card.b() > c.card.g());
     }
 }

@@ -111,8 +111,12 @@ pub fn join_from(req: &Request) -> Join {
             server.len() == 36 && server.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
         if is_job {
             j.job = Some(server.to_string());
-        } else if let Some(code) =
-            query_value(server, "privateServerLinkCode").or_else(|| query_value(server, "linkCode"))
+        } else if let Some(code) = query_value(server, "privateServerLinkCode")
+            .or_else(|| query_value(server, "linkCode"))
+            .filter(|c| {
+                c.chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            })
         {
             j.link_code = Some(code.to_string());
             j.place = j.place.or_else(|| place_id(server));

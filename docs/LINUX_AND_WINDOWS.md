@@ -15,7 +15,7 @@ Compared 2026-11-16 from the code (`crates/alyae-roblox/src/linux.rs`, `windows.
 | Anti-AFK | yes (Mocktail patch 08) | no |
 | Reset files | yes | no |
 | Removing an account deletes its files | yes (`on_remove = "forget"`) | nothing to delete (shared client) |
-| Renewed cookie saved after play | yes | no (the official client keeps it inside Windows' credential store, not read) |
+| Renewed cookie saved after play | yes | no (Alyae does not read the official client's stored sign-in) |
 | Colours from the desktop | Infynitae's theme; **now** any desktop's light/dark and accent through the portal (borrowed) | registry light/dark and accent |
 
 ## Borrowed from Windows into Linux (this change)

@@ -6,6 +6,7 @@ mod log;
 mod look;
 mod module;
 mod paths;
+mod ram;
 mod store;
 mod transfer;
 mod ui;

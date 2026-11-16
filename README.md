@@ -16,7 +16,11 @@ More info, then Run anyway.
 
 ## Linux
 
-Install the dependencies (Arch):
+Download [Alyae-linux-x86_64.tar.gz](https://github.com/vysaely/alyae/releases/tag/portable),
+unpack it and run `./alyae` (needs `webkit2gtk-4.1`; see `README-linux.txt` inside). Mocktail is
+not in the archive: build it with `modules/roblox-linux/mocktail/build.sh` inside the folder.
+
+Or build Alyae from source. Install the dependencies (Arch):
 
 ```bash
 sudo pacman -S --needed rust webkit2gtk-4.1 base-devel git cmake ninja pkgconf lld sdl3 sdl3_ttf \

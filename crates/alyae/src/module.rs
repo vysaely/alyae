@@ -142,8 +142,31 @@ pub struct Module {
     /// a helper action run (and waited for) before an account is removed, to delete its files
     #[serde(default)]
     pub on_remove: String,
+    /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
+    #[serde(default)]
+    pub add: Option<AddFlow>,
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+/// `[add]`: new accounts filled in by the helper, as an account manager's login window does.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AddFlow {
+    /// run on a new account at once (a login window); the account goes when it fails or ends
+    /// without the title field filled in
+    #[serde(default)]
+    pub action: String,
+    /// Import: one new account per pasted line, the line put into this field
+    #[serde(default)]
+    pub import_field: String,
+    /// run on the imported accounts to check them and fill in the rest; failing ones go
+    #[serde(default)]
+    pub import_action: String,
+    #[serde(default)]
+    pub import_label: String,
+    /// accounts with the same value of this field are one: a new one updates the old instead
+    #[serde(default)]
+    pub same: String,
 }
 
 impl Module {

@@ -5,11 +5,19 @@ platform = "linux"
 description = "Several accounts at once, join servers, 2FA"
 helper = "alyae-roblox"
 title_field = "username"
-# "Add with browser": a new account from signing in on Roblox's own page (the Log in window)
-add_with = "login"
 # removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
 # AEAM stays; only Mocktail's saved sign-in in it goes)
 on_remove = "forget"
+
+# Add account opens Roblox's login page and adds the account once it signs in; Import takes
+# .ROBLOSECURITY cookies, one per line, and checks each. An account already here (same user ID)
+# gets the new sign-in instead of a second row.
+[add]
+action = "login"
+import_field = "cookie"
+import_action = "check"
+import_label = "Import cookies"
+same = "user_id"
 
 [[field]]
 key = "username"
@@ -92,6 +100,11 @@ label = "Refresh"
 [[action]]
 id = "login"
 label = "Log in"
+
+# roblox.com signed in as the account, in a window of its own (the saved cookie, a fresh profile)
+[[action]]
+id = "browser"
+label = "Open in browser"
 
 # online status of every account, every 15 s while the window is shown and focused; the helper
 # gets only the user IDs and asks Roblox without a cookie, so no account vouches for the others

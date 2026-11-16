@@ -508,7 +508,9 @@ impl eframe::App for App {
                 .iter()
                 .find_map(|f| Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()))
         });
-        if let Some(path) = dropped.filter(|p| p.extension().is_some_and(|e| e == "alyae")) {
+        if let Some(path) = dropped
+            .filter(|p| p.extension().is_some_and(|e| e == "alyae") || crate::transfer::foreign(p))
+        {
             self.transfer = Some(Transfer {
                 export: false,
                 path: path.display().to_string(),
@@ -1721,11 +1723,8 @@ impl App {
             return;
         }
         let Some(s) = &self.store else { return };
-        let result = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))
-            .and_then(|text| crate::transfer::read(&text, &t.password))
-            .and_then(|list| crate::transfer::import(s, &self.accounts, list))
-            .and_then(|r| s.list().map(|l| (r, l)));
+        let result =
+            bring_in(s, &self.accounts, &path, &t.password).and_then(|r| s.list().map(|l| (r, l)));
         match result {
             Ok((r, (list, _))) => {
                 self.accounts = list;
@@ -2476,6 +2475,48 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Accounts from `path` into `store`: an Alyae accounts file, and quietly also Roblox Account
+/// Manager's AccountData.json or AEAM's data folder (its manager.db).
+fn bring_in(
+    store: &Store,
+    have: &[Account],
+    path: &std::path::Path,
+    password: &str,
+) -> Result<crate::transfer::Imported, String> {
+    let named = |n: &str| path.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n));
+    let aeam_dir = if path.is_dir() && path.join("manager.db").is_file() {
+        Some(path.to_path_buf())
+    } else if named("manager.db") {
+        path.parent().map(std::path::Path::to_path_buf)
+    } else {
+        None
+    };
+    if let Some(dir) = aeam_dir {
+        let r = crate::aeam::import_from(&dir, store, have)?;
+        store.set_setting("aeam_imported", "1");
+        return Ok(crate::transfer::Imported {
+            added: r.added,
+            skipped: r.skipped,
+            with_command: Vec::new(),
+        });
+    }
+    // RAM's folder: its accounts file in it
+    let file = if path.is_dir() {
+        path.join("AccountData.json")
+    } else {
+        path.to_path_buf()
+    };
+    let bytes = std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let alyae = bytes.starts_with(b"{\"alyae_export\"");
+    let list = if !alyae && (crate::ram::is_ram(&bytes) || crate::transfer::foreign(&file)) {
+        crate::ram::read(&bytes, password)?
+    } else {
+        let text = String::from_utf8(bytes).map_err(|_| "this is not an accounts file")?;
+        crate::transfer::read(&text, password)?
+    };
+    crate::transfer::import(store, have, list)
+}
+
 /// A one-line box of the grid's height, its text centred up and down.
 fn boxed<'t>(v: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
     egui::TextEdit::singleline(v)
@@ -2929,6 +2970,29 @@ mod tests {
         h.get_by_label("Close").click();
         h.run();
         assert!(!h.state().edit_open);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Bring in takes Roblox Account Manager's AccountData.json as well, once per account.
+    #[test]
+    fn bring_in_reads_roblox_account_manager() {
+        let dir = std::env::temp_dir().join(format!("alyae-ram-{}", store::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(&dir.join("t.db"), crate::vault::Vault::from_key(&[3; 32])).unwrap();
+        let file = dir.join("AccountData.json");
+        std::fs::write(
+            &file,
+            r#"[{"SecurityToken":"tok1","Username":"Player1","UserID":77,"Alias":"Main","Group":"Alts"}]"#,
+        )
+        .unwrap();
+        let r = bring_in(&s, &[], &file, "").unwrap();
+        assert_eq!((r.added, r.skipped), (1, 0));
+        let have = s.list().unwrap().0;
+        assert_eq!(have[0].value("username"), "Player1");
+        assert_eq!(have[0].value("cookie"), "tok1");
+        // the folder works too, and an account already here is not added twice
+        let again = bring_in(&s, &have, &dir, "").unwrap();
+        assert_eq!((again.added, again.skipped), (0, 1));
         let _ = std::fs::remove_dir_all(dir);
     }
 

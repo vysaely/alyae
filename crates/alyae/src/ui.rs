@@ -83,6 +83,8 @@ struct Transfer {
     path: String,
     password: String,
     again: String,
+    /// the system's file picker, open on its own thread; its answer comes here
+    picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
 }
 
 const NO_GROUP: &str = "Ungrouped";
@@ -1670,7 +1672,28 @@ impl App {
             }
             ui.add_space(6.0);
             ui.label("File");
-            ui.add(egui::TextEdit::singleline(&mut t.path).desired_width(f32::INFINITY));
+            if let Some(rx) = &t.picking {
+                match rx.try_recv() {
+                    Ok(chosen) => {
+                        if let Some(p) = chosen {
+                            t.path = p.display().to_string();
+                        }
+                        t.picking = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => t.picking = None,
+                }
+            }
+            ui.horizontal(|ui| {
+                let browse = ui.add_enabled(t.picking.is_none(), egui::Button::new("Browse…"));
+                ui.add(egui::TextEdit::singleline(&mut t.path).desired_width(f32::INFINITY));
+                if browse.clicked() {
+                    t.picking = Some(pick_file(t.export, &t.path));
+                }
+            });
             ui.label("Password");
             let pw = ui.add(egui::TextEdit::singleline(&mut t.password).password(true));
             if t.export {
@@ -2473,6 +2496,37 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// The system's file picker on a thread of its own (the window keeps drawing meanwhile): where to
+/// save (`save`), or a file to bring in. Starts beside `current` when it names a place.
+fn pick_file(save: bool, current: &str) -> std::sync::mpsc::Receiver<Option<std::path::PathBuf>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let current = std::path::PathBuf::from(current.trim());
+    std::thread::spawn(move || {
+        let mut d = rfd::FileDialog::new();
+        let dir = if current.is_dir() {
+            Some(current.clone())
+        } else {
+            current.parent().filter(|p| p.is_dir()).map(Into::into)
+        };
+        if let Some(dir) = dir.or_else(dirs::document_dir) {
+            d = d.set_directory(dir);
+        }
+        let chosen = if save {
+            if let Some(name) = current.file_name() {
+                d = d.set_file_name(name.to_string_lossy());
+            }
+            d.add_filter("Alyae accounts", &["alyae"]).save_file()
+        } else {
+            // Alyae's own files, Roblox Account Manager's AccountData.json, AEAM's manager.db
+            d.add_filter("Accounts", &["alyae", "json", "backup", "bak", "db"])
+                .add_filter("All files", &["*"])
+                .pick_file()
+        };
+        let _ = tx.send(chosen);
+    });
+    rx
 }
 
 /// Accounts from `path` into `store`: an Alyae accounts file, and quietly also Roblox Account

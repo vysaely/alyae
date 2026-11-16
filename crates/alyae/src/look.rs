@@ -69,6 +69,30 @@ fn reg_dword(key: &str, value: &str) -> Option<u32> {
     (r == 0).then_some(data)
 }
 
+/// Alyae's own accent, used when the desktop gives none or a grey one.
+const ACCENT: Color32 = Color32::from_rgb(0x8e, 0x7c, 0xff);
+
+/// An accent with real colour in it: not grey, not near black or white.
+fn colorful(c: Color32) -> bool {
+    let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    max >= 80.0 && min <= 235.0 && (max - min) / max >= 0.25
+}
+
+/// egui's light or dark look, its greys tinted with the accent so panels are not flat grey.
+fn tinted(v: &egui::Visuals, accent: Color32) -> Colors {
+    let accent = if colorful(accent) { accent } else { ACCENT };
+    let card = v.panel_fill.lerp_to_gamma(accent, 0.07);
+    let text = v.text_color().lerp_to_gamma(accent, 0.06);
+    Colors {
+        card,
+        edge: card.lerp_to_gamma(accent, 0.28),
+        text,
+        muted: card.lerp_to_gamma(text, 0.6).lerp_to_gamma(accent, 0.15),
+        accent,
+    }
+}
+
 /// Windows' app mode (light or dark) and accent colour.
 #[cfg(windows)]
 fn windows() -> Option<Colors> {
@@ -82,17 +106,11 @@ fn windows() -> Option<Colors> {
     } else {
         egui::Visuals::dark()
     };
-    // AccentColor is 0xAABBGGRR
+    // AccentColor is 0xAABBGGRR; a grey one (as Windows' dark default) gives way to Alyae's
     let accent = reg_dword(r"Software\Microsoft\Windows\DWM", "AccentColor")
         .map(|c| Color32::from_rgb(c as u8, (c >> 8) as u8, (c >> 16) as u8))
-        .unwrap_or(v.selection.bg_fill);
-    Some(Colors {
-        card: v.panel_fill,
-        edge: v.widgets.noninteractive.bg_stroke.color,
-        text: v.text_color(),
-        muted: v.weak_text_color(),
-        accent,
-    })
+        .unwrap_or(ACCENT);
+    Some(tinted(&v, accent))
 }
 
 #[cfg(not(windows))]
@@ -103,16 +121,9 @@ fn windows() -> Option<Colors> {
 /// The desktop's colours, or egui's own dark look's where the desktop gives none.
 pub fn colors() -> Colors {
     *COLORS.get_or_init(|| {
-        infynitae().or_else(windows).unwrap_or_else(|| {
-            let v = egui::Visuals::dark();
-            Colors {
-                card: v.panel_fill,
-                edge: v.widgets.noninteractive.bg_stroke.color,
-                text: v.text_color(),
-                muted: v.weak_text_color(),
-                accent: v.selection.bg_fill,
-            }
-        })
+        infynitae()
+            .or_else(windows)
+            .unwrap_or_else(|| tinted(&egui::Visuals::dark(), ACCENT))
     })
 }
 
@@ -124,7 +135,12 @@ pub fn apply(ctx: &egui::Context) {
     } else {
         egui::Visuals::light()
     };
-    let lift = |k: f32| c.card.lerp_to_gamma(c.text, k);
+    // raised surfaces lean toward the accent as well as the text, so they keep the tint
+    let lift = |k: f32| {
+        c.card
+            .lerp_to_gamma(c.text, k)
+            .lerp_to_gamma(c.accent, k * 0.6)
+    };
     v.panel_fill = c.card;
     v.window_fill = c.card;
     v.window_stroke = Stroke::new(1.0, c.edge);
@@ -136,6 +152,8 @@ pub fn apply(ctx: &egui::Context) {
     v.selection.bg_fill = c.accent.gamma_multiply(0.35);
     v.selection.stroke = Stroke::new(1.0, c.text);
     v.widgets.noninteractive.bg_stroke.color = c.edge;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, c.accent.gamma_multiply(0.7));
+    v.widgets.active.bg_stroke = Stroke::new(1.0, c.accent);
     for (w, k) in [
         (&mut v.widgets.inactive, 0.08),
         (&mut v.widgets.hovered, 0.14),
@@ -153,13 +171,39 @@ pub fn apply(ctx: &egui::Context) {
 /// The big button (AEAM's Join Server), in the accent.
 pub fn primary(label: &str) -> egui::Button<'static> {
     let c = colors();
-    egui::Button::new(RichText::new(label.to_string()).strong().color(c.card)).fill(c.accent)
+    // dark text on a light accent, white on a dark one
+    let light = c.accent.r() as u32 * 299 + c.accent.g() as u32 * 587 + c.accent.b() as u32 * 114
+        > 150_000;
+    let ink = if light {
+        Color32::from_rgb(0x14, 0x10, 0x24)
+    } else {
+        Color32::WHITE
+    };
+    egui::Button::new(RichText::new(label.to_string()).strong().color(ink)).fill(c.accent)
 }
 
 /// A small label, as AEAM's "GROUP:".
 pub fn tag(text: &str) -> RichText {
     RichText::new(text.to_uppercase())
-        .color(colors().muted)
+        .color(colors().accent.lerp_to_gamma(colors().muted, 0.35))
         .font(FontId::proportional(11.0))
         .strong()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grey_accent_gives_way() {
+        // Windows' dark default accent
+        assert!(!colorful(Color32::from_rgb(0x2b, 0x2b, 0x2b)));
+        assert!(!colorful(Color32::from_rgb(0xf0, 0xf0, 0xf0)));
+        assert!(colorful(Color32::from_rgb(0x00, 0x78, 0xd4)));
+        assert!(colorful(ACCENT));
+        let c = tinted(&egui::Visuals::dark(), Color32::from_rgb(0x2b, 0x2b, 0x2b));
+        assert_eq!(c.accent, ACCENT);
+        // the panels lean toward the accent: blue above red and green
+        assert!(c.card.b() > c.card.r() && c.card.b() > c.card.g());
+    }
 }

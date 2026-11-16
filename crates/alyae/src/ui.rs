@@ -52,8 +52,16 @@ pub struct App {
     last_watch: Option<(String, std::time::Instant)>,
     /// the watch's last error, shown once until it changes or the watch works again
     watch_error: Option<String>,
+    /// extra wait before the next watch run after the game refused for too many requests:
+    /// 1 minute, doubling to 10 while it keeps refusing, back to none once a run works
+    watch_backoff: Duration,
     /// an action waiting in its form: (action id, accounts)
     form: Option<(String, Vec<String>)>,
+    /// accounts made by Add account or Import whose action (login window, check) is still running:
+    /// kept when it works, dropped when it does not
+    adding: HashSet<String>,
+    /// the Import dialog's pasted text, while it is open
+    import_text: Option<String>,
     /// the name typed for a new bookmark
     bookmark_name: String,
     /// the watch column shows its text (else only the dot, the text on hover)
@@ -102,7 +110,10 @@ impl App {
             watching: None,
             last_watch: None,
             watch_error: None,
+            watch_backoff: Duration::ZERO,
             form: None,
+            adding: HashSet::new(),
+            import_text: None,
             bookmark_name: String::new(),
             watch_text: true,
         };
@@ -291,9 +302,14 @@ impl App {
                 }
                 Event::Watch(values) => {
                     self.watch_error = None;
+                    self.watch_backoff = Duration::ZERO;
                     self.watch_values.extend(values);
                 }
                 Event::WatchError(e) => {
+                    if is_rate_limit(&e) {
+                        self.watch_backoff = (self.watch_backoff * 2)
+                            .clamp(Duration::from_secs(60), Duration::from_secs(600));
+                    }
                     if self.watch_error.as_ref() != Some(&e) {
                         let column = self
                             .game
@@ -336,6 +352,9 @@ impl App {
                     }
                     if ok && self.status.get(&account).is_some_and(|(_, bad)| !bad) {
                         self.status.remove(&account);
+                    }
+                    if self.adding.remove(&account) {
+                        self.finish_add(&account, ok);
                     }
                 }
             }
@@ -459,6 +478,7 @@ impl eframe::App for App {
         }
         self.remove_dialog(&ctx);
         self.form_dialog(&ctx);
+        self.import_dialog(&ctx);
     }
 }
 
@@ -754,8 +774,48 @@ impl App {
             self.table(ui, m)
         });
         ui.horizontal(|ui| {
-            if ui.button("Add account").clicked() {
-                self.add_account(m);
+            let flow = m.add.clone().unwrap_or_default();
+            if flow.action.is_empty() {
+                if ui.button("Add account").clicked() {
+                    self.add_account(m);
+                }
+            } else {
+                let busy = self.adding.len();
+                let label = if busy > 0 {
+                    format!("Add account ({busy} signing in)")
+                } else {
+                    "Add account".to_string()
+                };
+                // one button: a click opens the login page, its right-click menu has the rest
+                let import = (!flow.import_field.is_empty()).then(|| {
+                    if flow.import_label.is_empty() {
+                        "Import".to_string()
+                    } else {
+                        flow.import_label.clone()
+                    }
+                });
+                let hover = match &import {
+                    Some(i) => format!(
+                        "Opens the login page: sign in, and the account is added.\nRight-click: {i}, Add manually"
+                    ),
+                    None => "Opens the login page: sign in, and the account is added.\nRight-click: Add manually".to_string(),
+                };
+                let b = ui.button(label).on_hover_text(hover);
+                if b.clicked() {
+                    self.add_via(m, &flow.action);
+                }
+                b.context_menu(|ui| {
+                    if let Some(i) = &import
+                        && ui.button(i).clicked()
+                    {
+                        self.import_text = Some(String::new());
+                        ui.close();
+                    }
+                    if ui.button("Add manually").clicked() {
+                        self.add_account(m);
+                        ui.close();
+                    }
+                });
             }
             let ids: Vec<String> = self.selected.iter().cloned().collect();
             if !ids.is_empty() && ui.button("Remove").clicked() {
@@ -790,19 +850,189 @@ impl App {
         });
     }
 
-    fn add_account(&mut self, m: &Module) {
-        let a = Account {
+    fn new_account(&self, m: &Module) -> Account {
+        Account {
             id: store::new_id(),
             game: m.id.clone(),
             group: self.group_filter.clone().unwrap_or_default(),
             created: store::now(),
             sort: self.accounts.iter().map(|a| a.sort).max().unwrap_or(0) + 1,
             ..Default::default()
-        };
+        }
+    }
+
+    /// Add account, by hand: an empty account in the form.
+    fn add_account(&mut self, m: &Module) {
+        let a = self.new_account(m);
         self.focus = Some(a.id.clone());
         self.selected = [a.id.clone()].into();
         self.draft = Some(a);
         self.draft_new = true;
+    }
+
+    /// Add account, through the module: a new account and its action (a login window) at once;
+    /// what the action sends fills it in, and `finish_add` keeps it or drops it.
+    fn add_via(&mut self, m: &Module, action: &str) {
+        let a = self.new_account(m);
+        if self.save(&a) {
+            self.adding.insert(a.id.clone());
+            self.run_action(action, vec![a.id.clone()]);
+            // the action could not start: nothing waits on it
+            if !self.tasks.iter().any(|(id, _)| *id == a.id) && !self.running.contains_key(&a.id)
+            {
+                self.adding.remove(&a.id);
+                self.drop_account(&a.id);
+            }
+        }
+    }
+
+    /// Import: one account per pasted line, then the module's check runs on all of them.
+    fn import_lines(&mut self, m: &Module, text: &str) {
+        let Some(flow) = m.add.clone() else { return };
+        let secret = m.is_secret(&flow.import_field);
+        let mut ids = Vec::new();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let mut a = self.new_account(m);
+            set_value(&mut a, &flow.import_field, line, secret);
+            if self.save(&a) {
+                ids.push(a.id);
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        if flow.import_action.is_empty() {
+            self.say(format!("Imported {}", plural(n)), false);
+            return;
+        }
+        self.adding.extend(ids.iter().cloned());
+        self.run_action(&flow.import_action, ids.clone());
+        for id in ids {
+            if !self.tasks.iter().any(|(t, _)| *t == id) && !self.running.contains_key(&id) {
+                self.adding.remove(&id);
+            }
+        }
+        self.say(format!("Checking {}", plural(n)), false);
+    }
+
+    /// An account from Add or Import whose action ended: kept when it worked and got its title
+    /// field; merged into an account already here with the same `same` field; else dropped.
+    fn finish_add(&mut self, id: &str, ok: bool) {
+        let Some(a) = self.accounts.iter().find(|a| a.id == id).cloned() else {
+            return;
+        };
+        let Some(m) = self.module(&a.game).cloned() else {
+            return;
+        };
+        if !ok || a.value(&m.title_field).is_empty() {
+            self.drop_account(id);
+            crate::log::line("Add account", "left out: not signed in, or the sign-in did not work");
+            if self.adding.is_empty() {
+                self.say(
+                    "Not added: the login window closed before signing in, or the sign-in did not work"
+                        .to_string(),
+                    true,
+                );
+            }
+            return;
+        }
+        let same = m.add.as_ref().map(|f| f.same.clone()).unwrap_or_default();
+        let twin = (!same.is_empty() && !a.value(&same).is_empty())
+            .then(|| {
+                self.accounts
+                    .iter()
+                    .find(|x| x.id != a.id && x.game == a.game && x.value(&same) == a.value(&same))
+                    .cloned()
+            })
+            .flatten();
+        match twin {
+            Some(mut old) => {
+                for (k, v) in &a.fields {
+                    set_value(&mut old, k, v, false);
+                }
+                for (k, v) in &a.secrets {
+                    set_value(&mut old, k, v, true);
+                }
+                if self.save(&old) {
+                    self.drop_account(id);
+                    let t = self.title(&old);
+                    self.say(format!("{t} was already here: its sign-in is updated"), false);
+                }
+            }
+            None => {
+                let t = self.title(&a);
+                crate::log::line(&t, "added");
+                self.say(format!("Added {t}"), false);
+            }
+        }
+    }
+
+    /// Deletes an account row (no module clean-up: it never ran).
+    fn drop_account(&mut self, id: &str) {
+        if let Some(Err(e)) = self.store.as_ref().map(|s| s.delete(id)) {
+            self.say(format!("Not removed: {e}"), true);
+            return;
+        }
+        self.accounts.retain(|a| a.id != id);
+        self.selected.remove(id);
+        self.status.remove(id);
+        if self.focus.as_deref() == Some(id) {
+            self.focus = None;
+            self.draft = None;
+        }
+    }
+
+    fn import_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut text) = self.import_text.take() else {
+            return;
+        };
+        let Some(m) = self.game.clone().and_then(|g| self.module(&g).cloned()) else {
+            return;
+        };
+        let Some(flow) = m.add.clone() else { return };
+        let field = m
+            .field(&flow.import_field)
+            .map_or(flow.import_field.clone(), |f| f.label.clone());
+        let mut done = None;
+        egui::Modal::new(egui::Id::unique("import")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.heading(if flow.import_label.is_empty() {
+                "Import"
+            } else {
+                flow.import_label.as_str()
+            });
+            ui.label(format!(
+                "One {} per line. Each becomes an account; ones that do not work are left out.",
+                field.to_lowercase()
+            ));
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_rows(8)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace),
+                );
+            });
+            let n = text.lines().filter(|l| !l.trim().is_empty()).count();
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(n > 0, look::primary(&format!("Import {}", plural(n))))
+                    .clicked()
+                {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => self.import_lines(&m, &text),
+            Some(false) => {}
+            None => self.import_text = Some(text),
+        }
     }
 
     fn stop(&mut self, ids: &[String]) {
@@ -1387,23 +1617,20 @@ impl App {
     }
 
     /// Runs the shown game's watch (online status) when it is due, at most one run at a time.
+    /// A run already counts from its start, so `every` is the gap between requests.
     fn tick_watch(&mut self, ctx: &egui::Context, game: &str) {
         let Some(m) = self.module(game).cloned() else {
             return;
         };
         let Some(w) = m.watch.clone() else { return };
-        // paused while the window is in the background or minimized: no repaint is asked for, and
-        // focusing the window (which repaints it) runs the watch at once
+        // paused while the window is in the background or minimized: no repaint is asked for.
+        // Focusing it again runs the watch only once its interval has passed since the last run:
+        // switching between game windows and Alyae must not send a request on every switch
+        // (the game's servers limit how often they answer)
         let (focused, minimized) =
             ctx.input(|i| (i.focused, i.viewport().minimized.unwrap_or(false)));
-        let every = Duration::from_secs(w.every.max(5));
+        let every = Duration::from_secs(w.every.max(5)) + self.watch_backoff;
         if !focused || minimized {
-            if let (Some((_, t)), Some(past)) = (
-                &mut self.last_watch,
-                std::time::Instant::now().checked_sub(every),
-            ) {
-                *t = past;
-            }
             return;
         }
         let due = match &self.last_watch {
@@ -1880,11 +2107,103 @@ fn set_value(a: &mut crate::store::Account, k: &str, v: &str, secret: bool) {
     }
 }
 
+/// A helper's error saying the game's servers refused for too many requests.
+fn is_rate_limit(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("rate limit") || e.contains("too many requests") || e.contains("429")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+
+    /// An account from Add or Import is kept when its action works, merged into one with the same
+    /// user ID, and dropped when the action fails or fills in no name.
+    #[test]
+    fn added_accounts_kept_merged_or_dropped() {
+        let mods = std::env::temp_dir().join(format!("alyae-addmods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        std::fs::write(
+            mods.join("t/module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\n\
+             [add]\naction = \"login\"\nimport_field = \"cookie\"\nimport_action = \"check\"\nsame = \"user_id\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"U\"\n[[field]]\nkey = \"user_id\"\nlabel = \"I\"\n\
+             [[field]]\nkey = \"cookie\"\nlabel = \"C\"\nsecret = true\n\
+             [[action]]\nid = \"login\"\nlabel = \"Log in\"\n[[action]]\nid = \"check\"\nlabel = \"Refresh\"\n",
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let tx = h.state().tx.clone();
+        let make = |id: &str, user: &str, uid: &str, cookie: &str| {
+            let mut a = Account {
+                id: id.into(),
+                game: "t".into(),
+                ..Default::default()
+            };
+            set_value(&mut a, "username", user, false);
+            set_value(&mut a, "user_id", uid, false);
+            set_value(&mut a, "cookie", cookie, true);
+            a
+        };
+        for a in [
+            make("old", "me", "5", "old-cookie"),
+            make("again", "me", "5", "new-cookie"),
+            make("fresh", "alt", "6", "c6"),
+            make("closed", "", "", ""),
+            make("bad", "x", "7", "c7"),
+        ] {
+            h.state_mut().save(&a);
+        }
+        h.state_mut().adding = ["again", "fresh", "closed", "bad"]
+            .map(String::from)
+            .into();
+        for (id, ok) in [
+            ("again", true),
+            ("fresh", true),
+            ("closed", true),
+            ("bad", false),
+        ] {
+            tx.send(Event::Ended {
+                account: id.into(),
+                action: "login".into(),
+                ok,
+            })
+            .unwrap();
+        }
+        h.run();
+        let mut ids: Vec<String> = h.state().accounts.iter().map(|a| a.id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, ["fresh", "old"]);
+        let old = h.state().accounts.iter().find(|a| a.id == "old").unwrap();
+        assert_eq!(old.value("cookie"), "new-cookie");
+        assert!(h.state().adding.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    #[test]
+    fn rate_limit_backs_off() {
+        assert!(is_rate_limit(
+            "Roblox is rate limiting: try again in a minute"
+        ));
+        assert!(!is_rate_limit("online status: Roblox answered 500"));
+        let (mut h, dir) = window("roblox");
+        let tx = h.state().tx.clone();
+        for want in [60, 120, 240, 480, 600, 600] {
+            tx.send(Event::WatchError(
+                "Roblox is rate limiting: try again in a minute".into(),
+            ))
+            .unwrap();
+            h.run();
+            assert_eq!(h.state().watch_backoff, Duration::from_secs(want));
+        }
+        tx.send(Event::Watch(Values::default())).unwrap();
+        h.run();
+        assert_eq!(h.state().watch_backoff, Duration::ZERO);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// The window on a fresh data folder, opened on `game`, with the repository's modules.
     fn window(game: &str) -> (Harness<'static, App>, PathBuf) {
@@ -1935,12 +2254,15 @@ mod tests {
         let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
         std::fs::create_dir_all(mods.join("t")).unwrap();
         let marker = mods.join("ran");
+        // creates the marker file: `touch` under sh, `type nul >` under cmd (no `touch` on Windows)
+        let touch = if cfg!(windows) { "type nul >" } else { "touch" };
+        // TOML literal string: a Windows path's backslashes stay as they are
+        let command = format!("{touch} \"{}\"", marker.display());
         std::fs::write(
             mods.join("t/module.toml"),
             format!(
                 "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\n[[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
-                 [[action]]\nid = \"wipe\"\nlabel = \"Wipe\"\nconfirm = \"Sure?\"\ncommand = \"touch {}\"\n",
-                marker.display()
+                 [[action]]\nid = \"wipe\"\nlabel = \"Wipe\"\nconfirm = \"Sure?\"\ncommand = '{command}'\n"
             ),
         )
         .unwrap();
@@ -1993,7 +2315,20 @@ mod tests {
     #[test]
     fn add_roblox_account() {
         let (mut h, dir) = window("roblox");
-        h.get_by_label("Add account").click();
+        // the by-hand form: where the module has a login window, a click would open it, so the
+        // form is in the button's right-click menu
+        let has_login = h
+            .state()
+            .module("roblox")
+            .and_then(|m| m.add.as_ref())
+            .is_some_and(|f| !f.action.is_empty());
+        if has_login {
+            h.get_by_label("Add account").click_secondary();
+            h.run();
+            h.get_by_label("Add manually").click();
+        } else {
+            h.get_by_label("Add account").click();
+        }
         h.run();
         h.get_by_label("Add").click();
         h.run();

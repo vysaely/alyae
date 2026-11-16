@@ -35,7 +35,11 @@ fn main() -> eframe::Result {
             .with_title("Alyae")
             .with_app_id("alyae")
             .with_inner_size([1000.0, 580.0])
-            .with_min_inner_size([700.0, 400.0]),
+            .with_min_inner_size([700.0, 400.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/alyae.png"))
+                    .unwrap_or_default(),
+            ),
         ..Default::default()
     };
     eframe::run_native(

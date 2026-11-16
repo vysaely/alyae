@@ -108,7 +108,10 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// The file name of the account's own copy of the Mocktail program.
 fn program_name(req: &Request) -> String {
-    format!("mocktail_alyae_{}", &req.id[..req.id.len().min(12)])
+    format!(
+        "mocktail_alyae_{}",
+        req.id.chars().take(12).collect::<String>()
+    )
 }
 
 /// The account's own copy of the Mocktail program (a hard link where it can be one): Mocktail
@@ -624,8 +627,8 @@ pub fn play(req: &Request) {
         );
     };
     let data_dir = &req.data_dir;
-    let main = req.is_main();
-    let fps = req.fps();
+    let main = !req.is_alt();
+    let fps = req.fps().unwrap_or(0);
     let fps_limit = if fps == 0 || fps >= 1000 { 10000 } else { fps };
     let program = account_program(&m, req, data_dir);
     if already_running(&program) {

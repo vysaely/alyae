@@ -52,7 +52,7 @@ key = "role"
 label = "Role"
 kind = "choice"
 choices = ["alt", "main"]
-hint = "main: full FPS and quality; alt: small, muted, low FPS"
+hint = "main: full FPS and quality; alt: small, muted, low FPS; empty: Roblox as it is"
 
 [[field]]
 key = "anti_afk"
@@ -64,7 +64,10 @@ hint = "minutes without input before a 1 px nudge (Roblox kicks after 20)"
 [[field]]
 key = "fps"
 label = "FPS cap"
-hint = "empty: 330 for a main, 6 for an alt; 0: no cap"
+hint = "empty: the role's (below); 0: no cap"
+# an empty FPS cap by role; no role: Roblox's own setting
+default_by = "role"
+defaults = { main = "330", alt = "6" }
 
 [[action]]
 id = "play"

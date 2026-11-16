@@ -18,6 +18,10 @@ const P: u32 = 1;
 /// The fewest a header may ask for: a file asking for less was not written by Alyae.
 const MIN_M_KIB: u32 = 19 * 1024;
 pub const MIN_PASSWORD: usize = 8;
+/// The most a header may ask for.
+const MAX_M_KIB: u32 = 256 * 1024;
+const MAX_T: u32 = 10;
+const MAX_P: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -118,7 +122,9 @@ pub fn read(text: &str, password: &str) -> Result<Vec<Account>, String> {
     if h.alyae_export != FORMAT || h.kdf != "argon2id" {
         return Err("the file is from a newer Alyae".into());
     }
-    if h.m < MIN_M_KIB || h.t < 2 || h.m > 4 * 1024 * 1024 || h.t > 64 || h.p == 0 || h.p > 16 {
+    // the settings are read before anything is checked: a file asking for more than Alyae's own
+    // (64 MiB, 3 passes) by a wide margin is refused rather than freezing or exhausting the PC
+    if h.m < MIN_M_KIB || h.t < 2 || h.m > MAX_M_KIB || h.t > MAX_T || h.p == 0 || h.p > MAX_P {
         return Err("the file's settings are not ones Alyae writes".into());
     }
     let blob = unhex(sealed).ok_or("the file is damaged")?;
@@ -148,9 +154,12 @@ pub fn read(text: &str, password: &str) -> Result<Vec<Account>, String> {
         .collect())
 }
 
+#[derive(Default)]
 pub struct Imported {
     pub added: usize,
     pub skipped: usize,
+    /// accounts whose secrets could not all be opened (AEAM's), with how many
+    pub unreadable: Vec<(String, usize)>,
     /// names of added accounts that carry a command to run (a "launch" field): a file from
     /// someone else could hide anything there, so the window names them
     pub with_command: Vec<String>,
@@ -169,13 +178,12 @@ fn already(have: &[Account], a: &Account) -> bool {
 /// Adds the accounts of a file to `store`, skipping ones it has; all or nothing.
 pub fn import(store: &Store, have: &[Account], accounts: Vec<Account>) -> Result<Imported, String> {
     store.transaction(|| {
-        let mut r = Imported {
-            added: 0,
-            skipped: 0,
-            with_command: Vec::new(),
-        };
+        let mut r = Imported::default();
         let mut seen: Vec<Account> = have.to_vec();
-        for a in accounts {
+        for mut a in accounts {
+            // a folder of this PC's, chosen by Alyae: one from a file could name any folder,
+            // which Join would write into and Reset files would empty
+            a.fields.remove("profile");
             if a.id.is_empty() || a.game.is_empty() || already(&seen, &a) {
                 r.skipped += 1;
                 continue;
@@ -213,24 +221,11 @@ pub fn default_path() -> std::path::PathBuf {
     let day = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() / 86400);
-    let (y, m, d) = civil(day as i64);
+    let (y, m, d) = crate::log::civil(day as i64);
     dirs::document_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_default()
         .join(format!("alyae-accounts-{y:04}-{m:02}-{d:02}.alyae"))
-}
-
-/// Days since 1970-01-01 as (year, month, day) (Howard Hinnant's civil_from_days).
-fn civil(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 /// Writes `text` to `path` readable by its owner only (on Linux), never over an existing file.
@@ -246,7 +241,12 @@ pub fn write_new(path: &std::path::Path, text: &str) -> Result<(), String> {
     })?;
     f.write_all(text.as_bytes())
         .and_then(|_| f.sync_all())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        .map_err(|e| {
+            // a half-written file would only make the next try say it exists already
+            drop(f);
+            let _ = std::fs::remove_file(path);
+            format!("cannot write {}: {e}", path.display())
+        })
 }
 
 #[cfg(test)]
@@ -284,6 +284,12 @@ mod tests {
         // a weaker setting written into the header
         let weaker = text.replacen("\"t\":3", "\"t\":2", 1);
         assert!(read(&weaker, "correct horse").is_err());
+        let huge = text.replacen("\"m\":65536", "\"m\":4194304", 1);
+        assert!(
+            read(&huge, "correct horse")
+                .unwrap_err()
+                .contains("settings")
+        );
         let tiny = text.replacen("\"m\":65536", "\"m\":8", 1);
         assert!(
             read(&tiny, "correct horse")
@@ -306,6 +312,8 @@ mod tests {
         let mut same_user = acc("x1", "roblox", "Same user");
         same_user.fields.insert("user_id".into(), "77".into());
         let mut cmd = acc("g1", "generic", "With command");
+        cmd.fields
+            .insert("profile".into(), "/home/someone/.mozilla".into());
         cmd.fields.insert("launch".into(), "calc.exe".into());
         let file = vec![same_user, cmd, acc("n1", "roblox", "New")];
         let have = store.list().unwrap().0;
@@ -315,6 +323,12 @@ mod tests {
         let have = store.list().unwrap().0;
         let again = import(&store, &have, file).unwrap();
         assert_eq!((again.added, again.skipped), (0, 3));
+        let g1 = have.iter().find(|a| a.id == "g1").unwrap();
+        assert_eq!(
+            g1.value("profile"),
+            "",
+            "an imported profile folder was kept"
+        );
         // secrets come back sealed under this PC's own key
         let n1 = have.iter().find(|a| a.id == "n1").unwrap();
         assert_eq!(n1.value("password"), "pw-n1");
@@ -323,6 +337,7 @@ mod tests {
 
     #[test]
     fn dates_are_civil() {
+        use crate::log::civil;
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(20_773), (2026, 11, 16));
         assert_eq!(civil(11_016), (2000, 2, 29));

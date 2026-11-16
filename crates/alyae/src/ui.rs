@@ -85,6 +85,21 @@ struct Transfer {
     again: String,
     /// the system's file picker, open on its own thread; its answer comes here
     picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// saving or opening the file, on its own thread (the password takes a second or more)
+    working: Option<std::sync::mpsc::Receiver<Result<Work, String>>>,
+}
+
+/// What the accounts file dialog's thread did.
+enum Work {
+    Saved(usize),
+    Loaded(Loaded),
+}
+
+/// Accounts read from a file, not yet added.
+enum Loaded {
+    Accounts(Vec<Account>),
+    /// AEAM's data folder: its own import reads it
+    Aeam(std::path::PathBuf),
 }
 
 const NO_GROUP: &str = "Ungrouped";
@@ -227,41 +242,11 @@ impl App {
     }
 
     fn import_aeam(&mut self) {
-        let Some(s) = &self.store else { return };
-        let result = crate::aeam::import(s, &self.accounts).and_then(|r| s.list().map(|l| (r, l)));
-        match result {
-            Ok((report, (list, problems))) => {
-                self.accounts = list;
-                let mut text = format!("Brought in {} Roblox accounts from AEAM", report.added);
-                if report.skipped > 0 {
-                    text += &format!(" ({} were here already)", report.skipped);
-                }
-                let bad_total: usize = report.bad_secrets.iter().map(|(_, n)| *n).sum();
-                if bad_total > 0 {
-                    let who: Vec<String> = report
-                        .bad_secrets
-                        .iter()
-                        .map(|(name, n)| {
-                            if *n > 1 {
-                                format!("{name} ({n})")
-                            } else {
-                                name.clone()
-                            }
-                        })
-                        .collect();
-                    text += &format!(
-                        "; {bad_total} secret{} could not be decrypted ({})",
-                        if bad_total == 1 { "" } else { "s" },
-                        who.join(", ")
-                    );
-                }
-                if !problems.is_empty() {
-                    text += &format!("; {}", problems.join("; "));
-                }
-                self.say(text, bad_total > 0 || !problems.is_empty());
-            }
-            Err(e) => self.say(format!("AEAM accounts not brought in: {e}"), true),
-        }
+        let r = match crate::aeam::dir() {
+            Some(dir) => self.add_loaded(Loaded::Aeam(dir)),
+            None => Err("AEAM's data folder was not found".into()),
+        };
+        self.report_import(r);
     }
 
     fn focus_on(&mut self, id: &str) {
@@ -1212,17 +1197,22 @@ impl App {
         if m.field("role").is_none() {
             return String::new();
         }
-        let main = a.value("role") == "main";
-        let fps = a
-            .value("fps")
-            .parse::<u32>()
-            .unwrap_or(if main { 330 } else { 6 });
-        let fps = if fps == 0 || fps >= 1000 {
-            "no cap".to_string()
-        } else {
-            format!("{fps} FPS")
+        let role = match a.value("role") {
+            "main" => "H",
+            "alt" => "L",
+            _ => "",
         };
-        format!("{} • {fps}", if main { "H" } else { "L" })
+        let fps = match m.value_of(a, "fps").parse::<u32>() {
+            Ok(0) => "no cap".to_string(),
+            Ok(n) if n >= 1000 => "no cap".to_string(),
+            Ok(n) => format!("{n} FPS"),
+            Err(_) => String::new(),
+        };
+        [role, fps.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" • ")
     }
 
     fn table(&mut self, ui: &mut egui::Ui, m: &Module) {
@@ -1704,8 +1694,16 @@ impl App {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let label = if t.export { "Save" } else { "Bring in" };
-                if ui.add(crate::look::primary(label)).clicked() || (enter && !t.export) {
+                let idle = t.working.is_none();
+                if ui.add_enabled(idle, crate::look::primary(label)).clicked()
+                    || (idle && enter && !t.export)
+                {
                     go = true;
+                }
+                if !idle {
+                    ui.spinner();
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     close = true;
@@ -1716,62 +1714,131 @@ impl App {
             self.transfer = None;
             return;
         }
+        let done = t.working.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err("stopped".into())),
+        });
+        if let Some(r) = done {
+            t.working = None;
+            let export = t.export;
+            let path = t.path.trim().to_string();
+            match r {
+                Ok(Work::Saved(n)) => {
+                    self.say(format!("{} saved to {path}", plural(n)), false);
+                    self.transfer = None;
+                }
+                Ok(Work::Loaded(l)) => {
+                    let r = self.add_loaded(l);
+                    if self.report_import(r) {
+                        self.transfer = None;
+                    }
+                }
+                Err(e) => {
+                    let what = if export {
+                        "Not saved"
+                    } else {
+                        "Not brought in"
+                    };
+                    self.say(format!("{what}: {e}"), true);
+                    if let Some(t) = self.transfer.as_mut() {
+                        t.password.clear();
+                    }
+                }
+            }
+            return;
+        }
         if !go {
             return;
         }
-        let t = self.transfer.take().expect("open dialog");
         let path = std::path::PathBuf::from(t.path.trim());
-        if t.export {
-            if t.password != t.again {
-                self.say("The two passwords differ", true);
-                self.transfer = Some(t);
-                return;
-            }
-            let written = crate::transfer::export(&self.accounts, &t.password)
-                .and_then(|text| crate::transfer::write_new(&path, &text));
-            match written {
-                Ok(()) => self.say(
-                    format!(
-                        "{} saved to {}",
-                        plural(self.accounts.len()),
-                        path.display()
-                    ),
-                    false,
-                ),
-                Err(e) => {
-                    self.say(format!("Not saved: {e}"), true);
-                    self.transfer = Some(t);
-                }
-            }
+        let password = t.password.clone();
+        if t.export && t.password != t.again {
+            self.say("The two passwords differ", true);
             return;
         }
-        let Some(s) = &self.store else { return };
-        let result =
-            bring_in(s, &self.accounts, &path, &t.password).and_then(|r| s.list().map(|l| (r, l)));
-        match result {
-            Ok((r, (list, _))) => {
-                self.accounts = list;
-                let mut text = format!("Brought in {}", plural(r.added));
-                if r.skipped > 0 {
-                    text += &format!(" ({} were here already)", r.skipped);
-                }
-                let warn = !r.with_command.is_empty();
-                if warn {
-                    text += &format!(
-                        "; check the launch command of {} before launching: a file can carry any command",
-                        r.with_command.join(", ")
-                    );
-                }
-                self.say(text, warn);
-            }
+        let (tx, rx) = std::sync::mpsc::channel();
+        t.working = Some(rx);
+        if t.export {
+            let accounts = self.accounts.clone();
+            std::thread::spawn(move || {
+                let r = crate::transfer::export(&accounts, &password)
+                    .and_then(|text| crate::transfer::write_new(&path, &text))
+                    .map(|()| Work::Saved(accounts.len()));
+                let _ = tx.send(r);
+            });
+        } else {
+            std::thread::spawn(move || {
+                let _ = tx.send(load(&path, &password).map(Work::Loaded));
+            });
+        }
+    }
+
+    /// Adds what was read from a file.
+    fn add_loaded(&mut self, l: Loaded) -> Result<crate::transfer::Imported, String> {
+        let Some(s) = &self.store else {
+            return Err("no account store".into());
+        };
+        match l {
+            Loaded::Accounts(list) => crate::transfer::import(s, &self.accounts, list),
+            Loaded::Aeam(dir) => crate::aeam::import_from(&dir, s, &self.accounts),
+        }
+    }
+
+    /// Says how an import went (one message for every kind of file); true when it went in.
+    fn report_import(&mut self, r: Result<crate::transfer::Imported, String>) -> bool {
+        let r = match r {
+            Ok(r) => r,
             Err(e) => {
                 self.say(format!("Not brought in: {e}"), true);
-                self.transfer = Some(Transfer {
-                    password: String::new(),
-                    ..t
-                });
+                return false;
+            }
+        };
+        let mut problems = Vec::new();
+        if let Some(s) = &self.store {
+            match s.list() {
+                Ok((list, p)) => {
+                    self.accounts = list;
+                    problems = p;
+                }
+                Err(e) => problems.push(e),
             }
         }
+        let mut text = format!("Brought in {}", plural(r.added));
+        if r.skipped > 0 {
+            text += &format!(" ({} were here already)", r.skipped);
+        }
+        let unreadable: usize = r.unreadable.iter().map(|(_, n)| *n).sum();
+        if unreadable > 0 {
+            let who: Vec<String> = r
+                .unreadable
+                .iter()
+                .map(|(name, n)| {
+                    if *n > 1 {
+                        format!("{name} ({n})")
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            text += &format!(
+                "; {unreadable} secret{} could not be decrypted ({})",
+                if unreadable == 1 { "" } else { "s" },
+                who.join(", ")
+            );
+        }
+        if !r.with_command.is_empty() {
+            text += &format!(
+                "; check the launch command of {} before launching: a file can carry any command",
+                r.with_command.join(", ")
+            );
+        }
+        if !problems.is_empty() {
+            text += &format!("; {}", problems.join("; "));
+        }
+        let warn = unreadable > 0 || !r.with_command.is_empty() || !problems.is_empty();
+        self.say(text, warn);
+        true
     }
 
     fn remove_dialog(&mut self, ctx: &egui::Context) {
@@ -2331,14 +2398,18 @@ impl App {
                     let mut v = map.get(&f.key).cloned().unwrap_or_default();
                     let key = (d.id.clone(), f.key.clone());
                     if f.kind == "choice" && !f.choices.is_empty() {
+                        // empty is a choice of its own: the game's own setting
                         let shown = if v.is_empty() {
-                            f.choices[0].clone()
+                            "none".to_string()
                         } else {
                             v.clone()
                         };
                         egui::ComboBox::from_id_salt(("choice", &f.key))
                             .selected_text(&shown)
                             .show_ui(ui, |ui| {
+                                if ui.selectable_label(v.is_empty(), "none").clicked() {
+                                    v.clear();
+                                }
                                 for c in &f.choices {
                                     if ui.selectable_label(&shown == c, c).clicked() {
                                         v = c.clone();
@@ -2529,32 +2600,19 @@ fn pick_file(save: bool, current: &str) -> std::sync::mpsc::Receiver<Option<std:
     rx
 }
 
-/// Accounts from `path` into `store`: an Alyae accounts file, and quietly also Roblox Account
-/// Manager's AccountData.json or AEAM's data folder (its manager.db).
-fn bring_in(
-    store: &Store,
-    have: &[Account],
-    path: &std::path::Path,
-    password: &str,
-) -> Result<crate::transfer::Imported, String> {
+/// The accounts in `path`: an Alyae accounts file, and quietly also Roblox Account Manager's
+/// AccountData.json (or its folder) or AEAM's data folder (or its manager.db). Touches no store,
+/// so it can run on a thread.
+fn load(path: &std::path::Path, password: &str) -> Result<Loaded, String> {
     let named = |n: &str| path.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n));
-    let aeam_dir = if path.is_dir() && path.join("manager.db").is_file() {
-        Some(path.to_path_buf())
-    } else if named("manager.db") {
-        path.parent().map(std::path::Path::to_path_buf)
-    } else {
-        None
-    };
-    if let Some(dir) = aeam_dir {
-        let r = crate::aeam::import_from(&dir, store, have)?;
-        store.set_setting("aeam_imported", "1");
-        return Ok(crate::transfer::Imported {
-            added: r.added,
-            skipped: r.skipped,
-            with_command: Vec::new(),
-        });
+    if path.is_dir() && path.join("manager.db").is_file() {
+        return Ok(Loaded::Aeam(path.to_path_buf()));
     }
-    // RAM's folder: its accounts file in it
+    if named("manager.db")
+        && let Some(dir) = path.parent()
+    {
+        return Ok(Loaded::Aeam(dir.to_path_buf()));
+    }
     let file = if path.is_dir() {
         path.join("AccountData.json")
     } else {
@@ -2568,7 +2626,7 @@ fn bring_in(
         let text = String::from_utf8(bytes).map_err(|_| "this is not an accounts file")?;
         crate::transfer::read(&text, password)?
     };
-    crate::transfer::import(store, have, list)
+    Ok(Loaded::Accounts(list))
 }
 
 /// A one-line box of the grid's height, its text centred up and down.
@@ -3039,13 +3097,17 @@ mod tests {
             r#"[{"SecurityToken":"tok1","Username":"Player1","UserID":77,"Alias":"Main","Group":"Alts"}]"#,
         )
         .unwrap();
-        let r = bring_in(&s, &[], &file, "").unwrap();
+        let bring_in = |have: &[Account], path: &std::path::Path| match load(path, "").unwrap() {
+            Loaded::Accounts(list) => crate::transfer::import(&s, have, list).unwrap(),
+            Loaded::Aeam(_) => panic!("read as AEAM's"),
+        };
+        let r = bring_in(&[], &file);
         assert_eq!((r.added, r.skipped), (1, 0));
         let have = s.list().unwrap().0;
         assert_eq!(have[0].value("username"), "Player1");
         assert_eq!(have[0].value("cookie"), "tok1");
         // the folder works too, and an account already here is not added twice
-        let again = bring_in(&s, &have, &dir, "").unwrap();
+        let again = bring_in(&have, &dir);
         assert_eq!((again.added, again.skipped), (0, 1));
         let _ = std::fs::remove_dir_all(dir);
     }

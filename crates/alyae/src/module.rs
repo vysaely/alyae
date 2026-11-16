@@ -22,6 +22,12 @@ pub struct Field {
     pub choices: Vec<String>,
     #[serde(default)]
     pub hint: String,
+    /// the value an account with this field empty gets, by the value of another field
+    /// (`default_by = "role"`, `defaults = { main = "330", alt = "6" }`)
+    #[serde(default)]
+    pub default_by: String,
+    #[serde(default)]
+    pub defaults: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -191,6 +197,19 @@ impl Module {
         self.fields.iter().find(|f| f.key == key)
     }
 
+    /// `a`'s value of `key`, or the field's default for it when empty.
+    pub fn value_of(&self, a: &Account, key: &str) -> String {
+        let v = a.value(key);
+        if !v.is_empty() {
+            return v.to_string();
+        }
+        self.field(key)
+            .filter(|f| !f.default_by.is_empty())
+            .and_then(|f| f.defaults.get(a.value(&f.default_by)))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn is_secret(&self, key: &str) -> bool {
         self.field(key).is_some_and(|f| f.secret)
     }
@@ -298,7 +317,10 @@ pub fn fill(
 /// One shell argument holding `v` exactly.
 fn quote(v: &str) -> Option<String> {
     if cfg!(windows) {
-        (!v.contains(['"', '%', '!', '^', '\n', '\r'])).then(|| format!("\"{v}\""))
+        // a backslash before the closing quote would escape it: such backslashes are doubled
+        let tail = v.len() - v.trim_end_matches('\\').len();
+        (!v.contains(['"', '%', '!', '^', '\n', '\r']))
+            .then(|| format!("\"{v}{}\"", "\\".repeat(tail)))
     } else {
         Some(format!("'{}'", v.replace('\'', r"'\''")))
     }
@@ -360,8 +382,10 @@ impl Running {
 fn shell(cmd: &str) -> Command {
     use std::os::windows::process::CommandExt;
     let mut c = Command::new("cmd");
-    // cmd parses its own command line: quotes in `cmd` must reach it unescaped
-    c.raw_arg("/C").raw_arg(cmd);
+    // cmd parses its own command line: quotes in `cmd` must reach it unescaped. With /S and the
+    // whole line in one more pair of quotes, cmd drops exactly that pair and keeps the rest as
+    // written (without /S, a line starting with a quote loses its first and last quotes)
+    c.raw_arg(format!("/S /C \"{cmd}\""));
     no_console(&mut c);
     c
 }
@@ -385,12 +409,21 @@ fn no_console(c: &mut Command) {
     let _ = c;
 }
 
-fn account_json(a: &Account) -> serde_json::Map<String, serde_json::Value> {
-    a.fields
+/// What the helper gets of an account: its fields and secrets, empty ones with a default filled in.
+fn account_json(module: &Module, a: &Account) -> serde_json::Map<String, serde_json::Value> {
+    let mut out: serde_json::Map<String, serde_json::Value> = a
+        .fields
         .iter()
         .chain(a.secrets.iter())
         .map(|(k, v)| (k.clone(), v.clone().into()))
-        .collect()
+        .collect();
+    for f in module.fields.iter().filter(|f| !f.default_by.is_empty()) {
+        let v = module.value_of(a, &f.key);
+        if !v.is_empty() {
+            out.insert(f.key.clone(), v.into());
+        }
+    }
+    out
 }
 
 /// The module's helper started for `action`, with its data folder.
@@ -418,11 +451,16 @@ fn spawn_helper(
     Ok((child, dir, helper))
 }
 
-fn request_json(account: &Account, inputs: &crate::store::Values, dir: &Path) -> serde_json::Value {
+fn request_json(
+    module: &Module,
+    account: &Account,
+    inputs: &crate::store::Values,
+    dir: &Path,
+) -> serde_json::Value {
     serde_json::json!({
         "id": account.id,
         "name": account.name,
-        "account": account_json(account),
+        "account": account_json(module, account),
         "inputs": inputs,
         "data_dir": dir,
     })
@@ -437,7 +475,7 @@ pub fn run_and_wait(
     data_dir: &Path,
 ) -> Result<(), String> {
     let (mut child, dir, helper) = spawn_helper(module, action, action, data_dir)?;
-    let request = request_json(account, &Default::default(), &dir);
+    let request = request_json(module, account, &Default::default(), &dir);
     // stdin closes after the request: the helper sees no more lines
     let mut stdin = child.stdin.take().expect("piped stdin");
     let sent = stdin.write_all(format!("{request}\n").as_bytes());
@@ -546,7 +584,7 @@ pub fn start(
         }));
     }
     let (mut child, dir, helper) = spawn_helper(module, &action.id, &action.label, data_dir)?;
-    let request = request_json(account, inputs, &dir);
+    let request = request_json(module, account, inputs, &dir);
     let mut stdin = child.stdin.take();
     if let Some(s) = stdin.as_mut() {
         s.write_all(format!("{request}\n").as_bytes())
@@ -606,6 +644,42 @@ mod tests {
     use super::*;
 
     /// A value cannot add a command of its own; a template that is one field is the person's
+    /// An empty FPS cap takes the role's from the module file; no role, no cap of Alyae's.
+    #[test]
+    fn empty_field_takes_its_default() {
+        let m = Module::parse(
+            r#"
+id = "g"
+name = "G"
+[[field]]
+key = "role"
+label = "Role"
+[[field]]
+key = "fps"
+label = "FPS"
+default_by = "role"
+defaults = { main = "330", alt = "6" }
+"#,
+            Path::new("."),
+        )
+        .unwrap();
+        let mut a = Account::default();
+        assert_eq!(m.value_of(&a, "fps"), "");
+        assert!(!account_json(&m, &a).contains_key("fps"));
+        a.fields.insert("role".into(), "alt".into());
+        assert_eq!(account_json(&m, &a)["fps"], "6");
+        a.fields.insert("fps".into(), "60".into());
+        assert_eq!(m.value_of(&a, "fps"), "60");
+    }
+
+    /// On Windows a value ending in a backslash keeps its closing quote.
+    #[cfg(windows)]
+    #[test]
+    fn trailing_backslash_is_doubled() {
+        assert_eq!(quote(r"C:\dir\").as_deref(), Some(r#""C:\dir\\""#));
+        assert_eq!(quote(r"C:\dir").as_deref(), Some(r#""C:\dir""#));
+    }
+
     /// own command, taken as written.
     #[cfg(unix)]
     #[test]

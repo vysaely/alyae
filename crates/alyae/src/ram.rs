@@ -171,7 +171,7 @@ const LOCKED: &str = "this Roblox Account Manager file is locked to the Windows 
 mod tests {
     use super::*;
 
-    const JSON: &str = r#"[{"Valid":true,"SecurityToken":"_|WARNING:-DO-NOT-SHARE-THIS.--abc","Username":"Player1","LastUse":"2026-01-02T03:04:05","Alias":"Main","Description":"Druid","Password":"pw1","Group":"Arch","UserID":77,"Fields":{},"LastAttemptedRefresh":"2026-01-01T00:00:00","BrowserTrackerID":"123"},
+    const JSON: &str = r#"[{"Valid":true,"SecurityToken":"_|WARNING:-DO-NOT-SHARE-THIS.--abc","Username":"Player1","LastUse":"2026-01-02T03:04:05","Alias":"Main","Description":"Note","Password":"pw1","Group":"Alts","UserID":77,"Fields":{},"LastAttemptedRefresh":"2026-01-01T00:00:00","BrowserTrackerID":"123"},
         {"SecurityToken":"tok2","Username":"Player2","Group":"Default","UserID":78},
         {"SecurityToken":null,"Username":"NoCookie"}]"#;
 
@@ -189,7 +189,7 @@ mod tests {
                 a.group.as_str(),
                 a.notes.as_str()
             ),
-            ("roblox", "Main", "Arch", "Druid")
+            ("roblox", "Main", "Alts", "Note")
         );
         assert_eq!(a.value("username"), "Player1");
         assert_eq!(a.value("user_id"), "77");

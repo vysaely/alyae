@@ -397,12 +397,12 @@ mod tests {
 
     #[test]
     fn places_and_codes() {
-        assert_eq!(place_id("3016661674"), Some(3016661674));
+        assert_eq!(place_id("1818"), Some(1818));
         assert_eq!(
-            place_id("https://www.roblox.com/games/3016661674/Rogue-Lineage"),
-            Some(3016661674)
+            place_id("https://www.roblox.com/games/1818/Classic-Crossroads"),
+            Some(1818)
         );
-        assert_eq!(place_id("rogue"), None);
+        assert_eq!(place_id("crossroads"), None);
         let link = "https://www.roblox.com/games/123/x?privateServerLinkCode=abcDEF123456789012";
         assert_eq!(
             query_value(link, "privateServerLinkCode"),

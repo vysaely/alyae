@@ -2982,7 +2982,7 @@ mod tests {
         let file = dir.join("AccountData.json");
         std::fs::write(
             &file,
-            r#"[{"SecurityToken":"tok1","Username":"Player1","UserID":77,"Alias":"Main","Group":"Arch"}]"#,
+            r#"[{"SecurityToken":"tok1","Username":"Player1","UserID":77,"Alias":"Main","Group":"Alts"}]"#,
         )
         .unwrap();
         let r = bring_in(&s, &[], &file, "").unwrap();

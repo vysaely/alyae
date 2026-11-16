@@ -1,4 +1,4 @@
-//! Alyae's log: one line per event (`2026-11-15 20:51:03 xSEz1n: Join Server: running`) in
+//! Alyae's log: one line per event (`2026-11-15 20:51:03 Player1: Join Server: running`) in
 //! `<data>/alyae.log`, moved to `alyae.log.1` past 1 MB. Helpers' own error output goes to the same
 //! file. Secret values never reach it: changed fields are logged by name only.
 

@@ -686,7 +686,7 @@ label = "Place"
             "action = \"p\"\nevery = 15\ncolumn = \"Online\"\n[colors]\n\"In game\" = \"#00ff00\"\n\"In\" = \"#000000\"\n",
         )
         .unwrap();
-        assert_eq!(w.color_of("In game: Rogue Lineage"), Some("#00ff00"));
+        assert_eq!(w.color_of("In game: Crossroads"), Some("#00ff00"));
         assert_eq!(w.color_of("In Studio"), Some("#000000"));
         assert_eq!(w.color_of("Offline"), None);
     }

@@ -22,6 +22,28 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo build --release --workspace
+      - name: Package
+        run: |
+          out=Alyae
+          mkdir -p "$out/modules"
+          cp target/release/alyae target/release/alyae-roblox target/release/alyae-roblox-login "$out/"
+          for m in modules/*/; do
+            case "$m" in *-windows/) continue ;; esac
+            cp -r "$m" "$out/modules/"
+          done
+          cp packaging/README-linux.txt "$out/README-linux.txt"
+          tar -czf Alyae-linux-x86_64.tar.gz "$out"
+      - name: Check package
+        run: |
+          check=$(mktemp -d)
+          tar -xzf Alyae-linux-x86_64.tar.gz -C "$check"
+          "$check/Alyae/alyae" --version
+          rm -rf "$check"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Alyae-linux-tar
+          path: Alyae-linux-x86_64.tar.gz
 
   windows:
     runs-on: windows-2022
@@ -76,6 +98,9 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: Alyae-portable-zip
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Alyae-linux-tar
       - name: Publish portable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,4 +109,4 @@ jobs:
           gh release view portable > /dev/null 2>&1 || gh release create portable --prerelease \
             --title "Alyae portable (Windows, newest main)" \
             --notes "Unzip, start alyae.exe. Built from the newest main; see README.txt inside."
-          gh release upload portable Alyae-portable.zip --clobber
+          gh release upload portable Alyae-portable.zip Alyae-linux-x86_64.tar.gz --clobber

@@ -142,11 +142,6 @@ pub struct Module {
     /// a helper action run (and waited for) before an account is removed, to delete its files
     #[serde(default)]
     pub on_remove: String,
-    /// an action that signs in to a new account (Roblox: the Log in window): the window offers
-    /// "Add with browser", which makes an empty account, runs it, and keeps the account only
-    /// when it brought a sign-in back
-    #[serde(default)]
-    pub add_with: String,
     #[serde(skip)]
     pub dir: PathBuf,
 }

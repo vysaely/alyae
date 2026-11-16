@@ -1984,49 +1984,15 @@ impl App {
             let inputs = self.inputs.entry(m.id.clone()).or_default();
             if let Some(p) = m.actions.iter().find(|a| a.primary) {
                 if !p.inputs.is_empty() {
+                    // the boxes, then a small Bookmarks button at the end of their line
                     let n = p.inputs.len() as f32;
-                    let w = ((full - gap * (n - 1.0)) / n).floor();
-                    // AEAM's labels over the boxes, Bookmarks at the end of the same line
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().interact_size.y = h;
-                        for i in &p.inputs {
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(w, h),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.set_width(w);
-                                    ui.label(look::tag(&i.label));
-                                },
-                            );
-                        }
-                        ui.put(
-                            egui::Rect::from_min_size(
-                                egui::pos2(ui.max_rect().left() + full - 84.0, ui.min_rect().top()),
-                                egui::vec2(84.0, h),
-                            ),
-                            |ui: &mut egui::Ui| {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        bookmarks_menu(
-                                            ui,
-                                            self.store.as_ref(),
-                                            &m.id,
-                                            p,
-                                            inputs,
-                                            &mut self.bookmark_name,
-                                        );
-                                    },
-                                )
-                                .response
-                            },
-                        );
-                    });
+                    let room = full - h - gap;
+                    let w = ((room - gap * (n - 1.0)) / n).floor();
                     ui.horizontal(|ui| {
                         for (k, i) in p.inputs.iter().enumerate() {
                             // the last box takes what rounding left over
                             let w = if k + 1 == p.inputs.len() {
-                                full - (w + gap) * (n - 1.0)
+                                room - (w + gap) * (n - 1.0)
                             } else {
                                 w
                             };
@@ -2034,6 +2000,14 @@ impl App {
                             ui.add_sized([w, h], boxed(v, &i.label))
                                 .on_hover_text(&i.hint);
                         }
+                        bookmarks_menu(
+                            ui,
+                            self.store.as_ref(),
+                            &m.id,
+                            p,
+                            inputs,
+                            &mut self.bookmark_name,
+                        );
                     });
                 }
                 if ui
@@ -2567,73 +2541,95 @@ fn bookmarks_menu(
         );
     };
     {
-        // a small word in the labels' line, not a button of its own height
-        ui.visuals_mut().button_frame = false;
-        ui.menu_button(look::tag("Bookmarks"), |ui| {
-            let mut list = load();
-            let mut changed = false;
-            let mut remove = None;
-            for (i, (label, values)) in list.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.button(label).clicked() {
-                        for inp in &primary.inputs {
-                            inputs.insert(
-                                inp.key.clone(),
-                                values.get(&inp.key).cloned().unwrap_or_default(),
-                            );
+        // a square button with a bookmark drawn on it (the font has no such sign)
+        let h = ui.spacing().interact_size.y;
+        let r = ui
+            .add_sized([h, h], egui::Button::new(""))
+            .on_hover_text("Bookmarks: saved places and servers");
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Bookmarks"));
+        let c = r.rect.center();
+        let ink = if r.hovered() {
+            look::colors().text
+        } else {
+            look::colors().muted
+        };
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                c + egui::vec2(-4.0, -6.0),
+                c + egui::vec2(4.0, -6.0),
+                c + egui::vec2(4.0, 6.0),
+                c + egui::vec2(0.0, 2.5),
+                c + egui::vec2(-4.0, 6.0),
+            ],
+            ink,
+            egui::Stroke::NONE,
+        ));
+        // typing a name in it must not close it: only a click outside does
+        egui::Popup::menu(&r)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let mut list = load();
+                let mut changed = false;
+                let mut remove = None;
+                for (i, (label, values)) in list.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.button(label).clicked() {
+                            for inp in &primary.inputs {
+                                inputs.insert(
+                                    inp.key.clone(),
+                                    values.get(&inp.key).cloned().unwrap_or_default(),
+                                );
+                            }
+                            ui.close();
                         }
-                        ui.close();
-                    }
-                    if ui.small_button("Remove").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                list.remove(i);
-                changed = true;
-            }
-            if !list.is_empty() {
-                ui.separator();
-            }
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(name)
-                        .hint_text("Name")
-                        .desired_width(140.0),
-                );
-                let has_values = primary
-                    .inputs
-                    .iter()
-                    .any(|i| inputs.get(&i.key).is_some_and(|v| !v.trim().is_empty()));
-                if ui
-                    .add_enabled(
-                        has_values && !name.trim().is_empty(),
-                        egui::Button::new("Save"),
-                    )
-                    .clicked()
-                {
-                    let values: Values = primary
-                        .inputs
-                        .iter()
-                        .filter_map(|i| {
-                            inputs
-                                .get(&i.key)
-                                .map(|v| (i.key.clone(), v.trim().to_string()))
-                        })
-                        .collect();
-                    list.retain(|(l, _)| l != name.trim());
-                    list.push((name.trim().to_string(), values));
-                    name.clear();
+                        if ui.small_button("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    list.remove(i);
                     changed = true;
                 }
+                if !list.is_empty() {
+                    ui.separator();
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("Name")
+                            .desired_width(140.0),
+                    );
+                    let has_values = primary
+                        .inputs
+                        .iter()
+                        .any(|i| inputs.get(&i.key).is_some_and(|v| !v.trim().is_empty()));
+                    if ui
+                        .add_enabled(
+                            has_values && !name.trim().is_empty(),
+                            egui::Button::new("Save"),
+                        )
+                        .clicked()
+                    {
+                        let values: Values = primary
+                            .inputs
+                            .iter()
+                            .filter_map(|i| {
+                                inputs
+                                    .get(&i.key)
+                                    .map(|v| (i.key.clone(), v.trim().to_string()))
+                            })
+                            .collect();
+                        list.retain(|(l, _)| l != name.trim());
+                        list.push((name.trim().to_string(), values));
+                        name.clear();
+                        changed = true;
+                    }
+                });
+                if changed {
+                    save(&list);
+                }
             });
-            if changed {
-                save(&list);
-            }
-        })
-        .response
-        .on_hover_text("Saved places and servers");
     }
 }
 
@@ -2933,6 +2929,42 @@ mod tests {
         h.get_by_label("Close").click();
         h.run();
         assert!(!h.state().edit_open);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Clicking into the bookmark name box and typing keeps the Bookmarks menu open.
+    #[test]
+    fn bookmarks_stay_open_while_typing() {
+        let (mut h, dir) = window("roblox");
+        h.get_by_label("Bookmarks").click();
+        h.run();
+        assert!(
+            h.query_by_label("Save").is_some(),
+            "the Bookmarks menu did not open"
+        );
+        // the menu's name box: the text box on Save's line
+        let name_box = |h: &Harness<'static, App>| {
+            let y = h.query_by_label("Save")?.rect().min.y;
+            h.get_all_by_role(egui::accesskit::Role::TextInput)
+                .find(|n| n.rect().min.y == y)
+                .map(|n| n.rect())
+        };
+        let at = name_box(&h).expect("a name box in the Bookmarks menu");
+        h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.rect() == at)
+            .unwrap()
+            .click();
+        h.run();
+        h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.rect() == at)
+            .expect("the Bookmarks menu closed when its name box was clicked")
+            .type_text("Hub");
+        h.run();
+        assert!(
+            name_box(&h).is_some(),
+            "the Bookmarks menu closed while typing a name"
+        );
+        assert_eq!(h.state().bookmark_name, "Hub");
         let _ = std::fs::remove_dir_all(dir);
     }
 

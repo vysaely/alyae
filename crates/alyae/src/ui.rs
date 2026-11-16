@@ -885,6 +885,21 @@ impl App {
             }
             self.message_line(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // moving accounts to another PC (or a backup): every game's accounts in one file
+                if ui
+                    .small_button("Accounts file")
+                    .on_hover_text(
+                        "Save all accounts to a password-sealed file, or bring one in \
+                         (an .alyae file can also be dropped on the window)",
+                    )
+                    .clicked()
+                {
+                    self.transfer = Some(Transfer {
+                        export: true,
+                        path: crate::transfer::default_path().display().to_string(),
+                        ..Default::default()
+                    });
+                }
                 if ui
                     .small_button("Open log")
                     .on_hover_text(self.dir.join("alyae.log").display().to_string())
@@ -1537,6 +1552,20 @@ impl App {
         let mut close = false;
         egui::Modal::new(egui::Id::unique("transfer")).show(ctx, |ui| {
             ui.set_width(420.0);
+            ui.horizontal(|ui| {
+                let was = t.export;
+                ui.selectable_value(&mut t.export, true, "Save to a file");
+                ui.selectable_value(&mut t.export, false, "Bring in from a file");
+                if t.export != was {
+                    t.path = if t.export {
+                        crate::transfer::default_path().display().to_string()
+                    } else {
+                        String::new()
+                    };
+                    t.again.clear();
+                }
+            });
+            ui.separator();
             if t.export {
                 ui.heading("Save accounts to a file");
                 ui.label(
@@ -2473,6 +2502,21 @@ mod tests {
         h.get_by_label("Online: show text").click();
         h.run();
         assert!(h.state().watch_text, "Show text did not switch back on");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The accounts file is reachable from the accounts window (Alyae opens on the last game, so
+    /// the start screen is rarely seen): its button opens the dialog on Save, switchable to
+    /// Bring in.
+    #[test]
+    fn accounts_file_from_the_accounts_window() {
+        let (mut h, dir) = window("generic");
+        h.get_by_label("Accounts file").click();
+        h.run();
+        assert!(h.state().transfer.as_ref().is_some_and(|t| t.export));
+        h.get_by_label("Bring in from a file").click();
+        h.run();
+        assert!(h.state().transfer.as_ref().is_some_and(|t| !t.export));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -119,7 +119,22 @@ fn main() {
         .with_inner_size(tao::dpi::LogicalSize::new(480.0, 720.0))
         .build(&event_loop)
         .expect("a window");
-    let builder = WebViewBuilder::new()
+    // WebView2 needs a folder to write in; by default it is beside the program, which a portable
+    // copy on a read-only stick or a locked-down work PC may not allow. A folder in the temp
+    // directory, removed when the window closes, keeps the profile fresh and the program folder
+    // untouched. (WebKitGTK on Linux needs none: the view is incognito.)
+    #[cfg(not(target_os = "linux"))]
+    let profile = {
+        remove_old_profiles(&std::env::temp_dir());
+        std::env::temp_dir().join(format!("alyae-login-{}", std::process::id()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut context = wry::WebContext::new(Some(profile.clone()));
+    #[cfg(not(target_os = "linux"))]
+    let builder = WebViewBuilder::new_with_web_context(&mut context);
+    #[cfg(target_os = "linux")]
+    let builder = WebViewBuilder::new();
+    let builder = builder
         .with_url("https://www.roblox.com/login")
         .with_incognito(true)
         .with_initialization_script(SCRIPT)
@@ -199,9 +214,35 @@ fn main() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *flow = ControlFlow::Exit,
+            // the web view may still hold some files: what is left goes at a later login
+            #[cfg(not(target_os = "linux"))]
+            Event::LoopDestroyed => {
+                let _ = &context;
+                let _ = std::fs::remove_dir_all(&profile);
+            }
             _ => {}
         }
     });
+}
+
+/// Login profiles in `temp` left by windows closed more than a day ago (a folder the web view
+/// still held when its window closed).
+#[cfg(not(target_os = "linux"))]
+fn remove_old_profiles(temp: &std::path::Path) {
+    let Ok(list) = std::fs::read_dir(temp) else {
+        return;
+    };
+    for e in list.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(24 * 3600));
+        if old && e.file_name().to_string_lossy().starts_with("alyae-login-") {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 #[cfg(test)]

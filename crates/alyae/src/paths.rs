@@ -1,4 +1,6 @@
-//! Where Alyae keeps its files: `~/.local/share/alyae` on Linux, `%APPDATA%\Alyae` on Windows.
+//! Where Alyae keeps its files: `~/.local/share/alyae` on Linux, `%APPDATA%\Alyae` on Windows,
+//! or the `data` folder beside the program when it is portable (a file named `portable` beside
+//! it: a folder to carry on a USB stick or keep on a PC where nothing is installed).
 
 use std::path::{Path, PathBuf};
 
@@ -6,8 +8,22 @@ pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("ALYAE_DATA") {
         return PathBuf::from(d);
     }
+    if let Some(d) = portable_dir() {
+        return d;
+    }
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(if cfg!(windows) { "Alyae" } else { "alyae" })
+}
+
+/// The data folder of a portable copy: `data` beside the running program when a file named
+/// `portable` is there too.
+pub fn portable_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    portable_dir_of(exe.parent()?)
+}
+
+fn portable_dir_of(bin: &Path) -> Option<PathBuf> {
+    bin.join("portable").is_file().then(|| bin.join("data"))
 }
 
 /// Alyae was called Ludae: its data moves over on the first start, with the database and log
@@ -80,6 +96,16 @@ pub fn module_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_portable_marker_keeps_the_data_beside_the_program() {
+        let bin = std::env::temp_dir().join(format!("alyae-portable-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        assert_eq!(portable_dir_of(&bin), None);
+        std::fs::write(bin.join("portable"), "").unwrap();
+        assert_eq!(portable_dir_of(&bin), Some(bin.join("data")));
+        let _ = std::fs::remove_dir_all(bin);
+    }
 
     #[test]
     fn old_data_moves_into_an_existing_folder() {

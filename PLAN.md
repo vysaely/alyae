@@ -37,7 +37,9 @@ replaces it.
    and decrypts.
 4. Windows: the code is written but not built. It needs `mingw-w64-gcc` here or a GitHub build,
    then a run on a Windows PC.
-5. Still to do: README.
+5. Portable Windows copy: a file named `portable` beside alyae.exe keeps all data in `data`
+   beside it. CI publishes `Alyae-portable.zip` to the `portable` release on every main build.
+6. Still to do: README.
 
 ## Left out on purpose (AEAM had them)
 

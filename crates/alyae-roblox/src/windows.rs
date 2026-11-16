@@ -99,6 +99,11 @@ fn own_settings(req: &Request) -> PathBuf {
         .join(format!("{}.xml", req.id))
 }
 
+/// The person's own settings file, kept while Alyae's accounts use the shared one.
+fn original_settings(req: &Request) -> PathBuf {
+    req.data_dir.join("settings").join("original.xml")
+}
+
 /// Who launched last: only that account's settings are still in the shared file at its exit.
 fn last_launch_file(req: &Request) -> PathBuf {
     req.data_dir.join("settings").join("last_launch")
@@ -110,6 +115,7 @@ fn settings_before_launch(req: &Request, live: &Path) {
     if let Some(d) = own.parent() {
         let _ = std::fs::create_dir_all(d);
     }
+    settings_xml::keep_original(live, &original_settings(req), clients().is_empty());
     if own.is_file()
         && let Err(e) = std::fs::copy(&own, live)
     {
@@ -117,14 +123,18 @@ fn settings_before_launch(req: &Request, live: &Path) {
             "cannot put this account's Roblox settings in place: {e}"
         ));
     }
-    let fps = req.fps();
-    let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
-    let mut props = vec![settings_xml::prop("int", "FramerateCap", cap)];
-    if !req.is_main() {
+    let mut props = Vec::new();
+    if let Some(fps) = req.fps() {
+        let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
+        props.push(settings_xml::prop("int", "FramerateCap", cap));
+    }
+    if req.is_alt() {
         props.extend(settings_xml::quality(1));
         props.push(settings_xml::prop("float", "MasterVolume", 0));
     }
-    if let Err(e) = settings_xml::apply(live, &props) {
+    if !props.is_empty()
+        && let Err(e) = settings_xml::apply(live, &props)
+    {
         fail(&format!("cannot write Roblox's settings: {e}"));
     }
     let _ = std::fs::write(last_launch_file(req), &req.id);
@@ -137,6 +147,10 @@ fn settings_after_exit(req: &Request, live: &Path) {
     if last.trim() == req.id {
         let _ = std::fs::copy(live, own_settings(req));
     }
+    // the last client gone: the person's own settings come back (in the launch turn, so a
+    // client starting right now is not handed them)
+    let _turn = LaunchTurn::take();
+    settings_xml::give_back_original(live, &original_settings(req), clients().is_empty());
 }
 
 /// Where the account's running client is noted (its process ID), for Settings to see.

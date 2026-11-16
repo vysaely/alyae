@@ -76,18 +76,24 @@ fn old_running() -> bool {
     false
 }
 
-/// Module folders, lowest priority first: shipped beside the program (or in the source tree when
-/// run from it), then the system share folder, then the user's own.
+/// Module folders, lowest priority first: shipped beside the program, then (Linux) the system
+/// share folder, then the user's own. A debug build run from the source tree also reads the
+/// repository's modules/. Nothing else outside the program's folder is read: a module names the
+/// helper that gets the accounts' secrets.
 pub fn module_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(exe) = std::env::current_exe()
         && let Some(bin) = exe.parent()
     {
         out.push(bin.join("modules"));
-        // target/{debug,release}/alyae -> the repository's modules/
-        out.push(bin.join("../../modules"));
-        // ~/.local/bin/alyae -> ~/.local/share/alyae/modules is the user's; /usr/bin -> /usr/share
-        out.push(bin.join("../share/alyae/modules"));
+        if cfg!(debug_assertions) {
+            // target/debug/alyae -> the repository's modules/
+            out.push(bin.join("../../modules"));
+        }
+        // ~/.local/bin/alyae -> ~/.local/share/alyae/modules; /usr/bin -> /usr/share
+        if cfg!(unix) && portable_dir().is_none() {
+            out.push(bin.join("../share/alyae/modules"));
+        }
     }
     out.push(data_dir().join("modules"));
     out

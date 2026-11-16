@@ -3,20 +3,19 @@
 //! - with a password: RAM's header, a 16-byte salt, a 24-byte nonce, then a libsodium secretbox
 //!   under the key libsodium's Argon2 ("moderate": 6 passes, 128 MiB) makes from the SHA-512 of
 //!   the password;
-//! - by default: Windows' DPAPI with RAM's entropy, which only that Windows user can open;
+//! - by default: Windows' DPAPI with RAM's entropy, which opens only on the PC that saved it;
 //! - in plain JSON (with RAM's "NoEncryption" file).
 //!
 //! In every case the content is a JSON list of RAM's accounts.
 
-use crate::store::{Account, Values, new_id};
+use crate::store::{Account, Values, new_id, now};
 use crypto_secretbox::aead::{Aead, KeyInit};
 use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
 use serde::Deserialize;
 
-/// "Roblox Account Manager created by ic3w0lf22 @ github.com ......."
 const HEADER: &[u8] = b"Roblox Account Manager created by ic3w0lf22 @ github.com .......";
 
-/// RAM's DPAPI entropy ("ROBLOX ACCOUNT MANAGER | :) | BROUGHT TO YOU BUY ic3w0lf").
+/// What RAM gives DPAPI besides the data.
 #[cfg(any(windows, test))]
 const ENTROPY: &[u8] = b"ROBLOX ACCOUNT MANAGER | :) | BROUGHT TO YOU BUY ic3w0lf";
 
@@ -41,7 +40,12 @@ struct RamAccount {
 
 /// Whether `bytes` look like RAM's file: its password header, or its JSON list.
 pub fn is_ram(bytes: &[u8]) -> bool {
-    bytes.starts_with(HEADER) || parse(bytes).is_ok_and(|l| !l.is_empty())
+    bytes.starts_with(HEADER) || is_dpapi(bytes) || parse(bytes).is_ok_and(|l| !l.is_empty())
+}
+
+/// The start of every DPAPI blob: version 1, then DPAPI's provider GUID (df9d8cd0-...).
+fn is_dpapi(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[1, 0, 0, 0, 0xd0, 0x8c, 0x9d, 0xdf])
 }
 
 /// RAM's accounts in `bytes`, opened with `password` where RAM sealed them with one.
@@ -80,24 +84,20 @@ fn account(r: RamAccount) -> Option<Account> {
     if let Some(p) = r.password.filter(|p| !p.is_empty()) {
         secrets.insert("password".into(), p);
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64());
     Some(Account {
         id: new_id(),
         game: "roblox".into(),
         name: r.alias.unwrap_or_default(),
         group: r.group.filter(|g| g != "Default").unwrap_or_default(),
         notes: r.description.unwrap_or_default(),
-        created: now,
+        created: now(),
         fields,
         secrets,
         ..Default::default()
     })
 }
 
-/// RAM's password-sealed file opened. libsodium-net's `ArgonHashBinary` is Argon2i in the version
-/// RAM ships; Argon2id is tried as well, for a build made with a newer libsodium-net.
+/// RAM's password-sealed file opened. The libsodium RAM ships (1.0.11) has Argon2i only.
 fn open_sealed(bytes: &[u8], password: &str) -> Result<Vec<u8>, String> {
     use sha2::Digest;
     let rest = &bytes[HEADER.len()..];
@@ -107,26 +107,23 @@ fn open_sealed(bytes: &[u8], password: &str) -> Result<Vec<u8>, String> {
     let (salt, rest) = rest.split_at(16);
     let (nonce, sealed) = rest.split_at(24);
     let hash = sha2::Sha512::digest(password.as_bytes());
-    for alg in [argon2::Algorithm::Argon2i, argon2::Algorithm::Argon2id] {
-        let params = argon2::Params::new(128 * 1024, 6, 1, Some(32)).map_err(|e| e.to_string())?;
-        let mut key = [0u8; 32];
-        argon2::Argon2::new(alg, argon2::Version::V0x13, params)
-            .hash_password_into(&hash, salt, &mut key)
-            .map_err(|e| e.to_string())?;
-        if let Ok(plain) =
-            XSalsa20Poly1305::new(Key::from_slice(&key)).decrypt(Nonce::from_slice(nonce), sealed)
-        {
-            return Ok(plain);
-        }
-    }
-    Err("wrong password for this Roblox Account Manager file".into())
+    let params = argon2::Params::new(128 * 1024, 6, 1, Some(32)).map_err(|e| e.to_string())?;
+    let mut key = [0u8; 32];
+    argon2::Argon2::new(argon2::Algorithm::Argon2i, argon2::Version::V0x13, params)
+        .hash_password_into(&hash, salt, &mut key)
+        .map_err(|e| e.to_string())?;
+    XSalsa20Poly1305::new(Key::from_slice(&key))
+        .decrypt(Nonce::from_slice(nonce), sealed)
+        .map_err(|_| "wrong password for this Roblox Account Manager file".into())
 }
 
-/// RAM's default file, opened with Windows' DPAPI as the Windows user who saved it.
+/// RAM's default file, opened with Windows' DPAPI (on the PC that saved it).
 #[cfg(windows)]
 fn unprotect(bytes: &[u8]) -> Result<Vec<u8>, String> {
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+    };
     let blob = |b: &[u8]| CRYPT_INTEGER_BLOB {
         cbData: b.len() as u32,
         pbData: b.as_ptr() as *mut u8,
@@ -145,16 +142,25 @@ fn unprotect(bytes: &[u8]) -> Result<Vec<u8>, String> {
             &entropy,
             std::ptr::null(),
             std::ptr::null(),
-            0,
+            CRYPTPROTECT_UI_FORBIDDEN,
             &mut out,
         )
     };
     if ok == 0 {
         return Err(LOCKED.into());
     }
-    // SAFETY: Windows wrote cbData bytes at pbData
-    let plain = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
-    unsafe { LocalFree(out.pbData.cast()) };
+    if out.pbData.is_null() {
+        return Ok(Vec::new());
+    }
+    let len = out.cbData as usize;
+    // SAFETY: Windows wrote `len` bytes at pbData, which stays ours until LocalFree; the copy is
+    // taken, then Windows' buffer is wiped (it holds the cookies) and freed
+    let plain = unsafe {
+        let plain = std::slice::from_raw_parts(out.pbData, len).to_vec();
+        std::ptr::write_bytes(out.pbData, 0, len);
+        LocalFree(out.pbData.cast());
+        plain
+    };
     Ok(plain)
 }
 
@@ -163,9 +169,9 @@ fn unprotect(_: &[u8]) -> Result<Vec<u8>, String> {
     Err(LOCKED.into())
 }
 
-const LOCKED: &str = "this Roblox Account Manager file is locked to the Windows PC and user that \
-    saved it: bring it in with Alyae on that PC, or give it a password in Roblox Account Manager \
-    first (Settings, Encryption)";
+const LOCKED: &str = "this Roblox Account Manager file is locked to the Windows PC that saved it: \
+    bring it in with Alyae on that PC, or give it a password in Roblox Account Manager first \
+    (Settings, Encryption)";
 
 #[cfg(test)]
 mod tests {
@@ -226,10 +232,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn windows_locked_file_says_so() {
-        assert!(
-            read(&[1, 0, 0, 0, 0xd0, 0x8c, 0x9d], "")
-                .unwrap_err()
-                .contains("locked")
-        );
+        let blob = [1, 0, 0, 0, 0xd0, 0x8c, 0x9d, 0xdf, 1, 21];
+        // recognised as RAM's under any name
+        assert!(is_ram(&blob));
+        assert!(read(&blob, "").unwrap_err().contains("locked"));
     }
 }

@@ -4,6 +4,23 @@
 
 use std::path::Path;
 
+/// Keeps the person's own settings file before Alyae first writes into it: only when no Roblox
+/// runs (so the file is theirs, not an account's) and no copy is kept already.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn keep_original(live: &Path, original: &Path, nothing_running: bool) {
+    if nothing_running && !original.exists() && live.is_file() {
+        let _ = std::fs::copy(live, original);
+    }
+}
+
+/// Puts the person's own settings file back once no Roblox runs any more.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn give_back_original(live: &Path, original: &Path, nothing_running: bool) {
+    if nothing_running && original.is_file() && std::fs::copy(original, live).is_ok() {
+        let _ = std::fs::remove_file(original);
+    }
+}
+
 /// A file Roblox would write on its first start, before any property is set.
 const NEW_FILE: &str = r#"<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
 	<External>null</External>
@@ -383,6 +400,27 @@ mod tests {
         assert!(
             t.contains("<float name=\"MasterVolume\">0</float>") && t.contains("UserGameSettings")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The person's own file is kept before the first launch and comes back after the last;
+    /// an account's settings never replace the kept copy.
+    #[test]
+    fn own_settings_come_back() {
+        let dir = std::env::temp_dir().join(format!("alyae-orig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (live, original) = (dir.join("live.xml"), dir.join("original.xml"));
+        std::fs::write(&live, "theirs").unwrap();
+        keep_original(&live, &original, true);
+        std::fs::write(&live, "alt account").unwrap();
+        // a second launch while one runs keeps the first copy
+        keep_original(&live, &original, false);
+        give_back_original(&live, &original, false);
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "alt account");
+        keep_original(&live, &original, true);
+        give_back_original(&live, &original, true);
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "theirs");
+        assert!(!original.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

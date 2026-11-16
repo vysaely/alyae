@@ -583,6 +583,36 @@ fn tail(path: &Path, from: u64) -> String {
         .unwrap_or_default()
 }
 
+/// Held while one account's client starts (as on Windows): starting many accounts at once runs
+/// their Mocktail setups one after another instead of all together, so the desktop and the
+/// accounts already playing keep their CPU and disk. Released when the client has run a few
+/// seconds or ended; a holder that dies releases it with its file.
+struct LaunchTurn(#[allow(dead_code)] fs::File);
+
+impl LaunchTurn {
+    const HOLD: Duration = Duration::from_secs(5);
+
+    fn take(data_dir: &Path) -> Option<Self> {
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(data_dir.join("launch.lock"))
+            .ok()?;
+        use std::os::fd::AsRawFd;
+        // SAFETY: flock(2) on a file this function owns
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            status("waiting for another account to start");
+            // SAFETY: as above, blocking
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return None;
+            }
+        }
+        Some(LaunchTurn(f))
+    }
+}
+
 pub fn play(req: &Request) {
     let cookie = req.cookie();
     if cookie.is_empty() {
@@ -607,6 +637,7 @@ pub fn play(req: &Request) {
     // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
     // replace it, and at the end it would pass for a renewed cookie
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
+    let mut turn = LaunchTurn::take(data_dir);
     status("starting");
     prepare_profile(
         &m,
@@ -831,6 +862,9 @@ pub fn play(req: &Request) {
     let code = loop {
         if let Ok(Some(s)) = child.try_wait() {
             break s;
+        }
+        if turn.is_some() && started.elapsed() >= LaunchTurn::HOLD {
+            turn = None;
         }
         if rx.try_recv().is_ok() {
             status("stopping");

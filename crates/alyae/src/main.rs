@@ -7,6 +7,7 @@ mod look;
 mod module;
 mod paths;
 mod store;
+mod transfer;
 mod ui;
 mod vault;
 

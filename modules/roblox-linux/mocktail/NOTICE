@@ -1,0 +1,4 @@
+The files in patches/ change Mocktail (https://github.com/komaruworld/mocktail), which is under
+the Apache License 2.0. Each patch is a change made for Alyae to Mocktail's files; build.sh
+applies them to the upstream commit in patches/UPSTREAM_COMMIT. Mocktail itself is not part of
+this repository.

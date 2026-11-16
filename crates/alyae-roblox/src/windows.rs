@@ -240,8 +240,13 @@ pub fn play(req: &Request) {
         .unwrap_or("0")
         .to_string();
     let base = "https://www.roblox.com/Game/PlaceLauncher.ashx";
-    // a follow arrives as the followed user's place and server
-    let launcher = j.place.map(|p| match (&j.job, &j.link_code) {
+    // a follow joins as Roblox's own friend Join does: by user, so Roblox places the account in
+    // that user's server even when it is a sub-place or a game-made (reserved) server, which a
+    // join by job ID is refused ("restricted")
+    let follow = j
+        .follow
+        .map(|u| format!("{base}?request=RequestFollowUser&browserTrackerId={browser}&userId={u}"));
+    let launcher = follow.or_else(|| j.place.map(|p| match (&j.job, &j.link_code) {
         (Some(job), _) => format!(
             "{base}?request=RequestGameJob&browserTrackerId={browser}&placeId={p}&gameId={job}&isPlayTogetherGame=false"
         ),
@@ -251,7 +256,7 @@ pub fn play(req: &Request) {
         (None, None) => format!(
             "{base}?request=RequestGame&browserTrackerId={browser}&placeId={p}&isPlayTogetherGame=false"
         ),
-    });
+    }));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());

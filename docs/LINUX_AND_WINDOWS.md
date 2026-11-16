@@ -1,6 +1,7 @@
 # Roblox on Linux and on Windows: what each has
 
-Compared 2026-11-16 from the code (`crates/alyae-roblox/src/linux.rs`, `windows.rs`,
+Compared 2026-11-16 from the code, after merging the Windows session's work (it was built on
+Windows from a copy of main and never pushed) (`crates/alyae-roblox/src/linux.rs`, `windows.rs`,
 `modules/roblox-*/module.toml`). Windows is still untested on a real PC.
 
 | | Linux (Mocktail) | Windows (official client) |
@@ -16,6 +17,10 @@ Compared 2026-11-16 from the code (`crates/alyae-roblox/src/linux.rs`, `windows.
 | Reset files | yes | no |
 | Removing an account deletes its files | yes (`on_remove = "forget"`) | nothing to delete (shared client) |
 | Renewed cookie saved after play | yes | no (Alyae does not read the official client's stored sign-in) |
+| Add account: browser sign-in (click), Import cookies and Add manually (right-click) | yes | yes |
+| Open in browser (roblox.com signed in as the account) | yes | yes |
+| Follow joins by user (reserved servers, sub-places) | by place and server (Mocktail takes a URI) | yes (RequestFollowUser) |
+| Online watch backs off while Roblox rate limits | yes | yes |
 | Colours from the desktop | Infynitae's theme; **now** any desktop's light/dark and accent through the portal (borrowed) | registry light/dark and accent |
 
 ## Borrowed from Windows into Linux (this change)

@@ -6,7 +6,8 @@ cd "$(dirname "$0")"
 BIN="$HOME/.local/bin"
 SHARE="$HOME/.local/share"
 if [ "${1:-}" = "--uninstall" ]; then
-    rm -f "$BIN/alyae" "$BIN/alyae-roblox" "$BIN/alyae-roblox-login" "$SHARE/applications/alyae.desktop"
+    rm -f "$BIN/alyae" "$BIN/alyae-roblox" "$BIN/alyae-roblox-login" "$SHARE/applications/alyae.desktop" \
+        "$SHARE/icons/hicolor/256x256/apps/alyae.png"
     rm -rf "$SHARE/alyae/modules"
     echo "Alyae removed; accounts kept in $SHARE/alyae"
     exit 0
@@ -27,13 +28,15 @@ for m in modules/*/; do
     mkdir -p "$SHARE/alyae/modules/$name"
     install -m644 "$m/module.toml" "$SHARE/alyae/modules/$name/module.toml"
 done
+mkdir -p "$SHARE/icons/hicolor/256x256/apps"
+install -m644 assets/alyae.png "$SHARE/icons/hicolor/256x256/apps/alyae.png"
 cat > "$SHARE/applications/alyae.desktop" <<DESK
 [Desktop Entry]
 Type=Application
 Name=Alyae
 Comment=Game accounts
 Exec=$BIN/alyae
-Icon=applications-games
+Icon=alyae
 Categories=Game;Utility;
 StartupWMClass=alyae
 DESK

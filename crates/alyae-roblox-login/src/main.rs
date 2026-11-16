@@ -6,6 +6,10 @@
 //! closes. Closing the window prints no cookie.
 //!
 //! Input (one JSON line on stdin): {"username", "password", "totp"}.
+//!
+//! With a `cookie` instead, the window is that account signed in on roblox.com (Open in browser):
+//! the cookie goes into the fresh profile and the home page opens. On close, a cookie Roblox
+//! renewed meanwhile is printed as `{"cookie":"..."}` for Alyae to keep.
 
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -102,6 +106,88 @@ fn may_open(url: &str) -> bool {
     .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
+/// The `.ROBLOSECURITY` cookie the web view holds now.
+fn session_cookie(webview: &wry::WebView) -> Option<String> {
+    webview
+        .cookies_for_url(ORIGIN)
+        .ok()?
+        .into_iter()
+        .find(|c| c.name() == ".ROBLOSECURITY")
+        .map(|c| c.value().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Roblox's site signed in as the account, from its saved cookie.
+fn browse(username: &str, cookie: String) {
+    let event_loop = EventLoopBuilder::new().build();
+    let window = WindowBuilder::new()
+        .with_title(format!("Roblox: {username}"))
+        .with_inner_size(tao::dpi::LogicalSize::new(1200.0, 800.0))
+        .build(&event_loop)
+        .expect("a window");
+    // as for the login window: WebView2's folder in temp, not beside the program
+    #[cfg(not(target_os = "linux"))]
+    let profile = {
+        remove_old_profiles(&std::env::temp_dir());
+        std::env::temp_dir().join(format!("alyae-login-{}", std::process::id()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut context = wry::WebContext::new(Some(profile.clone()));
+    #[cfg(not(target_os = "linux"))]
+    let builder = WebViewBuilder::new_with_web_context(&mut context);
+    #[cfg(target_os = "linux")]
+    let builder = WebViewBuilder::new();
+    let builder = builder
+        .with_url("about:blank")
+        .with_incognito(true)
+        .with_navigation_handler(|url| may_open(&url));
+    #[cfg(not(target_os = "linux"))]
+    let webview = builder.build(&window).expect("a web view");
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        builder
+            .build_gtk(window.default_vbox().expect("a GTK box"))
+            .expect("a web view")
+    };
+    let c = wry::cookie::Cookie::build((".ROBLOSECURITY", cookie.clone()))
+        .domain(".roblox.com")
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .build();
+    if let Err(e) = webview.set_cookie(&c) {
+        println!(
+            "{}",
+            json!({ "status": format!("cannot sign the window in: {e}") })
+        );
+        return;
+    }
+    let _ = webview.load_url(&format!("{ORIGIN}/home"));
+    println!("{}", json!({ "status": "signed in on roblox.com" }));
+    event_loop.run(move |event, _, flow| {
+        *flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                if let Some(now) = session_cookie(&webview).filter(|n| *n != cookie) {
+                    println!("{}", json!({ "cookie": now }));
+                }
+                *flow = ControlFlow::Exit;
+            }
+            #[cfg(not(target_os = "linux"))]
+            Event::LoopDestroyed => {
+                let _ = &context;
+                let _ = std::fs::remove_dir_all(&profile);
+            }
+            _ => {}
+        }
+    });
+}
+
 fn main() {
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
@@ -110,12 +196,21 @@ fn main() {
     let req: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
     let field = |k: &str| req[k].as_str().unwrap_or("").to_string();
     let (username, password, totp) = (field("username"), field("password"), field("totp"));
+    let cookie = field("cookie");
+    if !cookie.is_empty() {
+        browse(&username, cookie);
+        return;
+    }
     let creds = json!({ "username": username, "password": password });
 
     let event_loop = EventLoopBuilder::<Msg>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
-        .with_title(format!("Sign in to Roblox: {username}"))
+        .with_title(if username.is_empty() {
+            "Sign in to Roblox".to_string()
+        } else {
+            format!("Sign in to Roblox: {username}")
+        })
         .with_inner_size(tao::dpi::LogicalSize::new(480.0, 720.0))
         .build(&event_loop)
         .expect("a window");
@@ -169,13 +264,7 @@ fn main() {
             Event::NewEvents(StartCause::ResumeTimeReached { .. })
             | Event::NewEvents(StartCause::Init) => {
                 next_check = Instant::now() + Duration::from_millis(500);
-                let cookie = webview
-                    .cookies_for_url("https://www.roblox.com")
-                    .ok()
-                    .and_then(|list| list.into_iter().find(|c| c.name() == ".ROBLOSECURITY"))
-                    .map(|c| c.value().to_string())
-                    .filter(|v| !v.is_empty());
-                if let Some(c) = cookie {
+                if let Some(c) = session_cookie(&webview) {
                     println!("{}", json!({ "cookie": c }));
                     *flow = ControlFlow::Exit;
                 }

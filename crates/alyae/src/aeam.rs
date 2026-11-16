@@ -2,6 +2,7 @@
 //! Each account keeps AEAM's profile folder, so its in-game settings and caches stay.
 
 use crate::store::{Account, Store, Values};
+use crate::transfer::Imported;
 use crate::vault::Vault;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
@@ -31,19 +32,6 @@ struct ReadAccount {
     account: Account,
     label: String,
     bad_secrets: usize,
-}
-
-pub struct ImportResult {
-    pub added: usize,
-    pub skipped: usize,
-    pub bad_secrets: Vec<(String, usize)>,
-}
-
-/// AEAM's accounts as Alyae's, and the place AEAM last joined.
-#[cfg(test)]
-pub fn read(dir: &Path) -> Result<(Vec<Account>, Option<String>), String> {
-    let (items, place) = read_accounts(dir)?;
-    Ok((items.into_iter().map(|r| r.account).collect(), place))
 }
 
 fn read_accounts(dir: &Path) -> Result<(Vec<ReadAccount>, Option<String>), String> {
@@ -198,13 +186,8 @@ fn read_accounts(dir: &Path) -> Result<(Vec<ReadAccount>, Option<String>), Strin
     Ok((out, place))
 }
 
-/// Copies AEAM's accounts into `store`, skipping ones already there.
-pub fn import(store: &Store, have: &[Account]) -> Result<ImportResult, String> {
-    let dir = dir().ok_or("AEAM's data folder was not found")?;
-    import_from(&dir, store, have)
-}
-
-pub fn import_from(dir: &Path, store: &Store, have: &[Account]) -> Result<ImportResult, String> {
+/// Copies the accounts of AEAM's data folder `dir` into `store`, skipping ones already there.
+pub fn import_from(dir: &Path, store: &Store, have: &[Account]) -> Result<Imported, String> {
     let (items, place) = read_accounts(dir)?;
     store.transaction(|| {
         let (mut added, mut skipped) = (0, 0);
@@ -234,10 +217,11 @@ pub fn import_from(dir: &Path, store: &Store, have: &[Account]) -> Result<Import
             )?;
         }
         store.try_set_setting("aeam_imported", "1")?;
-        Ok(ImportResult {
+        Ok(Imported {
             added,
             skipped,
-            bad_secrets,
+            unreadable: bad_secrets,
+            with_command: Vec::new(),
         })
     })
 }
@@ -245,36 +229,6 @@ pub fn import_from(dir: &Path, store: &Store, have: &[Account]) -> Result<Import
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Reads the owner's real AEAM data when present (read-only); skipped elsewhere.
-    #[test]
-    fn reads_aeam_when_present() {
-        let Some(d) = dir() else { return };
-        let (accounts, _) = read(&d).unwrap();
-        assert!(!accounts.is_empty());
-        assert!(
-            accounts
-                .iter()
-                .all(|a| a.game == "roblox" && !a.value("username").is_empty())
-        );
-        assert!(
-            accounts
-                .iter()
-                .filter(|a| !a.value("cookie").is_empty())
-                .count()
-                * 2
-                >= accounts.len()
-        );
-        assert!(accounts.iter().any(|a| a.value("role") == "main"));
-        assert!(
-            accounts
-                .iter()
-                .filter(|a| !a.value("profile").is_empty())
-                .count()
-                * 2
-                >= accounts.len()
-        );
-    }
 
     struct FakeRow<'a> {
         id: &'a str,
@@ -352,7 +306,7 @@ mod tests {
         let report = import_from(&aeam_dir, &store, &[]).unwrap();
         assert_eq!(report.added, 2);
         assert_eq!(report.skipped, 0);
-        assert_eq!(report.bad_secrets, vec![("bob".to_string(), 2)]);
+        assert_eq!(report.unreadable, vec![("bob".to_string(), 2)]);
 
         let (accounts, problems) = store.list().unwrap();
         assert!(problems.is_empty());

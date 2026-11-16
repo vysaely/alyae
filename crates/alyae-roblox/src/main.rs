@@ -164,6 +164,41 @@ pub fn join_from(req: &Request) -> Join {
 fn login(req: &Request) {
     // without a saved password the page opens with the username in, for the person to finish
     let (user, pass) = (req.get("username"), req.get("password"));
+    status("login window open");
+    let request = json!({ "username": user, "password": pass, "totp": req.get("totp") });
+    let cookie = web_window(&request)
+        .unwrap_or_else(|| fail("the login window closed before Roblox signed in"));
+    match api::authenticated(&cookie) {
+        Ok((id, name)) => {
+            say(
+                json!({ "set": { "cookie": cookie, "username": name, "user_id": id.to_string() } }),
+            );
+            status("signed in");
+        }
+        Err(e) => fail(&format!("Roblox gave a cookie that does not work: {e}")),
+    }
+}
+
+/// Open in browser: roblox.com signed in as the account, in a window of its own with a fresh
+/// profile. A cookie Roblox renewed while it was open is kept.
+fn browser(req: &Request) {
+    let cookie = req.cookie();
+    if cookie.is_empty() {
+        fail("no cookie: paste the .ROBLOSECURITY value into Cookie, or use Log in");
+    }
+    status("browser open");
+    let request = json!({ "username": req.get("username"), "cookie": cookie });
+    if let Some(renewed) = web_window(&request).filter(|c| *c != cookie)
+        && api::authenticated(&renewed).is_ok()
+    {
+        say(json!({ "set": { "cookie": renewed } }));
+        status("browser closed (renewed cookie saved)");
+    }
+}
+
+/// Runs `alyae-roblox-login` with one request line, passes its steps on and returns the cookie
+/// it printed, if any.
+fn web_window(request: &Value) -> Option<String> {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|e| {
@@ -177,19 +212,17 @@ fn login(req: &Request) {
         })
         .filter(|p| p.is_file())
         .unwrap_or_else(|| "alyae-roblox-login".into());
-    status("login window open");
     let mut child = std::process::Command::new(&exe)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| {
             fail(&format!(
-                "cannot open the login window ({}): {e}",
+                "cannot open the Roblox window ({}): {e}",
                 exe.display()
             ))
         });
     if let Some(mut stdin) = child.stdin.take() {
-        let request = json!({ "username": user, "password": pass, "totp": req.get("totp") });
         let _ = writeln!(stdin, "{request}");
     }
     // its steps are passed on as they happen; the cookie line ends it
@@ -208,16 +241,7 @@ fn login(req: &Request) {
         }
     }
     let _ = child.wait();
-    let cookie = cookie.unwrap_or_else(|| fail("the login window closed before Roblox signed in"));
-    match api::authenticated(&cookie) {
-        Ok((id, name)) => {
-            say(
-                json!({ "set": { "cookie": cookie, "username": name, "user_id": id.to_string() } }),
-            );
-            status("signed in");
-        }
-        Err(e) => fail(&format!("Roblox gave a cookie that does not work: {e}")),
-    }
+    cookie
 }
 
 /// Checks the cookie and fills in the name and user ID.
@@ -326,6 +350,7 @@ fn main() {
     match action.as_str() {
         "check" => check(&req),
         "login" => login(&req),
+        "browser" => browser(&req),
         #[cfg(target_os = "linux")]
         "graphics" => linux::graphics(&req),
         #[cfg(windows)]

@@ -9,6 +9,16 @@ title_field = "username"
 # AEAM stays; only Mocktail's saved sign-in in it goes)
 on_remove = "forget"
 
+# Add account opens Roblox's login page and adds the account once it signs in; Import takes
+# .ROBLOSECURITY cookies, one per line, and checks each. An account already here (same user ID)
+# gets the new sign-in instead of a second row.
+[add]
+action = "login"
+import_field = "cookie"
+import_action = "check"
+import_label = "Import cookies"
+same = "user_id"
+
 [[field]]
 key = "username"
 label = "Username"

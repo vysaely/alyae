@@ -227,8 +227,27 @@ pub fn load_all(dirs: &[PathBuf]) -> (Vec<Module>, Vec<String>) {
     (mods, problems)
 }
 
-/// `{key}` in `template` replaced by the account's value (inputs first); `{{` and `}}` are literal braces.
-pub fn fill(template: &str, account: &Account, inputs: &crate::store::Values) -> String {
+/// The command of an action: `{key}` becomes the account's value or the form's input, `{{` and
+/// `}}` stay as braces. A template that is one placeholder alone (`{launch}`) is a command the
+/// person wrote and is taken as it is; anywhere else a value is one quoted argument, so a name
+/// or password holding `;`, `&` or quotes cannot run anything (Windows' cmd has no safe quoting
+/// for `"`, `%`, `!` and `^`: a value with one of those is refused there).
+pub fn fill(
+    template: &str,
+    account: &Account,
+    inputs: &crate::store::Values,
+) -> Result<String, String> {
+    let lookup = |key: &str| {
+        inputs
+            .get(key)
+            .map_or_else(|| account.value(key).to_string(), String::clone)
+    };
+    let whole = template.trim();
+    if let Some(key) = whole.strip_prefix('{').and_then(|r| r.strip_suffix('}'))
+        && !key.contains(['{', '}'])
+    {
+        return Ok(lookup(key));
+    }
     let mut out = String::new();
     let mut rest = template;
     while let Some(i) = rest.find('{') {
@@ -244,15 +263,22 @@ pub fn fill(template: &str, account: &Account, inputs: &crate::store::Values) ->
             break;
         };
         let key = &rest[..j];
-        out.push_str(
-            inputs
-                .get(key)
-                .map_or_else(|| account.value(key), String::as_str),
-        );
+        out.push_str(&quote(&lookup(key)).ok_or_else(|| {
+            format!("the value of {key} has a character a command cannot take safely")
+        })?);
         rest = &rest[j + 1..];
     }
     out.push_str(&rest.replace("}}", "}"));
-    out
+    Ok(out)
+}
+
+/// One shell argument holding `v` exactly.
+fn quote(v: &str) -> Option<String> {
+    if cfg!(windows) {
+        (!v.contains(['"', '%', '!', '^', '\n', '\r'])).then(|| format!("\"{v}\""))
+    } else {
+        Some(format!("'{}'", v.replace('\'', r"'\''")))
+    }
 }
 
 /// What a running action tells the window.
@@ -470,13 +496,13 @@ pub fn start(
 ) -> Result<Option<Running>, String> {
     let id = account.id.clone();
     if !action.command.is_empty() {
-        let cmd = fill(&action.command, account, inputs);
+        let cmd = fill(&action.command, account, inputs)?;
         let mut child = shell(&cmd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("cannot run '{cmd}': {e}"))?;
+            .map_err(|e| format!("cannot run the command: {e}"))?;
         if !action.runs {
             let act = action.id.clone();
             std::thread::spawn(move || {
@@ -556,6 +582,30 @@ pub fn start(
 mod tests {
     use super::*;
 
+    /// A value cannot add a command of its own; a template that is one field is the person's
+    /// own command, taken as written.
+    #[cfg(unix)]
+    #[test]
+    fn values_are_one_argument() {
+        let mut a = Account::default();
+        let evil = "x'; echo owned; '";
+        a.fields.insert("login".into(), evil.into());
+        a.fields
+            .insert("launch".into(), "steam steam://rungameid/1".into());
+        let none = Default::default();
+        assert_eq!(
+            fill("{launch}", &a, &none).unwrap(),
+            "steam steam://rungameid/1"
+        );
+        let cmd = fill("printf %s {login}", &a, &none).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), evil);
+    }
+
     #[test]
     fn parse_and_fill() {
         let m = Module::parse(
@@ -588,7 +638,12 @@ label = "Place"
         a.fields.insert("login".into(), "me".into());
         let mut inputs = crate::store::Values::new();
         inputs.insert("place".into(), "42".into());
-        assert_eq!(fill(&m.actions[0].command, &a, &inputs), "run me {x} 42");
+        let quoted = if cfg!(windows) {
+            "run \"me\" {x} \"42\""
+        } else {
+            "run 'me' {x} '42'"
+        };
+        assert_eq!(fill(&m.actions[0].command, &a, &inputs).unwrap(), quoted);
         assert!(Module::parse("id = \"a b\"\nname = \"x\"", Path::new("/")).is_err());
         // one plain input: a box beside the button; a choice or a confirmation: a form
         assert!(!m.actions[0].needs_form());

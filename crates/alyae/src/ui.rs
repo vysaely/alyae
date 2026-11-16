@@ -58,6 +58,17 @@ pub struct App {
     bookmark_name: String,
     /// the watch column shows its text (else only the dot, the text on hover)
     watch_text: bool,
+    /// the accounts-file dialog, when open
+    transfer: Option<Transfer>,
+}
+
+/// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
+#[derive(Default)]
+struct Transfer {
+    export: bool,
+    path: String,
+    password: String,
+    again: String,
 }
 
 const NO_GROUP: &str = "Ungrouped";
@@ -105,6 +116,7 @@ impl App {
             form: None,
             bookmark_name: String::new(),
             watch_text: true,
+            transfer: None,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -459,6 +471,21 @@ impl eframe::App for App {
         }
         self.remove_dialog(&ctx);
         self.form_dialog(&ctx);
+        // an accounts file dropped on the window opens the import
+        let dropped = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .find_map(|f| Some(f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()))
+        });
+        if let Some(path) = dropped.filter(|p| p.extension().is_some_and(|e| e == "alyae")) {
+            self.transfer = Some(Transfer {
+                export: false,
+                path: path.display().to_string(),
+                ..Default::default()
+            });
+        }
+        self.transfer_dialog(&ctx);
     }
 }
 
@@ -541,6 +568,33 @@ impl App {
                     if ui.button("Bring in AEAM accounts").clicked() {
                         self.import_aeam();
                     }
+                });
+            }
+            if self.store.is_some() {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Save accounts to a file")
+                            .on_hover_text(
+                                "all accounts, sealed with a password: for another PC or a backup",
+                            )
+                            .clicked()
+                        {
+                            self.transfer = Some(Transfer {
+                                export: true,
+                                path: crate::transfer::default_path().display().to_string(),
+                                ..Default::default()
+                            });
+                        }
+                        if ui
+                            .button("Bring in accounts from a file")
+                            .on_hover_text("an .alyae file (or drop one on the window)")
+                            .clicked()
+                        {
+                            self.transfer = Some(Transfer::default());
+                        }
+                    });
                 });
             }
             for p in &self.problems {
@@ -1233,6 +1287,110 @@ impl App {
             self.save(&a);
             if self.draft.as_ref().is_some_and(|d| d.id == a.id) {
                 self.draft = Some(a);
+            }
+        }
+    }
+
+    fn transfer_dialog(&mut self, ctx: &egui::Context) {
+        let Some(t) = self.transfer.as_mut() else {
+            return;
+        };
+        let mut go = false;
+        let mut close = false;
+        egui::Modal::new(egui::Id::unique("transfer")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            if t.export {
+                ui.heading("Save accounts to a file");
+                ui.label(
+                    "Every account with its passwords, cookies and 2FA secrets, sealed with the \
+                     password below. Anyone with the file and the password has the accounts.",
+                );
+            } else {
+                ui.heading("Bring in accounts from a file");
+                ui.label("Accounts Alyae has already stay as they are.");
+            }
+            ui.add_space(6.0);
+            ui.label("File");
+            ui.add(egui::TextEdit::singleline(&mut t.path).desired_width(f32::INFINITY));
+            ui.label("Password");
+            let pw = ui.add(egui::TextEdit::singleline(&mut t.password).password(true));
+            if t.export {
+                ui.label("Password again");
+                ui.add(egui::TextEdit::singleline(&mut t.again).password(true));
+            }
+            let enter = pw.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let label = if t.export { "Save" } else { "Bring in" };
+                if ui.add(crate::look::primary(label)).clicked() || (enter && !t.export) {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            self.transfer = None;
+            return;
+        }
+        if !go {
+            return;
+        }
+        let t = self.transfer.take().expect("open dialog");
+        let path = std::path::PathBuf::from(t.path.trim());
+        if t.export {
+            if t.password != t.again {
+                self.say("The two passwords differ", true);
+                self.transfer = Some(t);
+                return;
+            }
+            let written = crate::transfer::export(&self.accounts, &t.password)
+                .and_then(|text| crate::transfer::write_new(&path, &text));
+            match written {
+                Ok(()) => self.say(
+                    format!(
+                        "{} saved to {}",
+                        plural(self.accounts.len()),
+                        path.display()
+                    ),
+                    false,
+                ),
+                Err(e) => {
+                    self.say(format!("Not saved: {e}"), true);
+                    self.transfer = Some(t);
+                }
+            }
+            return;
+        }
+        let Some(s) = &self.store else { return };
+        let result = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            .and_then(|text| crate::transfer::read(&text, &t.password))
+            .and_then(|list| crate::transfer::import(s, &self.accounts, list))
+            .and_then(|r| s.list().map(|l| (r, l)));
+        match result {
+            Ok((r, (list, _))) => {
+                self.accounts = list;
+                let mut text = format!("Brought in {}", plural(r.added));
+                if r.skipped > 0 {
+                    text += &format!(" ({} were here already)", r.skipped);
+                }
+                let warn = !r.with_command.is_empty();
+                if warn {
+                    text += &format!(
+                        "; check the launch command of {} before launching: a file can carry any command",
+                        r.with_command.join(", ")
+                    );
+                }
+                self.say(text, warn);
+            }
+            Err(e) => {
+                self.say(format!("Not brought in: {e}"), true);
+                self.transfer = Some(Transfer {
+                    password: String::new(),
+                    ..t
+                });
             }
         }
     }

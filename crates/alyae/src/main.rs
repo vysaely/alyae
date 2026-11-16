@@ -12,7 +12,16 @@ mod transfer;
 mod ui;
 mod vault;
 
+fn version_line(args: impl IntoIterator<Item = impl AsRef<str>>) -> Option<&'static str> {
+    (args.into_iter().nth(1).as_ref().map(AsRef::as_ref) == Some("--version"))
+        .then_some(concat!("alyae ", env!("CARGO_PKG_VERSION")))
+}
+
 fn main() -> eframe::Result {
+    if let Some(v) = version_line(std::env::args()) {
+        println!("{v}");
+        return Ok(());
+    }
     let dir = paths::data_dir();
     // a portable copy or a chosen folder has no older Ludae data next to it
     let moved = if std::env::var_os("ALYAE_DATA").is_some() || paths::portable_dir().is_some() {
@@ -53,4 +62,16 @@ fn main() -> eframe::Result {
             Ok(Box::new(ui::App::new(&cc.egui_ctx, opened, dir, modules)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_flag() {
+        assert_eq!(
+            super::version_line(["alyae", "--version"]),
+            Some(concat!("alyae ", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(super::version_line(["alyae"]), None);
+    }
 }

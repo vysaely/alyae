@@ -19,5 +19,9 @@ dirs = "6"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Registry"] }
 
+[build-dependencies]
+# the icon in alyae.exe (Explorer, taskbar, shortcuts)
+embed-resource = "3"
+
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe"] }

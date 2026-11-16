@@ -1935,12 +1935,17 @@ mod tests {
         let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
         std::fs::create_dir_all(mods.join("t")).unwrap();
         let marker = mods.join("ran");
+        // a TOML literal string: a Windows path's backslashes stay as they are
+        let make = if cfg!(windows) {
+            format!("type nul > \"{}\"", marker.display())
+        } else {
+            format!("touch {}", marker.display())
+        };
         std::fs::write(
             mods.join("t/module.toml"),
             format!(
                 "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\n[[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
-                 [[action]]\nid = \"wipe\"\nlabel = \"Wipe\"\nconfirm = \"Sure?\"\ncommand = \"touch {}\"\n",
-                marker.display()
+                 [[action]]\nid = \"wipe\"\nlabel = \"Wipe\"\nconfirm = \"Sure?\"\ncommand = '{make}'\n"
             ),
         )
         .unwrap();

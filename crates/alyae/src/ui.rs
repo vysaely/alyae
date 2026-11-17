@@ -3263,13 +3263,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods);
     }
 
-    /// An action's own `gap` spaces its queue (Log in: a minute); a throttled one makes the queue
-    /// wait 2 minutes more, doubling to 10, and a run that works ends the extra wait.
+    /// An action's own `gap` spaces its queue (Log in: 15 seconds); a throttled one makes the
+    /// queue wait 2 minutes more, doubling to 10, and a run that works ends the extra wait.
     #[test]
     fn queue_gap_and_throttle_pause() {
         let (mut h, dir) = window("roblox");
-        // the repository's Roblox modules: Log in one a minute, Refresh the usual gap
-        assert_eq!(h.state().queue_gap("login"), Duration::from_secs(60));
+        // the repository's Roblox modules: Log in 15 seconds apart, Refresh the usual gap
+        assert_eq!(h.state().queue_gap("login"), Duration::from_secs(15));
         assert_eq!(h.state().queue_gap("check"), QUEUE_GAP);
         let m = h.state().module("roblox").cloned().unwrap();
         let a = h.state().new_account(&m);

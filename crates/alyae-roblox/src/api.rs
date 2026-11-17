@@ -66,6 +66,73 @@ pub fn user_id_of(username: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("no Roblox user is called '{username}'"))
 }
 
+/// One public server of a place: job ID, players, room, ping (ms) and frame rate.
+#[derive(Debug, PartialEq)]
+pub struct Server {
+    pub id: String,
+    pub players: u64,
+    pub max: u64,
+    pub ping: u64,
+    pub fps: f64,
+}
+
+/// The servers out of one page of Roblox's public server list, and the cursor of the next.
+pub fn servers_page(v: &Value) -> (Vec<Server>, Option<String>) {
+    let list = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some(Server {
+                id: s["id"].as_str()?.to_string(),
+                players: s["playing"].as_u64().unwrap_or(0),
+                max: s["maxPlayers"].as_u64().unwrap_or(0),
+                ping: s["ping"].as_u64().unwrap_or(0),
+                fps: s["fps"].as_f64().unwrap_or(0.0),
+            })
+        })
+        .collect();
+    let next = v["nextPageCursor"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .map(String::from);
+    (list, next)
+}
+
+/// The place's public servers, fullest first: up to `pages` pages of 100, asked without a
+/// cookie (no account is tied to the look). A rate limit after the first page keeps what came.
+pub fn servers(place: u64, pages: usize) -> Result<Vec<Server>, String> {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for page in 0..pages {
+        let mut url = format!(
+            "https://games.roblox.com/v1/games/{place}/servers/Public?sortOrder=Desc&excludeFullGames=false&limit=100"
+        );
+        if let Some(c) = &cursor {
+            url += &format!("&cursor={c}");
+        }
+        let mut r = agent()
+            .get(&url)
+            .header("Accept", "application/json")
+            .call()
+            .map_err(net)?;
+        if r.status() != 200 {
+            if page > 0 && r.status() == 429 {
+                break;
+            }
+            return Err(answer(r.status().as_u16(), "server list"));
+        }
+        let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+        let (list, next) = servers_page(&v);
+        out.extend(list);
+        match next {
+            Some(n) => cursor = Some(n),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
 /// Who a request is sent as: the cookie, the device ID (some APIs refuse requests without one)
 /// and the 2FA secret that answers Roblox's two-step challenge.
 #[derive(Default)]
@@ -409,6 +476,21 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_page() {
+        let v = json!({ "nextPageCursor": "abc", "data": [
+            { "id": "11111111-2222-3333-4444-555555555555", "maxPlayers": 12, "playing": 9,
+              "fps": 59.87, "ping": 84, "playerTokens": [] },
+            { "maxPlayers": 12 }
+        ]});
+        let (list, next) = servers_page(&v);
+        assert_eq!(next.as_deref(), Some("abc"));
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].players, list[0].max, list[0].ping), (9, 12, 84));
+        let (_, end) = servers_page(&json!({ "data": [], "nextPageCursor": null }));
+        assert_eq!(end, None);
+    }
 
     #[test]
     fn base64_round_trip() {

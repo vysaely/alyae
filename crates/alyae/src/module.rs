@@ -131,6 +131,74 @@ impl Watch {
     }
 }
 
+/// `[servers]`: the Servers window, the game's public servers of the place in the primary
+/// action's `place` box; a row's Join runs the primary action with its id in the `server` box.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Servers {
+    /// the helper action that lists them: gets `{"place": ..., "data_dir": ...}`, answers one
+    /// `{"servers": [{"id", "players", "max", "ping", "fps"}]}` line (or `{"error"}`)
+    pub action: String,
+    pub place: String,
+    pub server: String,
+    /// seconds between two lists while the window is open
+    #[serde(default = "servers_every")]
+    pub every: u64,
+}
+
+fn servers_every() -> u64 {
+    30
+}
+
+/// One server of the Servers window.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ServerRow {
+    pub id: String,
+    #[serde(default)]
+    pub players: u64,
+    #[serde(default)]
+    pub max: u64,
+    #[serde(default)]
+    pub ping: u64,
+    #[serde(default)]
+    pub fps: f64,
+}
+
+/// Lists the servers of `place` once; the answer arrives as one `Event::Servers`.
+pub fn servers(
+    module: &Module,
+    s: &Servers,
+    place: &str,
+    data_dir: &Path,
+    tx: Sender<Event>,
+    wake: impl Fn() + Send + 'static,
+) -> Result<Child, String> {
+    let (mut child, dir, helper) = spawn_helper(module, &s.action, "Servers", data_dir)?;
+    let request = serde_json::json!({ "place": place, "data_dir": dir });
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(format!("{request}\n").as_bytes())
+        .map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
+    drop(stdin);
+    let out = child.stdout.take().expect("piped stdout");
+    std::thread::spawn(move || {
+        let mut answer = Err("the helper sent no server list".to_string());
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if let Some(list) = v.get("servers") {
+                answer = serde_json::from_value::<Vec<ServerRow>>(list.clone())
+                    .map_err(|e| format!("a server list Alyae cannot read: {e}"));
+            } else if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                answer = Err(e.to_string());
+            }
+        }
+        let _ = tx.send(Event::Servers(answer));
+        wake();
+    });
+    Ok(child)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Module {
     /// the game's id: accounts belong to it, so the Linux and Windows modules of one game share them
@@ -159,6 +227,8 @@ pub struct Module {
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,
+    #[serde(default)]
+    pub servers: Option<Servers>,
     #[serde(skip)]
     pub dir: PathBuf,
 }
@@ -363,6 +433,8 @@ pub enum Event {
     /// a watch's helper could not answer
     WatchError(String),
     WatchEnded,
+    /// the Servers window's list, or why there is none
+    Servers(Result<Vec<ServerRow>, String>),
 }
 
 pub struct Running {

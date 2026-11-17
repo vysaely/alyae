@@ -17,6 +17,8 @@ action = "login"
 import_field = "cookie"
 import_action = "check"
 import_label = "Import cookies"
+# a cookie starts so; "Username:cookie" lines (Copy makes them) import too
+import_starts = "_|WARNING:"
 same = "user_id"
 
 [[field]]

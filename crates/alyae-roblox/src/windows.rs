@@ -109,20 +109,43 @@ fn last_launch_file(req: &Request) -> PathBuf {
     req.data_dir.join("settings").join("last_launch")
 }
 
-/// The account's settings put in place before its client starts.
+/// Touched when a client has just started: it reads the shared settings file in the seconds
+/// after, so a launch that would change the file waits until those seconds have passed.
+fn client_started_file(req: &Request) -> PathBuf {
+    req.data_dir.join("settings").join("client_started")
+}
+
+/// How long a new client may still be reading the shared settings file.
+const SETTINGS_READ: Duration = Duration::from_secs(5);
+
+/// Waits until the last client started has had `SETTINGS_READ` to read the shared file.
+fn wait_for_settings_read(req: &Request) {
+    let since = std::fs::metadata(client_started_file(req))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok());
+    if let Some(left) = since.and_then(|s| SETTINGS_READ.checked_sub(s)) {
+        status("waiting for the last Roblox to read its settings");
+        std::thread::sleep(left);
+    }
+}
+
+/// The account's settings put in place before its client starts. Only a change waits for the
+/// client started before to have read the file: alts with the same settings start at once.
 fn settings_before_launch(req: &Request, live: &Path) {
     let own = own_settings(req);
     if let Some(d) = own.parent() {
         let _ = std::fs::create_dir_all(d);
     }
     settings_xml::keep_original(live, &original_settings(req), clients().is_empty());
-    if own.is_file()
-        && let Err(e) = std::fs::copy(&own, live)
-    {
-        fail(&format!(
-            "cannot put this account's Roblox settings in place: {e}"
-        ));
-    }
+    let own_text = own.is_file().then(|| {
+        std::fs::read_to_string(&own).unwrap_or_else(|e| {
+            fail(&format!(
+                "cannot put this account's Roblox settings in place: {e}"
+            ))
+        })
+    });
+    let live_text = std::fs::read_to_string(live).ok();
     let mut props = Vec::new();
     if let Some(fps) = req.fps() {
         let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
@@ -133,10 +156,16 @@ fn settings_before_launch(req: &Request, live: &Path) {
         props.push(settings_xml::prop("float", "MasterVolume", 0));
     }
     props.extend(settings_xml::window(req.window()));
-    if !props.is_empty()
-        && let Err(e) = settings_xml::apply(live, &props)
-    {
-        fail(&format!("cannot write Roblox's settings: {e}"));
+    let base = own_text.or_else(|| live_text.clone());
+    if base.is_some() || !props.is_empty() {
+        let new = settings_xml::with_props(base.as_deref(), &props);
+        if live_text.as_deref().map(str::trim_end) != Some(new.trim_end()) {
+            wait_for_settings_read(req);
+            let tmp = live.with_extension("alyae-tmp");
+            if let Err(e) = std::fs::write(&tmp, new).and_then(|_| std::fs::rename(&tmp, live)) {
+                fail(&format!("cannot write Roblox's settings: {e}"));
+            }
+        }
     }
     let _ = std::fs::write(last_launch_file(req), &req.id);
 }
@@ -323,8 +352,9 @@ pub fn play(req: &Request) {
         std::thread::sleep(Duration::from_millis(500));
     };
     let _ = std::fs::write(pid_file(req), pid.to_string());
-    // the client reads its settings while it starts: the next launch waits a little longer
-    std::thread::sleep(Duration::from_secs(5));
+    // the client reads its settings while it starts: a next launch that changes them waits for
+    // that (`wait_for_settings_read`), one that does not starts at once
+    let _ = std::fs::write(client_started_file(req), pid.to_string());
     drop(turn);
     status("running");
     let (tx, rx) = std::sync::mpsc::channel();

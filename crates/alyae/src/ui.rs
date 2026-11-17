@@ -3683,6 +3683,9 @@ mod tests {
         // the repository's Roblox modules: Log in 15 seconds apart, Refresh the usual gap
         assert_eq!(h.state().queue_gap("login"), Duration::from_secs(15));
         assert_eq!(h.state().queue_gap("check"), QUEUE_GAP);
+        // joins are not throttled like sign-ins: 2 seconds apart
+        assert_eq!(h.state().queue_gap("play"), Duration::from_secs(2));
+        assert_eq!(h.state().queue_gap("follow"), Duration::from_secs(2));
         let m = h.state().module("roblox").cloned().unwrap();
         let a = h.state().new_account(&m);
         assert!(h.state_mut().save(&a));

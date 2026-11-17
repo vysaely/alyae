@@ -71,6 +71,15 @@ hint = "empty: the role's (below); 0: no cap"
 default_by = "role"
 defaults = { main = "330", alt = "6" }
 
+[[field]]
+key = "window"
+label = "Window"
+kind = "choice"
+choices = ["fullscreen", "windowed", "small"]
+hint = "small: an 800x600 window; empty: the role's (main: fullscreen, alt: small)"
+default_by = "role"
+defaults = { alt = "small" }
+
 [[action]]
 id = "play"
 label = "Join Server"
@@ -138,6 +147,11 @@ label = "Settings"
 key = "fps"
 label = "FPS limit"
 choices = ["keep", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+
+[[action.input]]
+key = "window"
+label = "Window"
+choices = ["keep", "fullscreen", "windowed", "small"]
 
 [[action.input]]
 key = "quality"

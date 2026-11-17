@@ -453,6 +453,18 @@ impl App {
                 &serde_json::to_string(&all).unwrap_or_default(),
             );
         }
+        // only files here (Settings): nothing to pace, every account at once
+        if action.local {
+            for id in ids {
+                self.start_job(&Job {
+                    game: game.clone(),
+                    action: action.id.clone(),
+                    account: id,
+                    inputs: inputs.clone(),
+                });
+            }
+            return;
+        }
         // one account at a time, a few seconds apart: many sign-ins or joins at once from one
         // connection get it refused by the game's servers (owner, 2026-11-17)
         for id in ids {
@@ -3310,6 +3322,20 @@ mod tests {
         h.state_mut().poll();
         assert_eq!(h.state().queue_backoff, Duration::ZERO);
         h.state_mut().queue.clear();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Settings and Reset files only touch this computer's files: they skip the queue; anything
+    /// that asks Roblox stays in it.
+    #[test]
+    fn local_actions_skip_the_queue() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let local = |id: &str| m.actions.iter().find(|a| a.id == id).unwrap().local;
+        assert!(local("graphics") && local("reset"));
+        for id in ["play", "follow", "login", "check", "browser", "friends"] {
+            assert!(!local(id), "{id}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -142,6 +142,8 @@ fields = ["user_id"]
 [[action]]
 id = "graphics"
 label = "Settings"
+# only this computer's files: every chosen account at once, no queue
+local = true
 
 [[action.input]]
 key = "fps"
@@ -271,4 +273,5 @@ hint = "empty: a random 20-character one"
 [[action]]
 id = "reset"
 label = "Reset files"
+local = true
 confirm = "Roblox's app storage, caches, downloaded assets and Mocktail's saved sign-in of these accounts are removed and made again on the next launch. Kept: Roblox settings, device ID, the saved cookie. Fixes missing animations or textures when the cache is at fault."

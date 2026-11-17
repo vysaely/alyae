@@ -124,9 +124,11 @@ fn trim_memory(pid: u32) {
     }
 }
 
-/// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute at 6 FPS,
-/// less at 1; trimming twice a minute keeps more of it in the page file than in RAM.
-const TRIM_EVERY: Duration = Duration::from_secs(30);
+/// How often an alt's memory is trimmed besides right after it loaded and when memory runs
+/// short: trimming empties the whole working set, the pages the game uses as well, which it
+/// then reads back from the page file. Every 30 s, 23 alts read back ~80 MB/s from a USB
+/// page file (2026-11-18); Windows trims low-priority alts on its own when RAM is short.
+const TRIM_EVERY: Duration = Duration::from_secs(120);
 
 /// RAM that must be free before another client starts while others still load (room for them
 /// to grow too): a client loading a big map takes gigabytes, and many loading at once froze a
@@ -137,17 +139,35 @@ const FREE_TO_START_ALONE_MB: u64 = 3584;
 /// Below this much free RAM, running alts set to trim do it at once instead of on the minute.
 const LOW_MEMORY_MB: u64 = 2048;
 
+/// Room for another client, in MB: free physical memory, but no more than what Windows can
+/// still promise (commit limit, RAM plus page file) less a reserve. With the commit nearly
+/// used up a new game would make running ones fail to get memory and crash.
+fn start_room_mb() -> u64 {
+    let (phys, commit) = memory();
+    phys.min(commit.saturating_sub(COMMIT_RESERVE_MB))
+}
+
+/// Commit Windows must still be able to promise after a client starts (one Gaia alt commits
+/// about 3 GB).
+const COMMIT_RESERVE_MB: u64 = 4096;
+
 /// Free physical memory, in MB.
 fn free_mb() -> u64 {
+    memory().0
+}
+
+/// (free physical memory, commit Windows can still promise), in MB.
+fn memory() -> (u64, u64) {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     // SAFETY: a correctly sized MEMORYSTATUSEX
     unsafe {
         let mut m: MEMORYSTATUSEX = std::mem::zeroed();
         m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
         if GlobalMemoryStatusEx(&mut m) == 0 {
-            return u64::MAX;
+            return (u64::MAX, u64::MAX);
         }
-        m.ullAvailPhys / (1024 * 1024)
+        let mb = 1024 * 1024;
+        (m.ullAvailPhys / mb, m.ullAvailPageFile / mb)
     }
 }
 
@@ -187,7 +207,7 @@ fn wait_for_memory(req: &Request, slot: usize) {
             FREE_TO_START_ALONE_MB
         }
     };
-    crate::wait_for_memory(free_mb, need, || {
+    crate::wait_for_memory(start_room_mb, need, || {
         let _ = std::fs::write(&ask, "");
     });
 }

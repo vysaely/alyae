@@ -447,7 +447,7 @@ fn wait_for_memory() {
             .and_then(|t| mem_available_mb(&t))
             .unwrap_or(u64::MAX)
     };
-    crate::wait_for_memory(free, FREE_TO_START_MB);
+    crate::wait_for_memory(free, || FREE_TO_START_MB, || {});
 }
 
 /// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main

@@ -75,32 +75,34 @@ pub const MEMORY_WAIT: Duration = Duration::from_secs(180);
 /// accounts after would wait in vain too.
 pub const NO_MEMORY: &str = "not enough free memory for another Roblox";
 
-/// Waits until `free()` (MB) reaches `need` MB, saying so while it waits; gives up after
+/// Waits until `free()` (MB) reaches `need()` MB, saying so while it waits and calling
+/// `waiting()` every round (Windows asks the running alts to trim then); gives up after
 /// `MEMORY_WAIT` with a `NO_MEMORY` error.
-pub fn wait_for_memory(free: impl Fn() -> u64, need: u64) {
+pub fn wait_for_memory(free: impl Fn() -> u64, need: impl Fn() -> u64, mut waiting: impl FnMut()) {
     let until = std::time::Instant::now() + MEMORY_WAIT;
-    let mut said = 0;
+    let mut said = (0, 0);
     loop {
-        let now = free();
+        let (now, need) = (free(), need());
         if now >= need {
             return;
         }
         if std::time::Instant::now() >= until {
             fail(&format!(
-                "{NO_MEMORY}: {:.1} GB free after {} min, {} GB needed. Close something or start fewer accounts",
+                "{NO_MEMORY}: {:.1} GB free after {} min, {:.1} GB needed. Close something or start fewer accounts",
                 now as f64 / 1024.0,
                 MEMORY_WAIT.as_secs() / 60,
-                need / 1024
+                need as f64 / 1024.0
             ));
         }
+        waiting();
         // a new line only when it changed by half a GB or more
-        if now.abs_diff(said) >= 512 {
+        if now.abs_diff(said.0) >= 512 || need != said.1 {
             status(&format!(
-                "waiting for free memory ({:.1} GB free, {} GB needed)",
+                "waiting for free memory ({:.1} GB free, {:.1} GB needed)",
                 now as f64 / 1024.0,
-                need / 1024
+                need as f64 / 1024.0
             ));
-            said = now;
+            said = (now, need);
         }
         std::thread::sleep(Duration::from_secs(2));
     }

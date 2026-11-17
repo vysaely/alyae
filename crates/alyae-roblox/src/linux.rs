@@ -910,6 +910,12 @@ pub fn play(req: &Request) {
         .spawn()
         .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
     let pid = child.id() as i32;
+    // an alt gives way to a main when the PC is busy (raising a main needs root; lowering the
+    // alts does the same for it): nice 5 for the whole game
+    if !main {
+        // SAFETY: setpriority(2) on the process group the game leads
+        unsafe { libc::setpriority(libc::PRIO_PGRP, pid as libc::id_t, 5) };
+    }
     say(json!({ "status": "running" }));
 
     // a stop from Alyae ends the game; Alyae closing leaves it running

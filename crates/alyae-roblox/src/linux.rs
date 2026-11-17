@@ -686,8 +686,8 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_TOUCH_MODE".into(), "0".into()),
         ("MOCKTAIL_MOUSE_MODE".into(), "1".into()),
         ("MOCKTAIL_KEYBOARD_MODE".into(), "1".into()),
-        ("MOCKTAIL_WIN_WIDTH".into(), w.into()),
-        ("MOCKTAIL_WIN_HEIGHT".into(), h.into()),
+        ("MOCKTAIL_WIN_WIDTH".into(), w),
+        ("MOCKTAIL_WIN_HEIGHT".into(), h),
         ("MOCKTAIL_WIN_HIGH_DPI".into(), "0".into()),
         (
             "MOCKTAIL_GRAPHICS_QUALITY".into(),

@@ -63,6 +63,10 @@ pub struct Action {
     /// sign-ins want more, or the game's servers refuse the connection for a while
     #[serde(default)]
     pub gap: u64,
+    /// `local = true`: only files on this computer, nothing asked of the game's servers, so it
+    /// runs for every chosen account at once instead of one at a time in the queue
+    #[serde(default)]
+    pub local: bool,
 }
 
 impl Action {

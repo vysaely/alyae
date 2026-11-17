@@ -232,6 +232,7 @@ fn web_window(request: &Value) -> Option<String> {
     }
     // its steps are passed on as they happen; the cookie line ends it
     let mut cookie = None;
+    let mut error = None;
     if let Some(out) = child.stdout.take() {
         for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -243,9 +244,18 @@ fn web_window(request: &Value) -> Option<String> {
             if let Some(c) = v["cookie"].as_str() {
                 cookie = Some(c.to_string());
             }
+            // Roblox refused (too many sign-ins): Alyae's queue waits longer on this text
+            if let Some(e) = v["error"].as_str() {
+                error = Some(e.to_string());
+            }
         }
     }
     let _ = child.wait();
+    if cookie.is_none()
+        && let Some(e) = error
+    {
+        fail(&e);
+    }
     cookie
 }
 

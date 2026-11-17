@@ -59,6 +59,10 @@ pub struct Action {
     /// asked before the action runs (it changes the accounts)
     #[serde(default)]
     pub confirm: String,
+    /// seconds between two accounts when it runs for several (0: Alyae's usual few seconds);
+    /// sign-ins want more, or the game's servers refuse the connection for a while
+    #[serde(default)]
+    pub gap: u64,
 }
 
 impl Action {

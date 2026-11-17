@@ -50,19 +50,47 @@ const SCRIPT: &str = r#"
       const t = ((i.closest('[role="dialog"], .modal-content') || document.body).innerText || '').toLowerCase();
       return t.includes('authenticator') || t.includes('2-step') || t.includes('two-step');
     });
+  // Roblox's Sign in button: it lost its id (login-button) in 2026, so also the form's visible
+  // submit button, then any visible "Sign in" / "Log in" button
+  const loginButton = pass => document.getElementById('login-button')
+    || (pass && pass.form && [...pass.form.querySelectorAll('button[type="submit"]')].find(visible))
+    || [...document.querySelectorAll('button')].find(b => visible(b) && /^\s*(sign in|log in)\s*$/i.test(b.innerText));
+  let tries = 0, sentAt = 0, limited = false;
+  const pageText = () => ((document.body && document.body.innerText) || '').toLowerCase();
   const tick = () => {
     const user = document.getElementById('login-username');
     const pass = document.getElementById('login-password');
-    const button = document.getElementById('login-button');
     if (!window.__alyae) {
       if (!askedCreds && visible(user)) { askedCreds = true; window.ipc.postMessage('creds'); }
       return;
     }
-    if (!sentLogin && visible(user) && visible(pass) && button) {
+    const text = pageText();
+    // Roblox turned sign-ins from this connection down for a while: tell Alyae (its queue then
+    // waits longer) and never try again from here, which would only make it last longer
+    if (!limited && /too many attempts|too many requests|try again later|wait a (bit|few minutes)/.test(text)) {
+      limited = true;
+      window.ipc.postMessage('limited');
+      return;
+    }
+    if (limited) return;
+    // a sign-in that did not go through (a failed or closed captcha) brings the form back with
+    // the password emptied: filled and sent again, up to 3 times; not after a wrong password
+    if (sentLogin && window.__alyae.password && tries < 3 && Date.now() - sentAt > 6000
+        && visible(user) && visible(pass) && !pass.value
+        && !/incorrect (username|password)|wrong password/.test(text)) {
+      sentLogin = false;
+    }
+    // the boxes are filled even when no button is found: then the person clicks Sign in
+    if (!sentLogin && visible(user) && visible(pass)) {
       if (window.__alyae.username && !user.value) setValue(user, window.__alyae.username);
       if (!window.__alyae.password) { sentLogin = true; return; }
-      setValue(pass, window.__alyae.password);
-      if (!button.disabled) { sentLogin = true; button.click(); window.ipc.postMessage('sent'); }
+      if (pass.value !== window.__alyae.password) setValue(pass, window.__alyae.password);
+      const button = loginButton(pass);
+      if (button && !button.disabled) {
+        sentLogin = true; tries += 1; sentAt = Date.now();
+        button.click();
+        window.ipc.postMessage(tries > 1 ? 'resent' : 'sent');
+      }
     }
     // one request per Roblox code window: a rejected code waits for the next one
     if (twoStepBox() && Date.now() - askedCode > 30000) {
@@ -77,8 +105,15 @@ const SCRIPT: &str = r#"
 enum Msg {
     Creds,
     Sent,
+    Resent,
     Code,
+    Limited,
 }
+
+/// What the window prints when Roblox refuses sign-ins for a while; "rate limiting" in it makes
+/// Alyae's queue wait longer before the next account.
+const LIMITED: &str =
+    "Roblox is rate limiting sign-ins from this connection: wait a few minutes before the next";
 
 /// A page address on Roblox's own site (the login page and where it leads).
 fn is_roblox(url: &str) -> bool {
@@ -271,6 +306,8 @@ fn main() {
                     "creds" => proxy.send_event(Msg::Creds),
                     "code" => proxy.send_event(Msg::Code),
                     "sent" => proxy.send_event(Msg::Sent),
+                    "resent" => proxy.send_event(Msg::Resent),
+                    "limited" => proxy.send_event(Msg::Limited),
                     _ => Ok(()),
                 };
             })
@@ -298,6 +335,17 @@ fn main() {
             }
             Event::UserEvent(Msg::Sent) => {
                 println!("{}", json!({ "status": "username and password sent" }))
+            }
+            Event::UserEvent(Msg::Resent) => {
+                println!(
+                    "{}",
+                    json!({ "status": "that sign-in did not go through: sent again" })
+                )
+            }
+            // the window closes: waiting in it would not help
+            Event::UserEvent(Msg::Limited) => {
+                println!("{}", json!({ "error": LIMITED }));
+                *flow = ControlFlow::Exit;
             }
             Event::UserEvent(Msg::Code) => {
                 if !webview.url().is_ok_and(|u| is_roblox(&u)) {

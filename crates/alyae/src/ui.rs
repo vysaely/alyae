@@ -65,6 +65,9 @@ pub struct App {
     queue_ended: bool,
     /// the next queued account starts no sooner than this
     queue_next: Option<std::time::Instant>,
+    /// extra wait in the queue after the game's servers refused for too many requests (a
+    /// throttled sign-in): 2 minutes, doubling to 10 while it goes on, none once one works
+    queue_backoff: Duration,
     /// accounts made by Add account or Import whose action (login window, check) is still running:
     /// kept when it works, dropped when it does not
     adding: HashSet<String>,
@@ -158,6 +161,7 @@ impl App {
             queue_current: None,
             queue_ended: false,
             queue_next: None,
+            queue_backoff: Duration::ZERO,
             adding: HashSet::new(),
             import_text: None,
             bookmark_name: String::new(),
@@ -318,6 +322,26 @@ impl App {
                         .find(|a| a.id == account)
                         .map(|a| self.title(a))
                         .unwrap_or_default();
+                    if is_rate_limit(&text)
+                        && self
+                            .queue_current
+                            .as_ref()
+                            .is_some_and(|(a, _, _)| *a == account)
+                    {
+                        self.queue_backoff = (self.queue_backoff * 2)
+                            .clamp(Duration::from_secs(120), Duration::from_secs(600));
+                        if !self.queue.is_empty() {
+                            self.say(
+                                format!(
+                                    "{name}: {text}. The queue waits {} min before the next account",
+                                    self.queue_backoff.as_secs() / 60
+                                ),
+                                true,
+                            );
+                            self.status.insert(account, (text, true));
+                            continue;
+                        }
+                    }
                     self.say(format!("{name}: {text}"), true);
                     self.status.insert(account, (text, true));
                 }
@@ -380,6 +404,9 @@ impl App {
                         .is_some_and(|(a, act, _)| *a == account && *act == action)
                     {
                         self.queue_ended = true;
+                        if ok {
+                            self.queue_backoff = Duration::ZERO;
+                        }
                     }
                     if self.adding.remove(&account) {
                         self.finish_add(&account, ok);
@@ -443,7 +470,7 @@ impl App {
     /// the gap after it has passed.
     fn advance_queue(&mut self) {
         let now = std::time::Instant::now();
-        if let Some((id, _, runs)) = self.queue_current.clone() {
+        if let Some((id, action, runs)) = self.queue_current.clone() {
             // ended, or a game that is up and running
             let done = self.queue_ended
                 || (runs && self.status.get(&id).is_some_and(|(t, _)| t == "running"));
@@ -452,7 +479,7 @@ impl App {
             }
             self.queue_current = None;
             if !self.queue.is_empty() {
-                self.queue_next = Some(now + QUEUE_GAP);
+                self.queue_next = Some(now + self.queue_gap(&action) + self.queue_backoff);
             }
         }
         if let Some(at) = self.queue_next {
@@ -520,6 +547,22 @@ impl App {
                 self.say(format!("{}: {e}", self.title(&a)), true);
                 None
             }
+        }
+    }
+
+    /// The wait after one account of `action` before the next: the module's `gap`, else the
+    /// usual one.
+    fn queue_gap(&self, action: &str) -> Duration {
+        let gap = self
+            .game
+            .as_deref()
+            .and_then(|g| self.module(g))
+            .and_then(|m| m.actions.iter().find(|a| a.id == action))
+            .map_or(0, |a| a.gap);
+        if gap == 0 {
+            QUEUE_GAP
+        } else {
+            Duration::from_secs(gap)
         }
     }
 
@@ -3218,6 +3261,56 @@ mod tests {
         assert!(made("a1") <= made("a2") && made("a2") <= made("a3"));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// An action's own `gap` spaces its queue (Log in: a minute); a throttled one makes the queue
+    /// wait 2 minutes more, doubling to 10, and a run that works ends the extra wait.
+    #[test]
+    fn queue_gap_and_throttle_pause() {
+        let (mut h, dir) = window("roblox");
+        // the repository's Roblox modules: Log in one a minute, Refresh the usual gap
+        assert_eq!(h.state().queue_gap("login"), Duration::from_secs(60));
+        assert_eq!(h.state().queue_gap("check"), QUEUE_GAP);
+        let m = h.state().module("roblox").cloned().unwrap();
+        let a = h.state().new_account(&m);
+        assert!(h.state_mut().save(&a));
+        let tx = h.state().tx.clone();
+        h.state_mut().queue_current = Some((a.id.clone(), "login".into(), false));
+        // one more waiting, so the pause is announced rather than a plain error
+        let waiting = h.state().new_account(&m);
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "login".into(),
+            account: waiting.id,
+            inputs: Values::default(),
+        });
+        for want in [120, 240, 480, 600] {
+            tx.send(Event::Error {
+                account: a.id.clone(),
+                text: "Roblox is rate limiting sign-ins from this connection".into(),
+            })
+            .unwrap();
+            h.state_mut().poll();
+            assert_eq!(h.state().queue_backoff, Duration::from_secs(want));
+        }
+        // another account's error, or one that is no throttle, changes nothing
+        tx.send(Event::Error {
+            account: a.id.clone(),
+            text: "the login window closed before Roblox signed in".into(),
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert_eq!(h.state().queue_backoff, Duration::from_secs(600));
+        tx.send(Event::Ended {
+            account: a.id.clone(),
+            action: "login".into(),
+            ok: true,
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert_eq!(h.state().queue_backoff, Duration::ZERO);
+        h.state_mut().queue.clear();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Right-clicking the Online heading switches its text off and on.

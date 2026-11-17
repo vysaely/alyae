@@ -303,12 +303,21 @@ pub fn graphics(req: &Request) {
     }
     let (props, fps) =
         settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
-    if props.is_empty() {
+    let window = settings_xml::window_input(req.input("window")).unwrap_or_else(|e| fail(&e));
+    if props.is_empty() && window.is_none() {
         fail("nothing to change: every value is \"keep\"");
     }
-    // the launch sets FramerateCap from the account's FPS cap: keep the two in step
+    // the launch sets FramerateCap from the account's FPS cap and the window from its Window:
+    // keep them in step
     if let Some(f) = fps {
         say(json!({ "set": { "fps": f.to_string() } }));
+    }
+    if let Some(w) = window {
+        say(json!({ "set": { "window": w } }));
+    }
+    if props.is_empty() {
+        status("window set (used from the next start)");
+        return;
     }
     let profile = profile_dir(req, &req.data_dir);
     match settings_xml::apply(&settings_file(&profile), &props) {
@@ -416,7 +425,27 @@ fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
     data_dir.join("profiles").join(&req.id)
 }
 
-fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fps_limit: u32) {
+/// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main
+/// fullscreen, an alt small.
+fn window_size(mode: &str, main: bool) -> (bool, u32, u32) {
+    let small = (false, settings_xml::SMALL.0, settings_xml::SMALL.1);
+    match mode {
+        "small" => small,
+        "windowed" => (false, 1920, 1080),
+        "fullscreen" => (true, 1920, 1080),
+        _ if main => (true, 1920, 1080),
+        _ => small,
+    }
+}
+
+fn prepare_profile(
+    m: &Mocktail,
+    data_dir: &Path,
+    profile: &Path,
+    main: bool,
+    fps_limit: u32,
+    (fullscreen, w, h): (bool, u32, u32),
+) {
     for sub in [
         "data/mocktail",
         "config/mocktail",
@@ -455,7 +484,6 @@ fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fp
     mkdir(&shaders);
     link_dir(&shaders, &profile.join("cache/mesa_shader_cache"));
 
-    let (w, h) = if main { (1920, 1080) } else { (800, 600) };
     let config = format!(
         "version: 1\ndevice: pc-windows-11\ngraphics:\n  backend: opengl\n  frame_rate_limit: {fps_limit}\n  vsync: off\n\
          performance:\n  multithreaded_rendering: true\n  physics_worker_mode: {}\n  gamemode: {}\n\
@@ -464,7 +492,7 @@ fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fp
         if main { "auto" } else { "off" },
     );
     let window = json!({
-        "fullscreen": main, "maximized": false, "schema_version": 1,
+        "fullscreen": fullscreen, "maximized": false, "schema_version": 1,
         "windowed": { "has_position": false, "height": h, "width": w },
     })
     .to_string();
@@ -609,12 +637,14 @@ pub fn play(req: &Request) {
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
     let mut turn = LaunchTurn::take(data_dir);
     status("starting");
+    let window = window_size(req.window(), main);
     prepare_profile(
         &m,
         data_dir,
         &profile,
         main,
         if fps_limit == 10000 { 1000 } else { fps_limit },
+        window,
     );
     engine_settings(&profile, main, fps_limit);
     let tracker_file = profile.join("browser_tracker");
@@ -630,11 +660,7 @@ pub fn play(req: &Request) {
     let cookie_files = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
-    let (w, h) = if main {
-        ("1920", "1080")
-    } else {
-        ("800", "600")
-    };
+    let (w, h) = (window.1.to_string(), window.2.to_string());
     let mut args: Vec<String> = vec!["--windowed".into(), "--graphics".into(), "opengl".into()];
     if let Some(u) = uri(&join) {
         args.push("--launch-uri".into());
@@ -1001,6 +1027,16 @@ mod tests {
         assert_eq!(owned_profile(&data, &data), None);
         assert_eq!(owned_profile(&data.join("profiles/missing"), &data), None);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt small).
+    #[test]
+    fn window_by_choice_or_role() {
+        assert_eq!(window_size("", true), (true, 1920, 1080));
+        assert_eq!(window_size("", false), (false, 800, 600));
+        assert_eq!(window_size("small", true), (false, 800, 600));
+        assert_eq!(window_size("windowed", false), (false, 1920, 1080));
+        assert_eq!(window_size("fullscreen", false), (true, 1920, 1080));
     }
 
     #[test]

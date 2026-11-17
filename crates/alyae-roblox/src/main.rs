@@ -42,6 +42,11 @@ impl Request {
     pub fn is_alt(&self) -> bool {
         self.get("role") == "alt"
     }
+    /// The account's Window: "fullscreen", "windowed", "small" (its default by role comes filled
+    /// in from the module), or empty: Roblox's own.
+    pub fn window(&self) -> &str {
+        self.get("window")
+    }
     /// The FPS cap Alyae sets (its default by role comes filled in from the module); None: no
     /// cap of Alyae's, 0: no cap at all.
     pub fn fps(&self) -> Option<u32> {

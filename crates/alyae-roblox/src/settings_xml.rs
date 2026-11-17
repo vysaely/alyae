@@ -35,8 +35,8 @@ const NEW_FILE: &str = r#"<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime
 </roblox>
 "#;
 
-/// One property: its XML tag ("int", "token", "float", "bool", or "Vector2" for an X/Y pair
-/// set to the same value), name and value.
+/// One property: its XML tag ("int", "token", "float", "bool", or "Vector2" for an X/Y pair:
+/// "x,y", or one value for both), name and value.
 pub struct Prop {
     pub tag: &'static str,
     pub name: &'static str,
@@ -69,13 +69,14 @@ pub fn set(text: &str, props: &[Prop]) -> String {
                 out += line;
                 out.push('\n');
                 // the <X> and <Y> lines that follow
-                for axis in ["X", "Y"] {
+                let (x, y) = axes(&props[i].value);
+                for (axis, v) in [("X", x), ("Y", y)] {
                     if let Some(next) = lines
                         .peek()
                         .filter(|l| l.trim_start().starts_with(&format!("<{axis}>")))
                     {
                         let ind = &next[..next.len() - next.trim_start().len()];
-                        out += &format!("{ind}<{axis}>{}</{axis}>\n", props[i].value);
+                        out += &format!("{ind}<{axis}>{v}</{axis}>\n");
                         lines.next();
                     }
                 }
@@ -104,10 +105,10 @@ pub fn set(text: &str, props: &[Prop]) -> String {
         .filter(|(_, d)| !**d)
         .map(|(p, _)| {
             if p.tag == "Vector2" {
+                let (x, y) = axes(&p.value);
                 format!(
-                    "\n\t\t\t<Vector2 name=\"{n}\">\n\t\t\t\t<X>{v}</X>\n\t\t\t\t<Y>{v}</Y>\n\t\t\t</Vector2>",
+                    "\n\t\t\t<Vector2 name=\"{n}\">\n\t\t\t\t<X>{x}</X>\n\t\t\t\t<Y>{y}</Y>\n\t\t\t</Vector2>",
                     n = p.name,
-                    v = p.value
                 )
             } else {
                 format!("\n\t\t\t<{t} name=\"{n}\">{v}</{t}>", t = p.tag, n = p.name, v = p.value)
@@ -118,6 +119,38 @@ pub fn set(text: &str, props: &[Prop]) -> String {
         out = out.replacen("<Properties>", &format!("<Properties>{missing}"), 1);
     }
     out
+}
+
+/// A Vector2 value's X and Y: "x,y", or one value for both.
+fn axes(v: &str) -> (&str, &str) {
+    v.split_once(',').unwrap_or((v, v))
+}
+
+/// The "small" window: the least Roblox's PC layout still fits in.
+pub const SMALL: (u32, u32) = (800, 600);
+
+/// The account's Window choice: "fullscreen", "windowed" (a normal window) or "small" (a normal
+/// window of `SMALL`); anything else (empty) leaves Roblox's own.
+pub fn window(mode: &str) -> Vec<Prop> {
+    match mode {
+        "fullscreen" => vec![prop("bool", "Fullscreen", true)],
+        "windowed" => vec![prop("bool", "Fullscreen", false)],
+        "small" => vec![
+            prop("bool", "Fullscreen", false),
+            prop("bool", "StartMaximized", false),
+            prop("Vector2", "StartScreenSize", format!("{},{}", SMALL.0, SMALL.1)),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The Settings form's Window value: None for "keep" (or empty), else a choice `window` takes.
+pub fn window_input(v: &str) -> Result<Option<&str>, String> {
+    match v {
+        "" | "keep" => Ok(None),
+        "fullscreen" | "windowed" | "small" => Ok(Some(v)),
+        _ => Err(format!("Window: '{v}'")),
+    }
 }
 
 /// Sets `props` in the file at `path`, creating it when Roblox has not written one yet.
@@ -389,6 +422,25 @@ mod tests {
             .is_err()
         );
         assert_eq!(from_form(|_| "keep".into()).unwrap().0.len(), 0);
+    }
+
+    /// A small window: out of fullscreen, not maximized, its own X and Y; Vector2 pairs that
+    /// share one value still get it on both axes.
+    #[test]
+    fn small_window() {
+        let file = "<roblox>\n\t<Item class=\"UserGameSettings\">\n\t\t<Properties>\n\t\t\t<bool name=\"Fullscreen\">true</bool>\n\t\t\t<bool name=\"StartMaximized\">true</bool>\n\t\t\t<Vector2 name=\"StartScreenSize\">\n\t\t\t\t<X>1920</X>\n\t\t\t\t<Y>1080</Y>\n\t\t\t</Vector2>\n\t\t</Properties>\n\t</Item>\n</roblox>\n";
+        let out = set(file, &window("small"));
+        assert!(out.contains("<bool name=\"Fullscreen\">false</bool>"));
+        assert!(out.contains("<bool name=\"StartMaximized\">false</bool>"));
+        assert!(out.contains("<X>800</X>") && out.contains("<Y>600</Y>"));
+        // a file without the size gets it added
+        let added = set(ROBLOX, &window("small"));
+        assert!(added.contains("<X>800</X>\n\t\t\t\t<Y>600</Y>"));
+        assert!(set(&out, &window("fullscreen")).contains("<bool name=\"Fullscreen\">true</bool>"));
+        assert!(window("").is_empty());
+        assert_eq!(window_input("keep"), Ok(None));
+        assert_eq!(window_input("small"), Ok(Some("small")));
+        assert!(window_input("tiny").is_err());
     }
 
     #[test]

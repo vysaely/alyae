@@ -4,6 +4,7 @@
 //! runs the helper waits for it; a `stop` line on stdin closes the game.
 
 mod api;
+mod files;
 #[cfg(target_os = "linux")]
 mod linux;
 mod settings_xml;
@@ -361,6 +362,8 @@ fn main() {
         "graphics" => windows::graphics(&req),
         #[cfg(target_os = "linux")]
         "reset" => linux::reset(&req),
+        #[cfg(windows)]
+        "reset" => windows::reset(&req),
         #[cfg(target_os = "linux")]
         "forget" => linux::forget(&req),
         "signout_all" | "logout" | "change_password" | "unblock_all" | "friends" | "privacy" => {

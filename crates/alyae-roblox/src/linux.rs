@@ -3,6 +3,7 @@
 //! The settings mirror what AEAM ran with; AEAM-only extras (chat overlay, anti-AFK, self-heal)
 //! are left out.
 
+use crate::files::{clear, remove};
 use crate::{Join, Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
 use serde_json::json;
 use std::fs;
@@ -314,40 +315,6 @@ pub fn graphics(req: &Request) {
         Ok(()) => status(&format!("{} settings set", props.len())),
         Err(e) => fail(&format!("cannot write Roblox's settings: {e}")),
     }
-}
-
-/// Size of `p` in bytes, links not followed.
-fn size_of(p: &Path) -> u64 {
-    match fs::symlink_metadata(p) {
-        Ok(m) if m.is_dir() => {
-            fs::read_dir(p).map_or(0, |d| d.flatten().map(|e| size_of(&e.path())).sum())
-        }
-        Ok(m) => m.len(),
-        Err(_) => 0,
-    }
-}
-
-/// Removes `p`; a link is removed itself, never what it points to (the shared client and caches).
-fn remove(p: &Path) -> u64 {
-    let size = size_of(p);
-    let gone = match fs::symlink_metadata(p) {
-        Ok(m) if m.is_dir() => fs::remove_dir_all(p),
-        Ok(_) => fs::remove_file(p),
-        Err(_) => return 0,
-    };
-    if gone.is_err() { 0 } else { size }
-}
-
-/// Removes everything in `dir` but the names in `keep`.
-fn clear(dir: &Path, keep: &[&str]) -> u64 {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| !keep.contains(&e.file_name().to_string_lossy().as_ref()))
-        .map(|e| remove(&e.path()))
-        .sum()
 }
 
 /// What Reset files removes from a profile: Roblox's app storage, its caches and downloaded

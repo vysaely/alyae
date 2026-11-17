@@ -604,8 +604,15 @@ impl App {
                 &serde_json::to_string(&all).unwrap_or_default(),
             );
         }
-        // only files here (Settings): nothing to pace, every account at once
-        if action.local {
+        // only files here (Settings): nothing to pace, every account at once. One account on
+        // its own does not wait behind a queue either (owner, 2026-11-17): it starts now, and
+        // leaves the queue if it was waiting there (the helper still limits games loading at
+        // once and wants free memory)
+        if action.local || ids.len() == 1 {
+            if !action.local {
+                self.queue
+                    .retain(|j| !(ids.contains(&j.account) && j.action == action.id));
+            }
             for id in ids {
                 self.start_job(&Job {
                     game: game.clone(),
@@ -3838,6 +3845,31 @@ mod tests {
 
     /// Settings and Reset files only touch this computer's files: they skip the queue; anything
     /// that asks Roblox stays in it.
+    #[test]
+    fn one_account_skips_the_queue() {
+        let (mut h, dir) = window("generic");
+        let m = h.state().module("generic").cloned().unwrap();
+        let (a, b) = (h.state().new_account(&m), h.state().new_account(&m));
+        assert!(h.state_mut().save(&a) && h.state_mut().save(&b));
+        // a queue busy with another account, a and b waiting in it
+        h.state_mut().queue_current = Some(("busy".into(), "play".into(), true));
+        for id in [&a.id, &b.id] {
+            h.state_mut().queue.push_back(Job {
+                game: "generic".into(),
+                action: "play".into(),
+                account: id.clone(),
+                inputs: Values::default(),
+            });
+        }
+        // a on its own: started at once (its empty launch command fails here), out of the queue
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        let left: Vec<&str> = h.state().queue.iter().map(|j| j.account.as_str()).collect();
+        assert_eq!(left, vec![b.id.as_str()]);
+        h.state_mut().queue.clear();
+        h.state_mut().queue_current = None;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn local_actions_skip_the_queue() {
         let (h, dir) = window("roblox");

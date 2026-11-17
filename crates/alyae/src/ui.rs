@@ -1401,8 +1401,13 @@ impl App {
                         clicked = Some((id.clone(), true));
                     }
                     resp.context_menu(|ui| {
+                        // in the order the rows are shown: a copied list lines up with the table
                         let ids: Vec<String> = if selected.contains(id) {
-                            selected.iter().cloned().collect()
+                            order
+                                .iter()
+                                .filter(|x| selected.contains(*x))
+                                .cloned()
+                                .collect()
                         } else {
                             vec![id.clone()]
                         };
@@ -1546,15 +1551,26 @@ impl App {
                     }
                 }
             } else {
-                for f in m.fields.iter().filter(|f| !f.secret) {
+                // every field but 2FA (its codes change every 30 s), secrets too: cookies of many
+                // accounts at once, one per line in the table's order. An account without the
+                // value is left out.
+                let chosen: Vec<&Account> = ids
+                    .iter()
+                    .filter_map(|id| self.accounts.iter().find(|a| &a.id == id))
+                    .collect();
+                let name = m.fields.iter().find(|f| !f.secret && f.kind != "totp");
+                for f in m.fields.iter().filter(|f| f.kind != "totp") {
                     if ui.button(format!("{} (one per line)", f.label)).clicked() {
-                        let all: Vec<String> = ids
-                            .iter()
-                            .filter_map(|id| self.accounts.iter().find(|a| &a.id == id))
-                            .map(|a| a.value(&f.key).to_string())
-                            .filter(|v| !v.is_empty())
-                            .collect();
-                        choice = Some(MenuChoice::Copy(all.join("\n")));
+                        choice = Some(MenuChoice::Copy(copy_lines(&chosen, None, &f.key)));
+                    }
+                    // a secret with the account it belongs to: "name:secret"
+                    if f.secret
+                        && let Some(n) = name
+                        && ui
+                            .button(format!("{}:{} (one per line)", n.label, f.label))
+                            .clicked()
+                    {
+                        choice = Some(MenuChoice::Copy(copy_lines(&chosen, Some(&n.key), &f.key)));
                     }
                 }
             }
@@ -1577,10 +1593,15 @@ impl App {
             MenuChoice::Run(action) => self.start_action(m, &action, ids),
             MenuChoice::Stop => self.stop(&ids),
             MenuChoice::Copy(text) => {
+                let lines = text.lines().count();
                 if let Some(c) = &self.ctx {
                     c.copy_text(text);
                 }
-                self.say("Copied", false);
+                if lines > 1 {
+                    self.say(format!("Copied {lines} lines"), false);
+                } else {
+                    self.say("Copied", false);
+                }
             }
             MenuChoice::Remove => self.confirm_remove = ids,
             MenuChoice::Group(g) => {
@@ -2647,6 +2668,26 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     );
 }
 
+/// `key`'s value of each account, one per line, as `name:value` when `name` is given; an account
+/// without the value (or without the name) is left out.
+fn copy_lines(accounts: &[&Account], name: Option<&str>, key: &str) -> String {
+    accounts
+        .iter()
+        .filter_map(|a| {
+            let v = a.value(key);
+            if v.is_empty() {
+                return None;
+            }
+            match name {
+                None => Some(v.to_string()),
+                Some(n) if !a.value(n).is_empty() => Some(format!("{}:{v}", a.value(n))),
+                Some(_) => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A box of the grid's height with `text` in it, outlined (AEAM's "1 selected").
 fn outlined(ui: &mut egui::Ui, text: &str) {
     let galley = ui.painter().layout_no_wrap(
@@ -3221,5 +3262,31 @@ mod tests {
         assert!(*bad);
         assert!(msg.contains("bad1"), "got: {msg}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn copy_lines_keeps_the_order_and_skips_accounts_without_the_value() {
+        let make = |id: &str, user: &str, cookie: &str| {
+            let mut a = Account {
+                id: id.into(),
+                game: "t".into(),
+                ..Default::default()
+            };
+            set_value(&mut a, "username", user, false);
+            set_value(&mut a, "cookie", cookie, true);
+            a
+        };
+        let (b, a, none, nameless) = (
+            make("b", "bee", "c-b"),
+            make("a", "ay", "c-a"),
+            make("n", "en", ""),
+            make("x", "", "c-x"),
+        );
+        let chosen = [&b, &a, &none, &nameless];
+        assert_eq!(copy_lines(&chosen, None, "cookie"), "c-b\nc-a\nc-x");
+        assert_eq!(
+            copy_lines(&chosen, Some("username"), "cookie"),
+            "bee:c-b\nay:c-a"
+        );
     }
 }

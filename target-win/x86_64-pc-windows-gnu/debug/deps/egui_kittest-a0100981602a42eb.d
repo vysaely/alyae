@@ -1,0 +1,11 @@
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/egui_kittest-a0100981602a42eb.d: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/accessibility.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/builder.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/app_kind.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/config.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/node.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/renderer.rs
+
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/libegui_kittest-a0100981602a42eb.rmeta: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/accessibility.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/builder.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/app_kind.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/config.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/node.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/renderer.rs
+
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/lib.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/accessibility.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/builder.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/app_kind.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/config.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/node.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui_kittest-0.37.0/src/renderer.rs:

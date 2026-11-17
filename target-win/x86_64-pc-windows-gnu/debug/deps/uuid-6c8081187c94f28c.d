@@ -1,0 +1,13 @@
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/uuid-6c8081187c94f28c.d: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/macros.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/builder.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/error.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/non_nil.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/parser.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/fmt.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/timestamp.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/external.rs
+
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/libuuid-6c8081187c94f28c.rmeta: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/macros.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/builder.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/error.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/non_nil.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/parser.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/fmt.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/timestamp.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/external.rs
+
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/lib.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/macros.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/builder.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/error.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/non_nil.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/parser.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/fmt.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/timestamp.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/uuid-1.29.2/src/external.rs:

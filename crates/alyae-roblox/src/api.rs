@@ -158,7 +158,26 @@ pub fn universe_of(place: u64) -> Result<u64, String> {
         .ok_or_else(|| "Roblox knows no game with this place".into())
 }
 
-/// Every place of a game, (place ID, name), the start place first.
+/// The game's start place: the only one most games let players join directly (the others
+/// they reach by the game's own teleports; a direct join is refused with error 524).
+pub fn root_place(universe: u64) -> Result<u64, String> {
+    let mut r = agent()
+        .get(&format!(
+            "https://games.roblox.com/v1/games?universeIds={universe}"
+        ))
+        .header("Accept", "application/json")
+        .call()
+        .map_err(net)?;
+    if r.status() != 200 {
+        return Err(answer(r.status().as_u16(), "game lookup"));
+    }
+    let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+    v["data"][0]["rootPlaceId"]
+        .as_u64()
+        .ok_or_else(|| "Roblox sent no start place".into())
+}
+
+/// Every place of a game, (place ID, name).
 pub fn places_of(universe: u64) -> Result<Vec<(u64, String)>, String> {
     let mut out = Vec::new();
     let mut cursor = String::new();

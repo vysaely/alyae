@@ -329,20 +329,45 @@ fn presence(v: &Value) {
     }
 }
 
-/// The Servers window: the public servers of the place in `place` (an ID or a game link), as
-/// one `{"servers": [...]}` line, each `{"id", "players", "max", "ping", "fps"}`.
+/// The Servers window. Without `of`: every place of the game of `place` (an ID or a game link,
+/// the start place first), as `{"places": [{"id", "name"}]}`. With `of` (one of those): its
+/// servers, `{"servers": [{"id", "players", "max", "ping", "fps"}], "wait": s}`, `wait` being
+/// how long Roblox wants before the next list (3 a minute); or `{"error", "wait"}`.
 fn servers(v: &Value) {
     let input = v["place"].as_str().unwrap_or("");
     let place = place_id(input).unwrap_or_else(|| fail("put a place ID or game link in Place ID"));
-    let list = api::servers(place, 3).unwrap_or_else(|e| fail(&e));
-    let list: Vec<Value> = list
-        .into_iter()
-        .map(|s| {
-            json!({ "id": s.id, "players": s.players, "max": s.max, "ping": s.ping,
-                    "fps": (s.fps * 10.0).round() / 10.0 })
-        })
-        .collect();
-    say(json!({ "servers": list, "place": place.to_string() }));
+    let of = v["of"].as_str().and_then(|s| s.parse::<u64>().ok());
+    let Some(of) = of else {
+        // a game whose places Roblox does not list: the one place
+        let mut list = api::universe_of(place)
+            .and_then(api::places_of)
+            .unwrap_or_default();
+        if !list.iter().any(|(id, _)| *id == place) {
+            list.insert(0, (place, String::new()));
+        }
+        let list: Vec<Value> = list
+            .into_iter()
+            .map(|(id, name)| json!({ "id": id.to_string(), "name": name }))
+            .collect();
+        say(json!({ "places": list }));
+        return;
+    };
+    match api::servers(of) {
+        Ok((list, wait)) => {
+            let list: Vec<Value> = list
+                .into_iter()
+                .map(|s| {
+                    json!({ "id": s.id, "players": s.players, "max": s.max, "ping": s.ping,
+                            "fps": (s.fps * 10.0).round() / 10.0 })
+                })
+                .collect();
+            say(json!({ "servers": list, "wait": wait }));
+        }
+        Err((e, wait)) => {
+            say(json!({ "error": e, "wait": wait }));
+            std::process::exit(1);
+        }
+    }
 }
 
 fn main() {

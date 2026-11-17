@@ -72,6 +72,40 @@ fn kill(pid: u32) {
     }
 }
 
+/// Who goes first when the PC is busy: a main runs at high priority; an alt at below normal
+/// (not lower: an alt starved of CPU could lose its connection), with its memory marked low
+/// priority so Windows moves an alt's memory to the page file before a main's. Many alts made
+/// a main stutter at normal priority (owner, 2026-11-17).
+fn set_priority(pid: u32, alt: bool) {
+    use windows_sys::Win32::System::Threading::{
+        BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, MEMORY_PRIORITY_INFORMATION,
+        MEMORY_PRIORITY_LOW, PROCESS_SET_INFORMATION, ProcessMemoryPriority, SetPriorityClass,
+        SetProcessInformation,
+    };
+    // SAFETY: plain process handle use, a correctly sized memory priority struct
+    unsafe {
+        let h: HANDLE = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
+        if h.is_null() {
+            return;
+        }
+        if alt {
+            SetPriorityClass(h, BELOW_NORMAL_PRIORITY_CLASS);
+            let low = MEMORY_PRIORITY_INFORMATION {
+                MemoryPriority: MEMORY_PRIORITY_LOW,
+            };
+            SetProcessInformation(
+                h,
+                ProcessMemoryPriority,
+                (&raw const low).cast(),
+                std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+            );
+        } else {
+            SetPriorityClass(h, HIGH_PRIORITY_CLASS);
+        }
+        CloseHandle(h);
+    }
+}
+
 /// Asks Windows to move the client's memory it is not using right now out to the page file. An
 /// alt idling at a few frames a second keeps only a few hundred MB in RAM after it instead of
 /// gigabytes, so many more fit; what it touches again comes back on its own.
@@ -566,6 +600,7 @@ pub fn play(req: &Request) {
         std::thread::sleep(Duration::from_millis(500));
     };
     let _ = std::fs::write(pid_file(req), pid.to_string());
+    set_priority(pid, req.is_alt());
     // the client reads its settings while it starts: a next launch that changes them waits for
     // that (`wait_for_settings_read`), one that does not starts at once
     let _ = std::fs::write(client_started_file(req), pid.to_string());
@@ -608,6 +643,7 @@ pub fn resume(req: &Request) {
             let _ = tx.send(());
         }
     });
+    set_priority(pid, req.is_alt());
     status("running (found again)");
     watch_client(req, pid, &live, rx, req.get("memory") == "trim");
 }

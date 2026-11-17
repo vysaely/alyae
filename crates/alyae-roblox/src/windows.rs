@@ -93,9 +93,10 @@ fn trim_memory(pid: u32) {
 /// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute.
 const TRIM_EVERY: Duration = Duration::from_secs(60);
 
-/// RAM that must be free before another client starts: a client loading a big map takes
+/// RAM that must be free before another client starts (with up to 3 loading at once, room for
+/// the ones still growing): a client loading a big map takes
 /// gigabytes, and many loading at once froze a 32 GB PC (owner, 2026-11-17).
-const FREE_TO_START_MB: u64 = 4096;
+const FREE_TO_START_MB: u64 = 6144;
 /// Below this much free RAM, running alts set to trim do it at once instead of on the minute.
 const LOW_MEMORY_MB: u64 = 2048;
 
@@ -164,7 +165,7 @@ fn loaded(samples: &[u64]) -> bool {
 }
 
 const LOAD_SAMPLE: Duration = Duration::from_secs(2);
-const LOAD_LEAST: Duration = Duration::from_secs(12);
+const LOAD_LEAST: Duration = Duration::from_secs(8);
 const LOAD_STILL_MB: u64 = 40;
 /// A client still growing after this long is let be: the next starts anyway.
 const LOAD_MOST: Duration = Duration::from_secs(120);
@@ -172,7 +173,7 @@ const LOAD_MOST: Duration = Duration::from_secs(120);
 /// Waits until the new client has loaded its game (its memory stops growing), so clients load
 /// one after another instead of all at once.
 fn wait_until_loaded(pid: u32) {
-    status("loading");
+    // "running, loading" is said by the caller
     let until = Instant::now() + LOAD_MOST;
     let mut samples = Vec::new();
     while Instant::now() < until && alive(pid) {
@@ -356,6 +357,69 @@ pub fn graphics(req: &Request) {
     }
 }
 
+/// How many clients may load their game at the same time. Each loading client of a big map
+/// takes gigabytes until it is loaded and trimmed; the free-memory check before each start
+/// keeps the PC out of trouble, this keeps the start fast.
+const LOAD_SLOTS: usize = 3;
+
+/// One of `LOAD_SLOTS` named mutexes, held from a client's start until it has loaded. A
+/// helper that dies leaves its mutex abandoned, which the next waiter simply takes.
+struct LoadSlot(HANDLE);
+
+impl LoadSlot {
+    fn take() -> Self {
+        use windows_sys::Win32::Foundation::{WAIT_ABANDONED_0, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::WaitForMultipleObjects;
+        // SAFETY: named mutexes; a wait returns with exactly one of them owned
+        unsafe {
+            let slots: Vec<HANDLE> = (0..LOAD_SLOTS)
+                .map(|i| {
+                    let h = CreateMutexW(
+                        std::ptr::null(),
+                        0,
+                        wide(&format!("Local\\AlyaeRobloxLoad{i}")).as_ptr(),
+                    );
+                    if h.is_null() {
+                        fail("cannot create the loading lock");
+                    }
+                    h
+                })
+                .collect();
+            let mut r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, 0);
+            if r == windows_sys::Win32::Foundation::WAIT_TIMEOUT {
+                status(&format!("waiting: {LOAD_SLOTS} games are loading"));
+                r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, INFINITE);
+            }
+            let i = if r >= WAIT_ABANDONED_0 {
+                r - WAIT_ABANDONED_0
+            } else {
+                r - WAIT_OBJECT_0
+            } as usize;
+            for (k, h) in slots.iter().enumerate() {
+                if k != i {
+                    CloseHandle(*h);
+                }
+            }
+            LoadSlot(
+                slots
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| fail("loading lock")),
+            )
+        }
+    }
+}
+
+impl Drop for LoadSlot {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned by this thread
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
+}
+
 /// Held while one account's client starts: the next launch waits for it.
 struct LaunchTurn(HANDLE);
 
@@ -400,8 +464,9 @@ pub fn play(req: &Request) {
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonMutex").as_ptr());
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonEvent").as_ptr());
     }
-    // one client loads at a time, and only with room for it: the turn is held until it has
-    // loaded. Signing in comes after the wait, so the one-time ticket is fresh
+    // up to LOAD_SLOTS clients load at once, each only with room for it; one starts at a time
+    // (the turn). Signing in comes after the waits, so the one-time ticket is fresh
+    let slot = LoadSlot::take();
     let turn = LaunchTurn::take();
     wait_for_memory();
     status("signing in");
@@ -480,13 +545,16 @@ pub fn play(req: &Request) {
             let _ = tx.send(());
         }
     });
-    // the next client starts once this one has loaded (and, set to trim, been trimmed)
+    // the next client may start now; this one keeps its loading slot until it has loaded
+    // (and, set to trim, been trimmed)
+    drop(turn);
+    status("running, loading");
     wait_until_loaded(pid);
     let trim = req.get("memory") == "trim";
     if trim {
         trim_memory(pid);
     }
-    drop(turn);
+    drop(slot);
     status("running");
     // then every minute, and at once whenever RAM runs low
     let mut next_trim = Instant::now() + TRIM_EVERY;
@@ -535,7 +603,7 @@ pub fn reset(_req: &Request) {
 mod tests {
     use super::*;
 
-    /// A client has loaded once it had 12 s and its memory stopped growing; still growing, or
+    /// A client has loaded once it had 8 s and its memory stopped growing; still growing, or
     /// too early, it has not.
     #[test]
     fn loaded_when_memory_settles() {

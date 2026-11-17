@@ -6,7 +6,7 @@ use crate::store::{self, Account, Store, Values};
 use alyae_otp as totp;
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
@@ -57,6 +57,14 @@ pub struct App {
     watch_backoff: Duration,
     /// an action waiting in its form: (action id, accounts)
     form: Option<(String, Vec<String>)>,
+    /// an action for several accounts runs for one at a time: the ones still waiting
+    queue: VecDeque<Job>,
+    /// the queued account whose action runs now: (account, action, the action runs a game)
+    queue_current: Option<(String, String, bool)>,
+    /// the current queued action has ended (its Ended event came)
+    queue_ended: bool,
+    /// the next queued account starts no sooner than this
+    queue_next: Option<std::time::Instant>,
     /// accounts made by Add account or Import whose action (login window, check) is still running:
     /// kept when it works, dropped when it does not
     adding: HashSet<String>,
@@ -146,6 +154,10 @@ impl App {
             watch_error: None,
             watch_backoff: Duration::ZERO,
             form: None,
+            queue: VecDeque::new(),
+            queue_current: None,
+            queue_ended: false,
+            queue_next: None,
             adding: HashSet::new(),
             import_text: None,
             bookmark_name: String::new(),
@@ -362,6 +374,13 @@ impl App {
                     if ok && self.status.get(&account).is_some_and(|(_, bad)| !bad) {
                         self.status.remove(&account);
                     }
+                    if self
+                        .queue_current
+                        .as_ref()
+                        .is_some_and(|(a, act, _)| *a == account && *act == action)
+                    {
+                        self.queue_ended = true;
+                    }
                     if self.adding.remove(&account) {
                         self.finish_add(&account, ok);
                     }
@@ -407,58 +426,106 @@ impl App {
                 &serde_json::to_string(&all).unwrap_or_default(),
             );
         }
-        let mut started = 0;
-        for (index, id) in ids.into_iter().enumerate() {
-            // the account's place in the batch: helpers space requests out by it
-            let mut inputs = inputs.clone();
-            inputs.insert("index".into(), index.to_string());
-            if action.runs && self.running.contains_key(&id) {
-                continue;
+        // one account at a time, a few seconds apart: many sign-ins or joins at once from one
+        // connection get it refused by the game's servers (owner, 2026-11-17)
+        for id in ids {
+            self.queue.push_back(Job {
+                game: game.clone(),
+                action: action.id.clone(),
+                account: id,
+                inputs: inputs.clone(),
+            });
+        }
+        self.advance_queue();
+    }
+
+    /// Starts the next queued account once the one before it is done (a game: once it runs) and
+    /// the gap after it has passed.
+    fn advance_queue(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some((id, _, runs)) = self.queue_current.clone() {
+            // ended, or a game that is up and running
+            let done = self.queue_ended
+                || (runs && self.status.get(&id).is_some_and(|(t, _)| t == "running"));
+            if !done {
+                return;
             }
-            let Some(mut a) = self.accounts.iter().find(|a| a.id == id).cloned() else {
-                continue;
-            };
-            let ctx = self.ctx.clone();
-            match module::start(
-                &m,
-                &action,
-                &a,
-                &inputs,
-                &self.dir,
-                self.tx.clone(),
-                move || {
-                    if let Some(c) = &ctx {
-                        c.request_repaint();
-                    }
-                },
-            ) {
-                Ok(r) => {
-                    crate::log::line(&self.title(&a), &format!("{} started", action.label));
-                    started += 1;
-                    self.status.remove(&id);
-                    match r {
-                        Some(r) if action.runs => {
-                            self.running.insert(id.clone(), r);
-                        }
-                        Some(r) => self.tasks.push((id.clone(), r)),
-                        None => {}
-                    }
-                    if action.runs {
-                        a.last_used = store::now();
-                        self.save(&a);
-                    }
-                }
-                Err(e) => {
-                    self.say(format!("{}: {e}", self.title(&a)), true);
-                }
+            self.queue_current = None;
+            if !self.queue.is_empty() {
+                self.queue_next = Some(now + QUEUE_GAP);
             }
         }
-        if started > 1 {
-            self.say(
-                format!("{} started for {started} accounts", action.label),
-                false,
-            );
+        if let Some(at) = self.queue_next {
+            if now < at {
+                if let Some(c) = &self.ctx {
+                    c.request_repaint_after(at - now);
+                }
+                return;
+            }
+            self.queue_next = None;
         }
+        while let Some(job) = self.queue.pop_front() {
+            if let Some(runs) = self.start_job(&job) {
+                self.queue_current = Some((job.account, job.action, runs));
+                self.queue_ended = false;
+                return;
+            }
+        }
+    }
+
+    /// Starts `job`'s action; Some(whether it runs a game) when it started.
+    fn start_job(&mut self, job: &Job) -> Option<bool> {
+        let m = self.module(&job.game).cloned()?;
+        let action = m.actions.iter().find(|a| a.id == job.action).cloned()?;
+        let id = job.account.clone();
+        if action.runs && self.running.contains_key(&id) {
+            return None;
+        }
+        let mut a = self.accounts.iter().find(|a| a.id == id).cloned()?;
+        let ctx = self.ctx.clone();
+        match module::start(
+            &m,
+            &action,
+            &a,
+            &job.inputs,
+            &self.dir,
+            self.tx.clone(),
+            move || {
+                if let Some(c) = &ctx {
+                    c.request_repaint();
+                }
+            },
+        ) {
+            Ok(r) => {
+                crate::log::line(&self.title(&a), &format!("{} started", action.label));
+                self.status.remove(&id);
+                match r {
+                    Some(r) if action.runs => {
+                        self.running.insert(id.clone(), r);
+                    }
+                    Some(r) => self.tasks.push((id.clone(), r)),
+                    None => {}
+                }
+                if action.runs {
+                    a.last_used = store::now();
+                    self.save(&a);
+                }
+                if !self.queue.is_empty() {
+                    let left = self.queue.len();
+                    self.say(format!("{}: {} waiting", action.label, plural(left)), false);
+                }
+                Some(action.runs)
+            }
+            Err(e) => {
+                self.say(format!("{}: {e}", self.title(&a)), true);
+                None
+            }
+        }
+    }
+
+    /// Takes `ids` out of the queue (Stop on accounts still waiting).
+    fn unqueue(&mut self, ids: &[String]) {
+        self.queue.retain(|j| !ids.contains(&j.account));
     }
 }
 
@@ -466,6 +533,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll();
+        self.advance_queue();
         if let Some(e) = &self.fatal {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Alyae cannot open its accounts");
@@ -699,6 +767,17 @@ impl App {
                         path: crate::transfer::default_path().display().to_string(),
                         ..Default::default()
                     });
+                }
+                if !self.queue.is_empty()
+                    && ui
+                        .button(format!("Stop queue ({} waiting)", self.queue.len()))
+                        .on_hover_text(
+                            "The accounts still waiting do not start; the one running goes on",
+                        )
+                        .clicked()
+                {
+                    self.queue.clear();
+                    self.say("Queue stopped", false);
                 }
                 let total = self.accounts.iter().filter(|a| a.game == m.id).count();
                 let running = self
@@ -1055,7 +1134,12 @@ impl App {
         self.adding.extend(ids.iter().cloned());
         self.run_action(&flow.import_action, ids.clone());
         for id in ids {
-            if !self.tasks.iter().any(|(t, _)| *t == id) && !self.running.contains_key(&id) {
+            let queued = self.queue.iter().any(|j| j.account == id)
+                || self.queue_current.as_ref().is_some_and(|c| c.0 == id);
+            if !queued
+                && !self.tasks.iter().any(|(t, _)| *t == id)
+                && !self.running.contains_key(&id)
+            {
                 self.adding.remove(&id);
             }
         }
@@ -1596,7 +1680,10 @@ impl App {
     fn apply_menu(&mut self, m: &Module, ids: Vec<String>, choice: MenuChoice) {
         match choice {
             MenuChoice::Run(action) => self.start_action(m, &action, ids),
-            MenuChoice::Stop => self.stop(&ids),
+            MenuChoice::Stop => {
+                self.unqueue(&ids);
+                self.stop(&ids)
+            }
             MenuChoice::Copy(text) => {
                 let lines = text.lines().count();
                 if let Some(c) = &self.ctx {
@@ -2701,6 +2788,21 @@ fn copy_lines(accounts: &[&Account], name: Option<&str>, key: &str) -> String {
         .join("\n")
 }
 
+/// The wait between two accounts of a queued action.
+const QUEUE_GAP: Duration = if cfg!(test) {
+    Duration::from_millis(30)
+} else {
+    Duration::from_secs(5)
+};
+
+/// One account's turn in the queue: the action, its inputs, the account.
+struct Job {
+    game: String,
+    action: String,
+    account: String,
+    inputs: Values,
+}
+
 /// A box of the grid's height with `text` in it, outlined (AEAM's "1 selected").
 fn outlined(ui: &mut egui::Ui, text: &str) {
     let galley = ui.painter().layout_no_wrap(
@@ -3065,6 +3167,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(marker.exists(), "the confirmed action did not run");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// An action for several accounts runs for one at a time, in order.
+    #[test]
+    #[cfg(unix)]
+    fn several_accounts_run_one_at_a_time() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        let out = mods.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        // each run leaves a file named after the account, later than the one before it
+        // fill() quotes the value for the shell; the folder is a temp path without spaces
+        let command = format!("sleep 0.2; touch {}/{{login}}", out.display());
+        std::fs::write(
+            mods.join("t/module.toml"),
+            format!(
+                "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\n[[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
+                 [[action]]\nid = \"mark\"\nlabel = \"Mark\"\ncommand = '{command}'\n"
+            ),
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut ids = Vec::new();
+        for name in ["a1", "a2", "a3"] {
+            let mut a = h.state_mut().new_account(&m);
+            set_value(&mut a, "login", name, false);
+            assert!(h.state_mut().save(&a));
+            ids.push(a.id);
+        }
+        h.state_mut().run_action("mark", ids);
+        assert!(h.state().queue_current.is_some());
+        assert_eq!(h.state().queue.len(), 2, "more than one started at once");
+        for _ in 0..300 {
+            h.run();
+            if h.state().queue.is_empty() && h.state().queue_ended {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(h.state().queue.is_empty() && h.state().queue_ended);
+        let made = |n: &str| {
+            std::fs::metadata(out.join(n))
+                .and_then(|m| m.modified())
+                .unwrap()
+        };
+        assert!(made("a1") <= made("a2") && made("a2") <= made("a3"));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }

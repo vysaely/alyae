@@ -6,10 +6,6 @@
 use crate::api::{self, Session};
 use crate::{Request, fail, say, status};
 use serde_json::{Value, json};
-use std::time::Duration;
-
-/// Seconds between two accounts of one batch (AEAM used 3.5).
-const PACE: u64 = 4;
 
 fn session(req: &Request) -> Session {
     let cookie = req.cookie();
@@ -76,11 +72,7 @@ fn new_password() -> String {
 }
 
 pub fn run(action: &str, req: &Request) {
-    let index: u64 = req.input("index").parse().unwrap_or(0);
-    if index > 0 {
-        status(&format!("waiting {}s", index * PACE));
-        std::thread::sleep(Duration::from_secs(index * PACE));
-    }
+    // accounts of one batch come one at a time, spaced out by Alyae's queue
     let s = session(req);
     match action {
         "signout_all" => {

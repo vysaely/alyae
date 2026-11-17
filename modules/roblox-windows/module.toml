@@ -128,7 +128,7 @@ label = "Settings"
 [[action.input]]
 key = "fps"
 label = "FPS limit"
-choices = ["keep", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+choices = ["keep", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
 
 [[action.input]]
 key = "quality"

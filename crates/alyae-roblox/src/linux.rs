@@ -438,27 +438,16 @@ fn mem_available_mb(meminfo: &str) -> Option<u64> {
         .map(|kb| kb / 1024)
 }
 
-/// Waits (in the launch turn) until there is room for one more client.
+/// Waits (in the launch turn) until there is room for one more client, at most
+/// `crate::MEMORY_WAIT`.
 fn wait_for_memory() {
-    let mut said = 0;
-    loop {
-        let free = fs::read_to_string("/proc/meminfo")
+    let free = || {
+        fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|t| mem_available_mb(&t))
-            .unwrap_or(u64::MAX);
-        if free >= FREE_TO_START_MB {
-            return;
-        }
-        if free.abs_diff(said) >= 512 {
-            status(&format!(
-                "waiting for free memory ({:.1} GB free, {} GB needed)",
-                free as f64 / 1024.0,
-                FREE_TO_START_MB / 1024
-            ));
-            said = free;
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
+            .unwrap_or(u64::MAX)
+    };
+    crate::wait_for_memory(free, FREE_TO_START_MB);
 }
 
 /// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main

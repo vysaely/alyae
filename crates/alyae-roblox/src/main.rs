@@ -15,6 +15,7 @@ mod windows;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub struct Request {
     pub id: String,
@@ -65,6 +66,44 @@ pub fn say(v: Value) {
 
 pub fn status(text: &str) {
     say(json!({ "status": text }));
+}
+
+/// How long a launch waits for free memory before it gives up (meanwhile running alts trim).
+pub const MEMORY_WAIT: Duration = Duration::from_secs(180);
+
+/// How a launch that gave up for memory starts its error: Alyae stops the queue on it, as the
+/// accounts after would wait in vain too.
+pub const NO_MEMORY: &str = "not enough free memory for another Roblox";
+
+/// Waits until `free()` (MB) reaches `need` MB, saying so while it waits; gives up after
+/// `MEMORY_WAIT` with a `NO_MEMORY` error.
+pub fn wait_for_memory(free: impl Fn() -> u64, need: u64) {
+    let until = std::time::Instant::now() + MEMORY_WAIT;
+    let mut said = 0;
+    loop {
+        let now = free();
+        if now >= need {
+            return;
+        }
+        if std::time::Instant::now() >= until {
+            fail(&format!(
+                "{NO_MEMORY}: {:.1} GB free after {} min, {} GB needed. Close something or start fewer accounts",
+                now as f64 / 1024.0,
+                MEMORY_WAIT.as_secs() / 60,
+                need / 1024
+            ));
+        }
+        // a new line only when it changed by half a GB or more
+        if now.abs_diff(said) >= 512 {
+            status(&format!(
+                "waiting for free memory ({:.1} GB free, {} GB needed)",
+                now as f64 / 1024.0,
+                need / 1024
+            ));
+            said = now;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 pub fn fail(text: &str) -> ! {

@@ -359,12 +359,27 @@ impl App {
                         .find(|a| a.id == account)
                         .map(|a| self.title(a))
                         .unwrap_or_default();
-                    if is_rate_limit(&text)
-                        && self
-                            .queue_current
-                            .as_ref()
-                            .is_some_and(|(a, _, _)| *a == account)
-                    {
+                    let current = self
+                        .queue_current
+                        .as_ref()
+                        .is_some_and(|(a, _, _)| *a == account);
+                    // the computer has no room for more: the accounts after would only wait in
+                    // vain too, so the queue stops (the running ones keep running)
+                    if current && is_out_of_memory(&text) && !self.queue.is_empty() {
+                        let left = self.queue.len();
+                        self.queue.clear();
+                        self.queue_next = None;
+                        self.say(
+                            format!(
+                                "{name}: {text}. The queue stopped: {} not started",
+                                plural(left)
+                            ),
+                            true,
+                        );
+                        self.status.insert(account, (text, true));
+                        continue;
+                    }
+                    if is_rate_limit(&text) && current {
                         self.queue_backoff = (self.queue_backoff * 2)
                             .clamp(Duration::from_secs(120), Duration::from_secs(600));
                         if !self.queue.is_empty() {
@@ -3449,6 +3464,11 @@ fn set_value(a: &mut crate::store::Account, k: &str, v: &str, secret: bool) {
 }
 
 /// A helper's error saying the game's servers refused for too many requests.
+/// A helper that gave up starting for lack of memory ("not enough free memory ...").
+fn is_out_of_memory(error: &str) -> bool {
+    error.to_lowercase().contains("not enough free memory")
+}
+
 fn is_rate_limit(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("rate limit") || e.contains("too many requests") || e.contains("429")
@@ -3729,7 +3749,22 @@ mod tests {
         .unwrap();
         h.state_mut().poll();
         assert_eq!(h.state().queue_backoff, Duration::ZERO);
-        h.state_mut().queue.clear();
+        // no memory for another game: the waiting accounts are dropped, not started
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "play".into(),
+            account: "waiting".into(),
+            inputs: Values::default(),
+        });
+        h.state_mut().queue_current = Some((a.id.clone(), "play".into(), true));
+        tx.send(Event::Error {
+            account: a.id.clone(),
+            text: "not enough free memory for another Roblox: 3.1 GB free after 3 min, 6 GB needed"
+                .into(),
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert!(h.state().queue.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

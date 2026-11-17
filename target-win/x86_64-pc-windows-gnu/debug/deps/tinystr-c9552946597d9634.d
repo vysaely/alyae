@@ -1,0 +1,12 @@
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/tinystr-c9552946597d9634.d: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/macros.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/ascii.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/asciibyte.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/error.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/int_ops.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/unvalidated.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/ule.rs
+
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/libtinystr-c9552946597d9634.rmeta: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/macros.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/ascii.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/asciibyte.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/error.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/int_ops.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/unvalidated.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/ule.rs
+
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/lib.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/macros.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/ascii.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/asciibyte.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/error.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/int_ops.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/unvalidated.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.5/src/ule.rs:

@@ -1,0 +1,11 @@
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/utf8_iter-7a58c1e582cc797b.d: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/basic.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/handler.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/indices.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/macros.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/report.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/str.rs
+
+/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/deps/libutf8_iter-7a58c1e582cc797b.rmeta: /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/lib.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/basic.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/handler.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/indices.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/macros.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/report.rs /home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/str.rs
+
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/lib.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/basic.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/handler.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/indices.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/macros.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/report.rs:
+/home/vysaely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8_iter-1.1.0/src/str.rs:

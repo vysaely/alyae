@@ -1,0 +1,3 @@
+cargo:rerun-if-changed=alyae.rc
+cargo:rerun-if-changed=../../assets/alyae.ico
+cargo:rustc-link-arg-bins=/home/vysaely/Projects/alyae/target-win/x86_64-pc-windows-gnu/debug/build/alyae-5d85f10937b1d2e6/out/alyae.lib

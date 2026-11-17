@@ -177,6 +177,19 @@ fn web_view<'a>(
     view
 }
 
+/// The `.ROBLOSECURITY` cookie for every roblox.com host (www, apis, users...). wry passes
+/// `Cookie::domain()` to WebKitGTK and WebView2, and the cookie crate strips one leading dot from
+/// it: `.roblox.com` arrived as `roblox.com`, a cookie for that host alone, so www.roblox.com
+/// opened signed out. Given `..roblox.com`, `domain()` is `.roblox.com`, a cookie for all of them.
+fn session_cookie_for(value: String) -> wry::cookie::Cookie<'static> {
+    wry::cookie::Cookie::build((".ROBLOSECURITY", value))
+        .domain("..roblox.com")
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .build()
+}
+
 /// Roblox's site signed in as the account, from its saved cookie.
 fn browse(username: &str, cookie: String) {
     let event_loop = EventLoopBuilder::new().build();
@@ -190,12 +203,7 @@ fn browse(username: &str, cookie: String) {
         b.with_url("about:blank")
             .with_navigation_handler(|url| may_open(&url))
     });
-    let c = wry::cookie::Cookie::build((".ROBLOSECURITY", cookie.clone()))
-        .domain(".roblox.com")
-        .path("/")
-        .secure(true)
-        .http_only(true)
-        .build();
+    let c = session_cookie_for(cookie.clone());
     if let Err(e) = webview.set_cookie(&c) {
         println!(
             "{}",
@@ -344,6 +352,11 @@ fn remove_old_profiles(temp: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_cookie_covers_every_roblox_host() {
+        assert_eq!(session_cookie_for("v".into()).domain(), Some(".roblox.com"));
+    }
 
     #[test]
     fn only_roblox_gets_the_login() {

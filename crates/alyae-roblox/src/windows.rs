@@ -133,25 +133,10 @@ fn working_set_mb(pid: u32) -> Option<u64> {
     }
 }
 
-/// Waits (in the launch turn) until there is room for one more client.
+/// Waits (in the launch turn) until there is room for one more client, at most
+/// `crate::MEMORY_WAIT`.
 fn wait_for_memory() {
-    let mut said = 0;
-    loop {
-        let free = free_mb();
-        if free >= FREE_TO_START_MB {
-            return;
-        }
-        // a new line only when it changed by half a GB or more
-        if free.abs_diff(said) >= 512 {
-            status(&format!(
-                "waiting for free memory ({:.1} GB free, {} GB needed)",
-                free as f64 / 1024.0,
-                FREE_TO_START_MB / 1024
-            ));
-            said = free;
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
+    crate::wait_for_memory(free_mb, FREE_TO_START_MB);
 }
 
 /// Whether a client whose memory was `samples` (MB, one every `LOAD_SAMPLE`) has finished

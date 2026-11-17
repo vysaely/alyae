@@ -70,6 +70,15 @@ hint = "small: an 800x600 window; empty: the role's (main: Roblox's own, alt: sm
 default_by = "role"
 defaults = { alt = "small" }
 
+[[field]]
+key = "memory"
+label = "Memory"
+kind = "choice"
+choices = ["trim", "normal"]
+hint = "trim: every minute Windows moves the game's idle memory to the page file (an alt keeps ~0.6 GB in RAM instead of ~2.6; wants a big page file); empty: the role's (alt: trim)"
+default_by = "role"
+defaults = { alt = "trim" }
+
 [[action]]
 id = "play"
 label = "Join Server"

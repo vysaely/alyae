@@ -16,9 +16,10 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, INFINITE, OpenProcess, PROCESS_TERMINATE, ReleaseMutex, TerminateProcess,
-    WaitForSingleObject,
+    CreateMutexW, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+    PROCESS_TERMINATE, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -70,6 +71,27 @@ fn kill(pid: u32) {
         }
     }
 }
+
+/// Asks Windows to move the client's memory it is not using right now out to the page file. An
+/// alt idling at a few frames a second keeps only a few hundred MB in RAM after it instead of
+/// gigabytes, so many more fit; what it touches again comes back on its own.
+fn trim_memory(pid: u32) {
+    // SAFETY: plain process handle use
+    unsafe {
+        let h: HANDLE = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA,
+            0,
+            pid,
+        );
+        if !h.is_null() {
+            K32EmptyWorkingSet(h);
+            CloseHandle(h);
+        }
+    }
+}
+
+/// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute.
+const TRIM_EVERY: Duration = Duration::from_secs(60);
 
 fn enc(s: &str) -> String {
     s.bytes()
@@ -363,10 +385,17 @@ pub fn play(req: &Request) {
             let _ = tx.send(());
         }
     });
+    // the first trim once the game has loaded, then every minute
+    let trim = req.get("memory") == "trim";
+    let mut next_trim = Instant::now() + Duration::from_secs(45);
     while alive(pid) {
         if rx.try_recv().is_ok() {
             kill(pid);
             break;
+        }
+        if trim && Instant::now() >= next_trim {
+            trim_memory(pid);
+            next_trim = Instant::now() + TRIM_EVERY;
         }
         std::thread::sleep(Duration::from_millis(500));
     }

@@ -294,6 +294,11 @@ pub struct Module {
     /// a helper action run (and waited for) before an account is removed, to delete its files
     #[serde(default)]
     pub on_remove: String,
+    /// a helper action run for every account when Alyae opens, as a running game's action:
+    /// reattaches to the account's game still running from before (Alyae closing leaves the
+    /// games running), or ends at once when there is none
+    #[serde(default)]
+    pub resume: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,

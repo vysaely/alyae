@@ -476,6 +476,10 @@ fn main() {
         "reset" => windows::reset(&req),
         #[cfg(target_os = "linux")]
         "forget" => linux::forget(&req),
+        #[cfg(target_os = "linux")]
+        "resume" => linux::resume(&req),
+        #[cfg(windows)]
+        "resume" => windows::resume(&req),
         "signout_all" | "logout" | "change_password" | "unblock_all" | "friends" | "privacy" => {
             tools::run(&action, &req)
         }

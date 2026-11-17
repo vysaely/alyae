@@ -585,14 +585,49 @@ pub fn play(req: &Request) {
     }
     drop(slot);
     status("running");
-    // then every minute, and at once whenever RAM runs low or a launch waits for memory
+    watch_client(req, pid, &live, rx, trim);
+}
+
+/// The Resume action, when Alyae opens: if this account's client still runs from before
+/// (Alyae was closed, the game was left running), watch it again as after a launch: Stop
+/// works, an alt keeps being trimmed, its settings are taken back when it closes. No client:
+/// ends at once, saying nothing.
+pub fn resume(req: &Request) {
+    let Some(pid) = std::fs::read_to_string(pid_file(req))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|p| alive(*p))
+    else {
+        return;
+    };
+    let live = live_settings().unwrap_or_else(|| fail("LOCALAPPDATA is not set"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if wait_for_stop() {
+            let _ = tx.send(());
+        }
+    });
+    status("running (found again)");
+    watch_client(req, pid, &live, rx, req.get("memory") == "trim");
+}
+
+/// While the client runs: a stop from Alyae ends it; set to `trim`, its memory is trimmed every
+/// minute, and at once whenever RAM runs low or a launch waits for memory. After it closed, its
+/// settings are taken back.
+fn watch_client(
+    req: &Request,
+    pid: u32,
+    live: &Path,
+    stop: std::sync::mpsc::Receiver<()>,
+    trim: bool,
+) {
     let ask = trim_now_file(req);
     let mut next_trim = Instant::now() + TRIM_EVERY;
     let mut last_trim = Instant::now();
     let mut trimmed_at = SystemTime::now();
     let mut next_check = Instant::now();
     while alive(pid) {
-        if rx.try_recv().is_ok() {
+        if stop.try_recv().is_ok() {
             kill(pid);
             break;
         }
@@ -613,7 +648,7 @@ pub fn play(req: &Request) {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    settings_after_exit(req, &live);
+    settings_after_exit(req, live);
     let _ = std::fs::remove_file(pid_file(req));
 }
 

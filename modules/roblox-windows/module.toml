@@ -4,6 +4,8 @@ name = "Roblox Windows"
 platform = "windows"
 description = "Several accounts at once, join servers, 2FA"
 helper = "alyae-roblox"
+# when Alyae opens, each account's game still running from before counts as running again
+resume = "resume"
 title_field = "username"
 
 # Add account opens Roblox's login page and adds the account once it signs in; Import takes

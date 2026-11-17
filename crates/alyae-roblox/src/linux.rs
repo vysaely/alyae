@@ -165,19 +165,57 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
 
 /// Whether this account's Mocktail already runs (its program path names the account).
 fn already_running(program: &Path) -> bool {
+    running_pid(program).is_some()
+}
+
+/// The process ID of the running `program` (by its file name), if one runs.
+fn running_pid(program: &Path) -> Option<i32> {
     let want = program
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
-    let Ok(procs) = fs::read_dir("/proc") else {
-        return false;
-    };
-    procs.flatten().any(|p| {
-        fs::read(p.path().join("cmdline")).is_ok_and(|c| {
-            let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
-            Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name() == Some(want.as_os_str())
-        })
+    fs::read_dir("/proc").ok()?.flatten().find_map(|p| {
+        let pid = p.file_name().to_str()?.parse::<i32>().ok()?;
+        let c = fs::read(p.path().join("cmdline")).ok()?;
+        let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
+        (Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name() == Some(want.as_os_str()))
+            .then_some(pid)
     })
+}
+
+/// The Resume action, when Alyae opens: if this account's game still runs from before (Alyae
+/// was closed, the game was left running), it counts as running again until it ends, and Stop
+/// ends it. No game: ends at once, saying nothing.
+pub fn resume(req: &Request) {
+    let Some(m) = find_mocktail() else { return };
+    let Some(pid) = running_pid(&m.lib.join(program_name(req))) else {
+        return;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if wait_for_stop() {
+            let _ = tx.send(());
+        }
+    });
+    status("running (found again)");
+    let alive = || Path::new(&format!("/proc/{pid}")).exists();
+    while alive() {
+        if rx.try_recv().is_ok() {
+            status("stopping");
+            // SAFETY: plain signal to a process ID
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            let until = Instant::now() + Duration::from_secs(4);
+            while Instant::now() < until && alive() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if alive() {
+                // SAFETY: plain signal to a process ID
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 use std::os::unix::ffi::OsStrExt;
 

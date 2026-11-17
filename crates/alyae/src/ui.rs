@@ -34,6 +34,8 @@ pub struct App {
     /// the action inputs (place, server ...) per game
     inputs: HashMap<String, Values>,
     running: HashMap<String, Running>,
+    /// resume helpers still looking for their account's game: running once one says so
+    resuming: HashMap<String, Running>,
     /// short helper actions (Refresh ...): not "running", only waited for
     tasks: Vec<(String, Running)>,
     status: HashMap<String, (String, bool)>,
@@ -167,6 +169,7 @@ impl App {
             shown_secrets: HashSet::new(),
             inputs: HashMap::new(),
             running: HashMap::new(),
+            resuming: HashMap::new(),
             tasks: Vec::new(),
             status: HashMap::new(),
             message: None,
@@ -223,6 +226,7 @@ impl App {
                 if !problems.is_empty() {
                     app.say(problems.join("; "), true);
                 }
+                app.resume_games();
             }
             Err(e) => app.fatal = Some(e),
         }
@@ -231,6 +235,52 @@ impl App {
 
     fn module(&self, id: &str) -> Option<&Module> {
         self.modules.iter().find(|m| m.id == id)
+    }
+
+    /// Whether `action` is the resume action of `account`'s game.
+    fn is_resume(&self, account: &str, action: &str) -> bool {
+        self.accounts
+            .iter()
+            .find(|a| a.id == account)
+            .and_then(|a| self.module(&a.game))
+            .is_some_and(|m| !m.resume.is_empty() && m.resume == action)
+    }
+
+    /// When Alyae opens: every account's game still running from before (closing Alyae leaves
+    /// the games running) is taken back as running, through its module's resume action. The
+    /// helper ends at once for an account with no game.
+    fn resume_games(&mut self) {
+        let list: Vec<(Module, Account)> = self
+            .accounts
+            .iter()
+            .filter_map(|a| {
+                let m = self.module(&a.game)?;
+                (!m.resume.is_empty()).then(|| (m.clone(), a.clone()))
+            })
+            .collect();
+        for (m, a) in list {
+            let Ok(action) = serde_json::from_value::<module::Action>(serde_json::json!({
+                "id": m.resume, "label": "Resume", "runs": true
+            })) else {
+                continue;
+            };
+            let ctx = self.ctx.clone();
+            if let Ok(Some(r)) = module::start(
+                &m,
+                &action,
+                &a,
+                &Values::default(),
+                &self.dir,
+                self.tx.clone(),
+                move || {
+                    if let Some(c) = &ctx {
+                        c.request_repaint();
+                    }
+                },
+            ) {
+                self.resuming.insert(a.id.clone(), r);
+            }
+        }
     }
 
     fn say(&mut self, text: impl Into<String>, bad: bool) {
@@ -349,6 +399,12 @@ impl App {
                     }
                 }
                 Event::Status { account, text } => {
+                    // a resume helper found the account's game: it runs again
+                    if text.starts_with("running")
+                        && let Some(r) = self.resuming.remove(&account)
+                    {
+                        self.running.insert(account.clone(), r);
+                    }
                     crate::log::line(&self.name_of(&account), &text);
                     self.status.insert(account, (text, false));
                 }
@@ -459,10 +515,22 @@ impl App {
                     action,
                     ok,
                 } => {
-                    crate::log::line(
-                        &self.name_of(&account),
-                        &format!("{action} ended{}", if ok { "" } else { " with an error" }),
-                    );
+                    // a resume that found no game ends quietly
+                    let quiet = ok && self.is_resume(&account, &action);
+                    if self
+                        .resuming
+                        .get(&account)
+                        .is_some_and(|r| r.action == action)
+                        && let Some(mut r) = self.resuming.remove(&account)
+                    {
+                        let _ = r.child.wait();
+                    }
+                    if !quiet {
+                        crate::log::line(
+                            &self.name_of(&account),
+                            &format!("{action} ended{}", if ok { "" } else { " with an error" }),
+                        );
+                    }
                     if self
                         .running
                         .get(&account)

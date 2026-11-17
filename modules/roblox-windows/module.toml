@@ -226,6 +226,11 @@ label = "Sign out everywhere"
 confirm = "Every other session of these accounts ends (other PCs, phones, browsers). Alyae keeps a new cookie."
 
 [[action]]
+id = "reset"
+label = "Reset files"
+confirm = "Roblox's downloaded-asset cache and logs are removed and made again on the next launch. On Windows every account shares them, so this is for all accounts, and every Roblox must be closed. Kept: the installed Roblox, its settings, the saved cookies. Fixes missing animations or textures when the cache is at fault."
+
+[[action]]
 id = "logout"
 label = "Log out"
 confirm = "The saved cookie stops working; the account needs to sign in again to play."

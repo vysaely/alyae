@@ -333,3 +333,21 @@ pub fn play(req: &Request) {
     settings_after_exit(req, &live);
     let _ = std::fs::remove_file(pid_file(req));
 }
+
+/// The Reset files button. Every client on Windows shares Roblox's files, so this is for all
+/// accounts at once and only while no client runs: the downloaded-asset cache (`%TEMP%\Roblox`)
+/// and the logs (`%LOCALAPPDATA%\Roblox\logs`) go and are made again on the next launch. Kept:
+/// the installed client, the settings file, each account's own settings in Alyae's folder.
+pub fn reset(_req: &Request) {
+    if !clients().is_empty() {
+        fail("close every Roblox first: on Windows the accounts share these files");
+    }
+    let mut freed = 0;
+    if let Some(t) = std::env::var_os("TEMP") {
+        freed += crate::files::remove(&Path::new(&t).join("Roblox"));
+    }
+    if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+        freed += crate::files::remove(&Path::new(&l).join("Roblox").join("logs"));
+    }
+    status(&format!("files reset, {} MB freed", freed / 1_000_000));
+}

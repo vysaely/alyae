@@ -92,6 +92,10 @@ pub struct App {
     /// the Place ID text the game's places were looked up for, and those places (id, name)
     servers_for: String,
     servers_places: Vec<(String, String)>,
+    /// the game's start place: the others' Join is off unless `servers_direct` (most games
+    /// refuse a direct join to a sub place: error 524)
+    servers_root: Option<String>,
+    servers_direct: bool,
     /// each place's servers and when they came; the places are asked in turn, one list at a
     /// time no sooner than `servers_next` (the game allows only a few lists a minute)
     servers_rows: HashMap<String, (Vec<module::ServerRow>, std::time::Instant)>,
@@ -130,6 +134,11 @@ enum Loaded {
 }
 
 const NO_GROUP: &str = "Ungrouped";
+
+/// Why a sub place's server has no Join.
+const SUB_PLACE: &str = "Most games let players join only their start place and send them to the \
+    others themselves: Roblox refuses a direct join with error 524. Join the start place, or \
+    Follow someone in this server. Tick \"Join sub places directly\" for a game that allows it.";
 
 impl App {
     pub fn new(
@@ -192,6 +201,8 @@ impl App {
             servers_child: None,
             servers_for: String::new(),
             servers_places: Vec::new(),
+            servers_root: None,
+            servers_direct: false,
             servers_rows: HashMap::new(),
             servers_next: None,
             servers_turn: 0,
@@ -410,8 +421,9 @@ impl App {
                         .map_or(5, |s| s.every);
                     let after = |wait: u64| Some(now + Duration::from_secs(wait.max(least)));
                     match answer {
-                        module::ServersAnswer::Places(places) => {
+                        module::ServersAnswer::Places { places, root } => {
                             self.servers_places = places;
+                            self.servers_root = root;
                             self.servers_turn = 0;
                             self.servers_error = None;
                             self.servers_next = None;
@@ -2298,6 +2310,7 @@ impl App {
             // another game, or another place of this one: keep what is known of this game
             if !self.servers_places.iter().any(|(id, _)| *id == place) {
                 self.servers_places.clear();
+                self.servers_root = None;
                 self.servers_rows.clear();
                 self.servers_filter = None;
             }
@@ -2387,6 +2400,7 @@ impl App {
             list.sort_by(|a, b| a.ping.cmp(&b.ping).then(b.players.cmp(&a.players)));
         }
         let several = self.servers_places.len() > 1;
+        let root = self.servers_root.clone();
         let names: HashMap<String, String> = self
             .servers_places
             .iter()
@@ -2471,9 +2485,14 @@ impl App {
                     .weak()
                     .small(),
                 );
+                if several && root.is_some() {
+                    ui.checkbox(&mut self.servers_direct, "Join sub places directly")
+                        .on_hover_text(SUB_PLACE);
+                }
                 if let Some(e) = &self.servers_error {
                     ui.colored_label(ui.visuals().error_fg_color, e);
                 }
+                let direct = self.servers_direct;
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
@@ -2508,7 +2527,11 @@ impl App {
                                         } else {
                                             "Join".to_string()
                                         };
-                                        if ui
+                                        let sub = root.as_ref().is_some_and(|p| *p != r.place);
+                                        if sub && !direct {
+                                            ui.add_enabled(false, egui::Button::new("Sub place"))
+                                                .on_disabled_hover_text(SUB_PLACE);
+                                        } else if ui
                                             .add_enabled(can_join, egui::Button::new(label))
                                             .on_disabled_hover_text(
                                                 "Choose accounts in the list first",
@@ -3722,10 +3745,13 @@ mod tests {
         h.state_mut().servers_open = true;
         let tx = h.state().tx.clone();
         // the game's places, then one sub place's servers
-        tx.send(Event::Servers(module::ServersAnswer::Places(vec![
-            ("100".into(), "Start".into()),
-            ("200".into(), "Khei".into()),
-        ])))
+        tx.send(Event::Servers(module::ServersAnswer::Places {
+            places: vec![
+                ("100".into(), "Start".into()),
+                ("200".into(), "Khei".into()),
+            ],
+            root: Some("100".into()),
+        }))
         .unwrap();
         h.state_mut().poll();
         let line = r#"{"servers": [{"id": "11111111-2222-3333-4444-555555555555", "players": 9, "max": 12, "ping": 84, "fps": 59.9}], "wait": 20}"#;
@@ -3741,6 +3767,11 @@ mod tests {
         h.run();
         assert!(h.query_by_label("9/12").is_some());
         assert!(h.query_by_label("Khei").is_some());
+        // a sub place's server: no Join (error 524) until direct joins are ticked
+        assert!(h.query_by_label("Sub place").is_some());
+        h.state_mut().servers_direct = true;
+        h.run();
+        assert!(h.query_by_label("Sub place").is_none());
         let failed = module::servers_answer(
             &serde_json::json!({ "error": "Roblox is rate limiting: try again in a minute", "wait": 38 }),
             Some("100"),

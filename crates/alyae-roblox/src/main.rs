@@ -339,17 +339,26 @@ fn servers(v: &Value) {
     let of = v["of"].as_str().and_then(|s| s.parse::<u64>().ok());
     let Some(of) = of else {
         // a game whose places Roblox does not list: the one place
-        let mut list = api::universe_of(place)
-            .and_then(api::places_of)
+        let universe = api::universe_of(place).ok();
+        let mut list = universe
+            .map(api::places_of)
+            .and_then(Result::ok)
             .unwrap_or_default();
         if !list.iter().any(|(id, _)| *id == place) {
             list.insert(0, (place, String::new()));
         }
+        let root = universe.and_then(|u| api::root_place(u).ok());
+        // the start place first
+        list.sort_by_key(|(id, _)| Some(*id) != root);
         let list: Vec<Value> = list
             .into_iter()
             .map(|(id, name)| json!({ "id": id.to_string(), "name": name }))
             .collect();
-        say(json!({ "places": list }));
+        let mut out = json!({ "places": list });
+        if let Some(r) = root {
+            out["root"] = json!(r.to_string());
+        }
+        say(out);
         return;
     };
     match api::servers(of) {

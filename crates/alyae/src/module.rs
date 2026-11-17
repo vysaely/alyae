@@ -137,7 +137,7 @@ impl Watch {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Servers {
     /// the helper action that lists them. Gets `{"place": box, "data_dir"}` and answers
-    /// `{"places": [{"id", "name"}]}`; gets `{"place": box, "of": place id, "data_dir"}` and
+    /// `{"places": [{"id", "name"}], "root": start place}`; gets `{"place": box, "of": place id, "data_dir"}` and
     /// answers `{"servers": [{"id", "players", "max", "ping", "fps"}], "wait": s}` (or
     /// `{"error", "wait"}`), `wait` being how long the game wants before the next list
     pub action: String,
@@ -155,8 +155,12 @@ fn servers_every() -> u64 {
 /// What one run of the servers action answered.
 #[derive(Debug)]
 pub enum ServersAnswer {
-    /// the game's places: (id, name)
-    Places(Vec<(String, String)>),
+    /// the game's places, (id, name), and its start place when known (most games refuse a
+    /// direct join to any other)
+    Places {
+        places: Vec<(String, String)>,
+        root: Option<String>,
+    },
     /// one place's servers, and the seconds to wait before the next list
     List {
         place: String,
@@ -244,7 +248,8 @@ pub fn servers_answer(v: &serde_json::Value, of: Option<&str>) -> Option<Servers
                 ))
             })
             .collect();
-        return Some(ServersAnswer::Places(places));
+        let root = v["root"].as_str().map(String::from);
+        return Some(ServersAnswer::Places { places, root });
     }
     let list = v.get("servers")?;
     Some(

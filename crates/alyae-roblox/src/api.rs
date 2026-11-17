@@ -99,17 +99,75 @@ pub fn servers_page(v: &Value) -> (Vec<Server>, Option<String>) {
     (list, next)
 }
 
-/// The place's public servers, fullest first: up to `pages` pages of 100, asked without a
-/// cookie (no account is tied to the look). A rate limit after the first page keeps what came.
-pub fn servers(place: u64, pages: usize) -> Result<Vec<Server>, String> {
+/// Seconds to wait before the next server-list request, from Roblox's rate-limit headers
+/// (`x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`): the rest of the window shared
+/// out over the requests left in it, all of it when none are left. Roblox allows 3 a minute.
+pub fn pace(remaining: Option<u64>, reset: Option<u64>, retry_after: Option<u64>) -> u64 {
+    let reset = reset.unwrap_or(20);
+    let wait = match remaining {
+        Some(0) => reset,
+        Some(n) => reset.div_ceil(n + 1),
+        None => 20,
+    };
+    wait.max(retry_after.unwrap_or(0)).clamp(2, 120)
+}
+
+/// The fullest 100 public servers of one place, asked without a cookie (no account is tied to
+/// the look), and the seconds to wait before asking again; or why not, with the wait.
+pub fn servers(place: u64) -> Result<(Vec<Server>, u64), (String, u64)> {
+    let url = format!(
+        "https://games.roblox.com/v1/games/{place}/servers/Public?sortOrder=Desc&excludeFullGames=false&limit=100"
+    );
+    let mut r = agent()
+        .get(&url)
+        .header("Accept", "application/json")
+        .call()
+        .map_err(|e| (net(e), 20))?;
+    let num =
+        |name: &str| header(&r, name).and_then(|v| v.split(',').next()?.trim().parse::<u64>().ok());
+    let wait = pace(
+        num("x-ratelimit-remaining"),
+        num("x-ratelimit-reset"),
+        num("retry-after"),
+    );
+    if r.status() != 200 {
+        return Err((answer(r.status().as_u16(), "server list"), wait));
+    }
+    let v: Value = r
+        .body_mut()
+        .read_json()
+        .map_err(|e| (e.to_string(), wait))?;
+    Ok((servers_page(&v).0, wait))
+}
+
+/// The game (universe) a place belongs to.
+pub fn universe_of(place: u64) -> Result<u64, String> {
+    let mut r = agent()
+        .get(&format!(
+            "https://apis.roblox.com/universes/v1/places/{place}/universe"
+        ))
+        .header("Accept", "application/json")
+        .call()
+        .map_err(net)?;
+    if r.status() != 200 {
+        return Err(answer(r.status().as_u16(), "game lookup"));
+    }
+    let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+    v["universeId"]
+        .as_u64()
+        .ok_or_else(|| "Roblox knows no game with this place".into())
+}
+
+/// Every place of a game, (place ID, name), the start place first.
+pub fn places_of(universe: u64) -> Result<Vec<(u64, String)>, String> {
     let mut out = Vec::new();
-    let mut cursor: Option<String> = None;
-    for page in 0..pages {
+    let mut cursor = String::new();
+    for _ in 0..5 {
         let mut url = format!(
-            "https://games.roblox.com/v1/games/{place}/servers/Public?sortOrder=Desc&excludeFullGames=false&limit=100"
+            "https://develop.roblox.com/v1/universes/{universe}/places?isUniverseCreation=false&limit=100&sortOrder=Asc"
         );
-        if let Some(c) = &cursor {
-            url += &format!("&cursor={c}");
+        if !cursor.is_empty() {
+            url += &format!("&cursor={cursor}");
         }
         let mut r = agent()
             .get(&url)
@@ -117,16 +175,16 @@ pub fn servers(place: u64, pages: usize) -> Result<Vec<Server>, String> {
             .call()
             .map_err(net)?;
         if r.status() != 200 {
-            if page > 0 && r.status() == 429 {
-                break;
-            }
-            return Err(answer(r.status().as_u16(), "server list"));
+            return Err(answer(r.status().as_u16(), "place list"));
         }
         let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
-        let (list, next) = servers_page(&v);
-        out.extend(list);
-        match next {
-            Some(n) => cursor = Some(n),
+        for p in v["data"].as_array().into_iter().flatten() {
+            if let Some(id) = p["id"].as_u64() {
+                out.push((id, p["name"].as_str().unwrap_or("").to_string()));
+            }
+        }
+        match v["nextPageCursor"].as_str().filter(|c| !c.is_empty()) {
+            Some(c) => cursor = c.to_string(),
             None => break,
         }
     }
@@ -490,6 +548,16 @@ mod tests {
         assert_eq!((list[0].players, list[0].max, list[0].ping), (9, 12, 84));
         let (_, end) = servers_page(&json!({ "data": [], "nextPageCursor": null }));
         assert_eq!(end, None);
+    }
+
+    /// 3 requests a minute: the window shared out, all of it once none are left.
+    #[test]
+    fn server_list_pace() {
+        assert_eq!(pace(Some(2), Some(60), None), 20);
+        assert_eq!(pace(Some(1), Some(40), None), 20);
+        assert_eq!(pace(Some(0), Some(38), Some(5)), 38);
+        assert_eq!(pace(None, None, Some(5)), 20);
+        assert_eq!(pace(Some(5), Some(1), None), 2);
     }
 
     #[test]

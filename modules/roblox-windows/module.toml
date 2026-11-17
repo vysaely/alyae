@@ -116,13 +116,13 @@ label = "Open in browser"
 # online status of every account, every 15 s while the window is shown and focused; the helper
 # gets only the user IDs and asks Roblox without a cookie, so no account vouches for the others
 # (adding secret = "cookie" makes each account ask about itself only, with its own cookie)
-# the Servers button: the public servers of the place in Place ID, listed again every 30 s while
-# its window is open (asked without a cookie); a server's Join fills in Job ID and joins it
+# the Servers button: the public servers of every place of the game in Place ID (sub places too),
+# asked without a cookie, one place at a time as fast as Roblox allows (3 lists a minute) while
+# its window is open; a server's Join joins it in its own place
 [servers]
 action = "servers"
 place = "place"
 server = "server"
-every = 30
 
 [watch]
 action = "presence"

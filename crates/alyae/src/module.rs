@@ -131,27 +131,50 @@ impl Watch {
     }
 }
 
-/// `[servers]`: the Servers window, the game's public servers of the place in the primary
-/// action's `place` box; a row's Join runs the primary action with its id in the `server` box.
+/// `[servers]`: the Servers window, the public servers of every place of the game whose place
+/// is in the primary action's `place` box; a row's Join runs the primary action with that
+/// server's place in `place` and its id in the `server` box.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Servers {
-    /// the helper action that lists them: gets `{"place": ..., "data_dir": ...}`, answers one
-    /// `{"servers": [{"id", "players", "max", "ping", "fps"}]}` line (or `{"error"}`)
+    /// the helper action that lists them. Gets `{"place": box, "data_dir"}` and answers
+    /// `{"places": [{"id", "name"}]}`; gets `{"place": box, "of": place id, "data_dir"}` and
+    /// answers `{"servers": [{"id", "players", "max", "ping", "fps"}], "wait": s}` (or
+    /// `{"error", "wait"}`), `wait` being how long the game wants before the next list
     pub action: String,
     pub place: String,
     pub server: String,
-    /// seconds between two lists while the window is open
+    /// least seconds between two lists, whatever the helper says
     #[serde(default = "servers_every")]
     pub every: u64,
 }
 
 fn servers_every() -> u64 {
-    30
+    5
+}
+
+/// What one run of the servers action answered.
+#[derive(Debug)]
+pub enum ServersAnswer {
+    /// the game's places: (id, name)
+    Places(Vec<(String, String)>),
+    /// one place's servers, and the seconds to wait before the next list
+    List {
+        place: String,
+        rows: Vec<ServerRow>,
+        wait: u64,
+    },
+    Failed {
+        text: String,
+        wait: u64,
+    },
 }
 
 /// One server of the Servers window.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct ServerRow {
+    /// the place it runs (filled in by the window)
+    #[serde(default)]
+    pub place: String,
     pub id: String,
     #[serde(default)]
     pub players: u64,
@@ -163,17 +186,23 @@ pub struct ServerRow {
     pub fps: f64,
 }
 
-/// Lists the servers of `place` once; the answer arrives as one `Event::Servers`.
+/// Lists the places of the game of `place` (`of` None), or the servers of the place `of`; the
+/// answer arrives as one `Event::Servers`.
 pub fn servers(
     module: &Module,
     s: &Servers,
     place: &str,
+    of: Option<&str>,
     data_dir: &Path,
     tx: Sender<Event>,
     wake: impl Fn() + Send + 'static,
 ) -> Result<Child, String> {
     let (mut child, dir, helper) = spawn_helper(module, &s.action, "Servers", data_dir)?;
-    let request = serde_json::json!({ "place": place, "data_dir": dir });
+    let mut request = serde_json::json!({ "place": place, "data_dir": dir });
+    if let Some(of) = of {
+        request["of"] = of.into();
+    }
+    let of = of.map(String::from);
     let mut stdin = child.stdin.take().expect("piped stdin");
     stdin
         .write_all(format!("{request}\n").as_bytes())
@@ -181,22 +210,58 @@ pub fn servers(
     drop(stdin);
     let out = child.stdout.take().expect("piped stdout");
     std::thread::spawn(move || {
-        let mut answer = Err("the helper sent no server list".to_string());
+        let mut answer = ServersAnswer::Failed {
+            text: "the helper sent no server list".into(),
+            wait: 20,
+        };
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if let Some(list) = v.get("servers") {
-                answer = serde_json::from_value::<Vec<ServerRow>>(list.clone())
-                    .map_err(|e| format!("a server list Alyae cannot read: {e}"));
-            } else if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-                answer = Err(e.to_string());
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                answer = servers_answer(&v, of.as_deref()).unwrap_or(answer);
             }
         }
         let _ = tx.send(Event::Servers(answer));
         wake();
     });
     Ok(child)
+}
+
+/// One line of the servers action, for the place `of` (None: the places were asked for).
+pub fn servers_answer(v: &serde_json::Value, of: Option<&str>) -> Option<ServersAnswer> {
+    let wait = v["wait"].as_u64().unwrap_or(20);
+    if let Some(e) = v["error"].as_str() {
+        return Some(ServersAnswer::Failed {
+            text: e.to_string(),
+            wait,
+        });
+    }
+    if let Some(list) = v["places"].as_array() {
+        let places = list
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p["id"].as_str()?.to_string(),
+                    p["name"].as_str().unwrap_or("").to_string(),
+                ))
+            })
+            .collect();
+        return Some(ServersAnswer::Places(places));
+    }
+    let list = v.get("servers")?;
+    Some(
+        match serde_json::from_value::<Vec<ServerRow>>(list.clone()) {
+            Ok(mut rows) => {
+                let place = of.unwrap_or_default().to_string();
+                for r in &mut rows {
+                    r.place.clone_from(&place);
+                }
+                ServersAnswer::List { place, rows, wait }
+            }
+            Err(e) => ServersAnswer::Failed {
+                text: format!("a server list Alyae cannot read: {e}"),
+                wait,
+            },
+        },
+    )
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -433,8 +498,8 @@ pub enum Event {
     /// a watch's helper could not answer
     WatchError(String),
     WatchEnded,
-    /// the Servers window's list, or why there is none
-    Servers(Result<Vec<ServerRow>, String>),
+    /// what the Servers window's helper answered
+    Servers(ServersAnswer),
 }
 
 pub struct Running {

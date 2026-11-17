@@ -85,13 +85,20 @@ pub struct App {
     side_for: Option<String>,
     alias_buf: String,
     notes_buf: String,
-    /// the Servers window: open, its list, why there is none, the run in progress, and the
-    /// place and time of the last run (it lists again every `every` seconds while open)
+    /// the Servers window: open, the last error, the run in progress
     servers_open: bool,
-    server_list: Vec<module::ServerRow>,
     servers_error: Option<String>,
     servers_child: Option<std::process::Child>,
-    servers_last: Option<(String, std::time::Instant)>,
+    /// the Place ID text the game's places were looked up for, and those places (id, name)
+    servers_for: String,
+    servers_places: Vec<(String, String)>,
+    /// each place's servers and when they came; the places are asked in turn, one list at a
+    /// time no sooner than `servers_next` (the game allows only a few lists a minute)
+    servers_rows: HashMap<String, (Vec<module::ServerRow>, std::time::Instant)>,
+    servers_next: Option<std::time::Instant>,
+    servers_turn: usize,
+    /// the window shows this place only (None: all)
+    servers_filter: Option<String>,
     /// the list fullest first (else lowest ping first)
     servers_by_players: bool,
 }
@@ -181,10 +188,14 @@ impl App {
             alias_buf: String::new(),
             notes_buf: String::new(),
             servers_open: false,
-            server_list: Vec::new(),
             servers_error: None,
             servers_child: None,
-            servers_last: None,
+            servers_for: String::new(),
+            servers_places: Vec::new(),
+            servers_rows: HashMap::new(),
+            servers_next: None,
+            servers_turn: 0,
+            servers_filter: None,
             servers_by_players: true,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
@@ -390,12 +401,30 @@ impl App {
                     if let Some(mut c) = self.servers_child.take() {
                         let _ = c.wait();
                     }
+                    let now = std::time::Instant::now();
+                    let least = self
+                        .game
+                        .as_deref()
+                        .and_then(|g| self.module(g))
+                        .and_then(|m| m.servers.as_ref())
+                        .map_or(5, |s| s.every);
+                    let after = |wait: u64| Some(now + Duration::from_secs(wait.max(least)));
                     match answer {
-                        Ok(list) => {
-                            self.server_list = list;
+                        module::ServersAnswer::Places(places) => {
+                            self.servers_places = places;
+                            self.servers_turn = 0;
                             self.servers_error = None;
+                            self.servers_next = None;
                         }
-                        Err(e) => self.servers_error = Some(e),
+                        module::ServersAnswer::List { place, rows, wait } => {
+                            self.servers_rows.insert(place, (rows, now));
+                            self.servers_error = None;
+                            self.servers_next = after(wait);
+                        }
+                        module::ServersAnswer::Failed { text, wait } => {
+                            self.servers_error = Some(text);
+                            self.servers_next = after(wait);
+                        }
                     }
                 }
                 Event::Ended {
@@ -2243,8 +2272,9 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// While the Servers window is open: lists the servers again every `every` seconds, and at
-    /// once when the place changes. One run at a time.
+    /// While the Servers window is open: looks up the game's places when the Place ID changes,
+    /// then lists their servers one place at a time, in turn, as fast as the game allows (its
+    /// answer says how long to wait). One run at a time.
     fn tick_servers(&mut self, ctx: &egui::Context, game: &str) {
         if !self.servers_open {
             return;
@@ -2254,34 +2284,77 @@ impl App {
         };
         let Some(s) = m.servers.clone() else { return };
         let place = self.servers_place(game);
-        if place.is_empty() {
+        if place.is_empty() || self.servers_child.is_some() {
             return;
         }
-        let every = Duration::from_secs(s.every.max(10));
-        let due = match &self.servers_last {
-            Some((p, t)) if *p == place => t.elapsed() >= every,
-            _ => {
-                self.server_list.clear();
-                true
+        let now = std::time::Instant::now();
+        if let Some(at) = self.servers_next
+            && now < at
+        {
+            ctx.request_repaint_after(at - now);
+            return;
+        }
+        let of = if self.servers_for != place {
+            // another game, or another place of this one: keep what is known of this game
+            if !self.servers_places.iter().any(|(id, _)| *id == place) {
+                self.servers_places.clear();
+                self.servers_rows.clear();
+                self.servers_filter = None;
             }
+            self.servers_for = place.clone();
+            if self.servers_places.is_empty() {
+                None
+            } else {
+                return self.tick_servers(ctx, game);
+            }
+        } else if self.servers_places.is_empty() {
+            None
+        } else {
+            // the shown place when one is chosen, else each place in turn
+            let id = match &self.servers_filter {
+                Some(f) => f.clone(),
+                None => {
+                    let i = self.servers_turn % self.servers_places.len();
+                    self.servers_turn += 1;
+                    self.servers_places[i].0.clone()
+                }
+            };
+            Some(id)
         };
-        if due && self.servers_child.is_none() {
-            self.servers_last = Some((place.clone(), std::time::Instant::now()));
-            let wake_ctx = self.ctx.clone();
-            match module::servers(&m, &s, &place, &self.dir, self.tx.clone(), move || {
+        let wake_ctx = self.ctx.clone();
+        match module::servers(
+            &m,
+            &s,
+            &place,
+            of.as_deref(),
+            &self.dir,
+            self.tx.clone(),
+            move || {
                 if let Some(c) = &wake_ctx {
                     c.request_repaint();
                 }
-            }) {
-                Ok(child) => self.servers_child = Some(child),
-                Err(e) => self.servers_error = Some(e),
+            },
+        ) {
+            Ok(child) => self.servers_child = Some(child),
+            Err(e) => {
+                self.servers_error = Some(e);
+                self.servers_next = Some(now + Duration::from_secs(20));
             }
         }
-        ctx.request_repaint_after(every);
     }
 
-    /// The Servers window: the place's public servers, each with Join (the chosen accounts into
-    /// that server) and Copy (its job ID).
+    /// A place's name in the Servers window.
+    fn place_name(&self, id: &str) -> String {
+        self.servers_places
+            .iter()
+            .find(|(p, _)| p == id)
+            .map(|(_, n)| n.trim())
+            .filter(|n| !n.is_empty())
+            .map_or_else(|| id.to_string(), String::from)
+    }
+
+    /// The Servers window: the public servers of every place of the game, each with Join (the
+    /// chosen accounts into that server, in its place) and Copy (its job ID).
     fn servers_window(&mut self, ctx: &egui::Context, game: &str) {
         if !self.servers_open {
             return;
@@ -2301,118 +2374,184 @@ impl App {
             .cloned()
             .collect();
         let can_join = !ids.is_empty() && !self.draft_new;
-        let mut list = self.server_list.clone();
+        let shown = |p: &str| self.servers_filter.as_deref().is_none_or(|f| f == p);
+        let mut list: Vec<module::ServerRow> = self
+            .servers_rows
+            .iter()
+            .filter(|(p, _)| shown(p))
+            .flat_map(|(_, (rows, _))| rows.iter().cloned())
+            .collect();
         if self.servers_by_players {
             list.sort_by(|a, b| b.players.cmp(&a.players).then(a.ping.cmp(&b.ping)));
         } else {
             list.sort_by(|a, b| a.ping.cmp(&b.ping).then(b.players.cmp(&a.players)));
         }
+        let several = self.servers_places.len() > 1;
+        let names: HashMap<String, String> = self
+            .servers_places
+            .iter()
+            .map(|(id, _)| (id.clone(), self.place_name(id)))
+            .collect();
+        // each place: its servers and players, and how old its list is
+        let summary: Vec<String> = self
+            .servers_places
+            .iter()
+            .filter(|(id, _)| shown(id))
+            .map(|(id, _)| match self.servers_rows.get(id) {
+                Some((rows, at)) => format!(
+                    "{}: {} servers, {} players ({} s ago)",
+                    names[id],
+                    rows.len(),
+                    rows.iter().map(|r| r.players).sum::<u64>(),
+                    at.elapsed().as_secs()
+                ),
+                None => format!("{}: not listed yet", names[id]),
+            })
+            .collect();
         let mut open = true;
         let mut join = None;
         let mut refresh = false;
         egui::Window::new("Servers")
             .open(&mut open)
-            .default_size([560.0, 440.0])
+            .default_size([620.0, 460.0])
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if place.is_empty() {
-                        ui.label("Put a place ID or game link in the Place ID box.");
-                    } else {
-                        let players: u64 = list.iter().map(|r| r.players).sum();
-                        ui.label(format!(
-                            "Place {place}: {} servers, {players} players",
-                            list.len()
-                        ));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(self.servers_child.is_none(), egui::Button::new("Refresh"))
-                            .clicked()
-                        {
-                            refresh = true;
-                        }
-                        egui::ComboBox::from_id_salt("servers_sort")
-                            .selected_text(if self.servers_by_players {
-                                "Most players"
-                            } else {
-                                "Lowest ping"
-                            })
+                    if several {
+                        let label = |f: &Option<String>| match f {
+                            Some(id) => names.get(id).cloned().unwrap_or_else(|| id.clone()),
+                            None => format!("All {} places", names.len()),
+                        };
+                        egui::ComboBox::from_id_salt("servers_place")
+                            .selected_text(label(&self.servers_filter))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.servers_by_players, true, "Most players");
-                                ui.selectable_value(&mut self.servers_by_players, false, "Lowest ping");
+                                ui.selectable_value(&mut self.servers_filter, None, label(&None));
+                                for (id, _) in &self.servers_places {
+                                    let v = Some(id.clone());
+                                    let text = label(&v);
+                                    ui.selectable_value(&mut self.servers_filter, v, text);
+                                }
                             });
-                    });
+                    }
+                    egui::ComboBox::from_id_salt("servers_sort")
+                        .selected_text(if self.servers_by_players {
+                            "Most players"
+                        } else {
+                            "Lowest ping"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.servers_by_players, true, "Most players");
+                            ui.selectable_value(&mut self.servers_by_players, false, "Lowest ping");
+                        });
+                    if ui
+                        .add_enabled(self.servers_child.is_none(), egui::Button::new("Refresh"))
+                        .on_hover_text("List the next place now, if Roblox allows it")
+                        .clicked()
+                    {
+                        refresh = true;
+                    }
                 });
+                if place.is_empty() {
+                    ui.label("Put a place ID or game link in the Place ID box.");
+                }
+                for line in &summary {
+                    ui.label(RichText::new(line).small());
+                }
                 ui.label(
                     RichText::new(format!(
-                        "Lists again every {} s while open. Join sends the {} chosen into that server.",
-                        s.every.max(10),
+                        "Roblox allows about 3 lists a minute: {} listed one at a time, each \
+                         again in turn. Join sends the {} chosen into that server.",
+                        if several {
+                            "the places are"
+                        } else {
+                            "the place is"
+                        },
                         plural(ids.len())
                     ))
-                    .weak(),
+                    .weak()
+                    .small(),
                 );
                 if let Some(e) = &self.servers_error {
                     ui.colored_label(ui.visuals().error_fg_color, e);
                 }
-                if self.servers_child.is_some() && list.is_empty() {
-                    ui.label("Listing…");
-                }
                 ui.separator();
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    egui::Grid::new("servers_grid")
-                        .num_columns(5)
-                        .striped(true)
-                        .spacing([14.0, 4.0])
-                        .show(ui, |ui| {
-                            for h in ["PLAYERS", "PING", "FPS", "JOB ID", ""] {
-                                ui.label(RichText::new(h).weak().small());
-                            }
-                            ui.end_row();
-                            for r in &list {
-                                ui.label(format!("{}/{}", r.players, r.max));
-                                ui.label(format!("{} ms", r.ping));
-                                ui.label(format!("{:.0}", r.fps));
-                                let short: String = r.id.chars().take(8).collect();
-                                ui.label(RichText::new(format!("{short}…")).monospace())
-                                    .on_hover_text(&r.id);
-                                ui.horizontal(|ui| {
-                                    let label = if ids.len() > 1 {
-                                        format!("Join ({})", ids.len())
-                                    } else {
-                                        "Join".to_string()
-                                    };
-                                    if ui
-                                        .add_enabled(can_join, egui::Button::new(label))
-                                        .on_disabled_hover_text("Choose accounts in the list first")
-                                        .clicked()
-                                    {
-                                        join = Some(r.id.clone());
-                                    }
-                                    if ui.button("Copy").on_hover_text("Copy the job ID").clicked() {
-                                        ui.ctx().copy_text(r.id.clone());
-                                    }
-                                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        let cols = if several { 6 } else { 5 };
+                        egui::Grid::new("servers_grid")
+                            .num_columns(cols)
+                            .striped(true)
+                            .spacing([14.0, 4.0])
+                            .show(ui, |ui| {
+                                if several {
+                                    ui.label(RichText::new("PLACE").weak().small());
+                                }
+                                for h in ["PLAYERS", "PING", "FPS", "JOB ID", ""] {
+                                    ui.label(RichText::new(h).weak().small());
+                                }
                                 ui.end_row();
-                            }
-                        });
-                });
+                                for r in &list {
+                                    if several {
+                                        let name = names.get(&r.place).cloned().unwrap_or_default();
+                                        ui.label(name);
+                                    }
+                                    ui.label(format!("{}/{}", r.players, r.max));
+                                    ui.label(format!("{} ms", r.ping));
+                                    ui.label(format!("{:.0}", r.fps));
+                                    let short: String = r.id.chars().take(8).collect();
+                                    ui.label(RichText::new(format!("{short}…")).monospace())
+                                        .on_hover_text(&r.id);
+                                    ui.horizontal(|ui| {
+                                        let label = if ids.len() > 1 {
+                                            format!("Join ({})", ids.len())
+                                        } else {
+                                            "Join".to_string()
+                                        };
+                                        if ui
+                                            .add_enabled(can_join, egui::Button::new(label))
+                                            .on_disabled_hover_text(
+                                                "Choose accounts in the list first",
+                                            )
+                                            .clicked()
+                                        {
+                                            join = Some((r.place.clone(), r.id.clone()));
+                                        }
+                                        if ui
+                                            .button("Copy")
+                                            .on_hover_text("Copy the job ID")
+                                            .clicked()
+                                        {
+                                            ui.ctx().copy_text(r.id.clone());
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
             });
         if refresh {
-            self.servers_last = None;
+            self.servers_next = None;
         }
         if !open {
             self.servers_open = false;
         }
-        if let Some(id) = join {
-            self.inputs
-                .entry(game.to_string())
-                .or_default()
-                .insert(s.server.clone(), id);
+        if let Some((server_place, id)) = join {
+            // that server's own place, for this join only: the Place ID box keeps the game's
+            let inputs = self.inputs.entry(game.to_string()).or_default();
+            let before = inputs.get(&s.place).cloned();
+            if !server_place.is_empty() {
+                inputs.insert(s.place.clone(), server_place);
+            }
+            inputs.insert(s.server.clone(), id);
             self.start_action(&m, &primary.id.clone(), ids);
+            let inputs = self.inputs.entry(game.to_string()).or_default();
+            match before {
+                Some(b) => inputs.insert(s.place.clone(), b),
+                None => inputs.remove(&s.place),
+            };
         }
     }
-
     // --- right: launch and the chosen account -----------------------------------------------
 
     /// The right side, as AEAM's: the join boxes and Join Server, Follow, Alias, Description,
@@ -3579,32 +3718,38 @@ mod tests {
         let (mut h, dir) = window("roblox");
         let m = h.state().module("roblox").cloned().unwrap();
         let s = m.servers.clone().unwrap();
-        assert_eq!(
-            (s.place.as_str(), s.server.as_str(), s.every),
-            ("place", "server", 30)
-        );
-        let id = "11111111-2222-3333-4444-555555555555";
+        assert_eq!((s.place.as_str(), s.server.as_str()), ("place", "server"));
         h.state_mut().servers_open = true;
         let tx = h.state().tx.clone();
-        tx.send(Event::Servers(Ok(vec![module::ServerRow {
-            id: id.into(),
-            players: 9,
-            max: 12,
-            ping: 84,
-            fps: 59.9,
-        }])))
+        // the game's places, then one sub place's servers
+        tx.send(Event::Servers(module::ServersAnswer::Places(vec![
+            ("100".into(), "Start".into()),
+            ("200".into(), "Khei".into()),
+        ])))
         .unwrap();
         h.state_mut().poll();
-        assert_eq!(h.state().server_list.len(), 1);
+        let line = r#"{"servers": [{"id": "11111111-2222-3333-4444-555555555555", "players": 9, "max": 12, "ping": 84, "fps": 59.9}], "wait": 20}"#;
+        let answer =
+            module::servers_answer(&serde_json::from_str(line).unwrap(), Some("200")).unwrap();
+        tx.send(Event::Servers(answer)).unwrap();
+        h.state_mut().poll();
+        let rows = &h.state().servers_rows["200"].0;
+        assert_eq!((rows[0].place.as_str(), rows[0].players), ("200", 9));
+        // the next list waits as long as Roblox asked
+        let next = h.state().servers_next.unwrap();
+        assert!(next > std::time::Instant::now() + Duration::from_secs(15));
         h.run();
         assert!(h.query_by_label("9/12").is_some());
-        tx.send(Event::Servers(Err(
-            "Roblox is rate limiting: try again in a minute".into(),
-        )))
+        assert!(h.query_by_label("Khei").is_some());
+        let failed = module::servers_answer(
+            &serde_json::json!({ "error": "Roblox is rate limiting: try again in a minute", "wait": 38 }),
+            Some("100"),
+        )
         .unwrap();
+        tx.send(Event::Servers(failed)).unwrap();
         h.state_mut().poll();
-        // the last list stays, with the error over it
-        assert_eq!(h.state().server_list.len(), 1);
+        // the lists stay, with the error over them
+        assert_eq!(h.state().servers_rows.len(), 1);
         assert!(h.state().servers_error.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }

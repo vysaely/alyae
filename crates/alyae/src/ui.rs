@@ -551,9 +551,14 @@ impl App {
     fn advance_queue(&mut self) {
         let now = std::time::Instant::now();
         if let Some((id, action, runs)) = self.queue_current.clone() {
-            // ended, or a game that is up and running
+            // ended, or a game that is up and running ("running, loading" counts: the helper
+            // limits how many load at once itself)
             let done = self.queue_ended
-                || (runs && self.status.get(&id).is_some_and(|(t, _)| t == "running"));
+                || (runs
+                    && self
+                        .status
+                        .get(&id)
+                        .is_some_and(|(t, _)| t.starts_with("running")));
             if !done {
                 return;
             }

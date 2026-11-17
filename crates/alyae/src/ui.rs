@@ -1034,7 +1034,12 @@ impl App {
         let mut ids = Vec::new();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let mut a = self.new_account(m);
-            set_value(&mut a, &flow.import_field, line, secret);
+            set_value(
+                &mut a,
+                &flow.import_field,
+                import_value(line, &flow.import_starts),
+                secret,
+            );
             if self.save(&a) {
                 ids.push(a.id);
             }
@@ -2668,6 +2673,14 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     );
 }
 
+/// The value in an imported `line`: from `starts` on when the line has it, else the whole line.
+fn import_value<'a>(line: &'a str, starts: &str) -> &'a str {
+    match line.find(starts) {
+        Some(i) if !starts.is_empty() => &line[i..],
+        _ => line,
+    }
+}
+
 /// `key`'s value of each account, one per line, as `name:value` when `name` is given; an account
 /// without the value (or without the name) is left out.
 fn copy_lines(accounts: &[&Account], name: Option<&str>, key: &str) -> String {
@@ -3262,6 +3275,15 @@ mod tests {
         assert!(*bad);
         assert!(msg.contains("bad1"), "got: {msg}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn import_takes_the_value_after_a_name() {
+        let starts = "_|WARNING:";
+        assert_eq!(import_value("_|WARNING:-x:y", starts), "_|WARNING:-x:y");
+        assert_eq!(import_value("bee:_|WARNING:-x:y", starts), "_|WARNING:-x:y");
+        assert_eq!(import_value("plain", starts), "plain");
+        assert_eq!(import_value("bee:_|WARNING:-x", ""), "bee:_|WARNING:-x");
     }
 
     #[test]

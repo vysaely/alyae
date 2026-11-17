@@ -170,6 +170,10 @@ pub struct AddFlow {
     pub import_action: String,
     #[serde(default)]
     pub import_label: String,
+    /// how the imported value starts: a line with text before it (`name:value`, as Copy makes
+    /// them) has the value taken from there; empty: the whole line
+    #[serde(default)]
+    pub import_starts: String,
     /// accounts with the same value of this field are one: a new one updates the old instead
     #[serde(default)]
     pub same: String,

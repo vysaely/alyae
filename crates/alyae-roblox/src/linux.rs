@@ -425,6 +425,42 @@ fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
     data_dir.join("profiles").join(&req.id)
 }
 
+/// RAM that must be free (MemAvailable) before another client starts: many clients loading a
+/// big map at once froze a 32 GB PC (owner, 2026-11-17).
+const FREE_TO_START_MB: u64 = 4096;
+
+/// MemAvailable from `/proc/meminfo` text, in MB.
+fn mem_available_mb(meminfo: &str) -> Option<u64> {
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+        .map(|kb| kb / 1024)
+}
+
+/// Waits (in the launch turn) until there is room for one more client.
+fn wait_for_memory() {
+    let mut said = 0;
+    loop {
+        let free = fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|t| mem_available_mb(&t))
+            .unwrap_or(u64::MAX);
+        if free >= FREE_TO_START_MB {
+            return;
+        }
+        if free.abs_diff(said) >= 512 {
+            status(&format!(
+                "waiting for free memory ({:.1} GB free, {} GB needed)",
+                free as f64 / 1024.0,
+                FREE_TO_START_MB / 1024
+            ));
+            said = free;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main
 /// fullscreen, an alt small.
 fn window_size(mode: &str, main: bool) -> (bool, u32, u32) {
@@ -636,6 +672,7 @@ pub fn play(req: &Request) {
     // replace it, and at the end it would pass for a renewed cookie
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
     let mut turn = LaunchTurn::take(data_dir);
+    wait_for_memory();
     status("starting");
     let window = window_size(req.window(), main);
     prepare_profile(
@@ -1027,6 +1064,13 @@ mod tests {
         assert_eq!(owned_profile(&data, &data), None);
         assert_eq!(owned_profile(&data.join("profiles/missing"), &data), None);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn free_memory_from_meminfo() {
+        let t = "MemTotal:       32768000 kB\nMemFree:         1000000 kB\nMemAvailable:    6291456 kB\n";
+        assert_eq!(mem_available_mb(t), Some(6144));
+        assert_eq!(mem_available_mb("MemTotal: 1 kB\n"), None);
     }
 
     /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt small).

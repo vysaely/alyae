@@ -93,6 +93,100 @@ fn trim_memory(pid: u32) {
 /// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute.
 const TRIM_EVERY: Duration = Duration::from_secs(60);
 
+/// RAM that must be free before another client starts: a client loading a big map takes
+/// gigabytes, and many loading at once froze a 32 GB PC (owner, 2026-11-17).
+const FREE_TO_START_MB: u64 = 4096;
+/// Below this much free RAM, running alts set to trim do it at once instead of on the minute.
+const LOW_MEMORY_MB: u64 = 2048;
+
+/// Free physical memory, in MB.
+fn free_mb() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: a correctly sized MEMORYSTATUSEX
+    unsafe {
+        let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if GlobalMemoryStatusEx(&mut m) == 0 {
+            return u64::MAX;
+        }
+        m.ullAvailPhys / (1024 * 1024)
+    }
+}
+
+/// The client's memory in RAM (its working set), in MB.
+fn working_set_mb(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    // SAFETY: plain process handle use, a correctly sized counters struct
+    unsafe {
+        let h: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok = K32GetProcessMemoryInfo(h, &mut c, c.cb) != 0;
+        CloseHandle(h);
+        ok.then_some(c.WorkingSetSize as u64 / (1024 * 1024))
+    }
+}
+
+/// Waits (in the launch turn) until there is room for one more client.
+fn wait_for_memory() {
+    let mut said = 0;
+    loop {
+        let free = free_mb();
+        if free >= FREE_TO_START_MB {
+            return;
+        }
+        // a new line only when it changed by half a GB or more
+        if free.abs_diff(said) >= 512 {
+            status(&format!(
+                "waiting for free memory ({:.1} GB free, {} GB needed)",
+                free as f64 / 1024.0,
+                FREE_TO_START_MB / 1024
+            ));
+            said = free;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// Whether a client whose memory was `samples` (MB, one every `LOAD_SAMPLE`) has finished
+/// loading: it has had `LOAD_LEAST`, and grew less than `LOAD_STILL_MB` over the last three.
+fn loaded(samples: &[u64]) -> bool {
+    let least = (LOAD_LEAST.as_secs() / LOAD_SAMPLE.as_secs()) as usize;
+    samples.len() > least
+        && samples[samples.len() - 4..]
+            .windows(2)
+            .all(|w| w[1] < w[0] + LOAD_STILL_MB)
+}
+
+const LOAD_SAMPLE: Duration = Duration::from_secs(2);
+const LOAD_LEAST: Duration = Duration::from_secs(12);
+const LOAD_STILL_MB: u64 = 40;
+/// A client still growing after this long is let be: the next starts anyway.
+const LOAD_MOST: Duration = Duration::from_secs(120);
+
+/// Waits until the new client has loaded its game (its memory stops growing), so clients load
+/// one after another instead of all at once.
+fn wait_until_loaded(pid: u32) {
+    status("loading");
+    let until = Instant::now() + LOAD_MOST;
+    let mut samples = Vec::new();
+    while Instant::now() < until && alive(pid) {
+        match working_set_mb(pid) {
+            Some(mb) => samples.push(mb),
+            None => return,
+        }
+        if loaded(&samples) {
+            return;
+        }
+        std::thread::sleep(LOAD_SAMPLE);
+    }
+}
+
 fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -306,6 +400,10 @@ pub fn play(req: &Request) {
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonMutex").as_ptr());
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonEvent").as_ptr());
     }
+    // one client loads at a time, and only with room for it: the turn is held until it has
+    // loaded. Signing in comes after the wait, so the one-time ticket is fresh
+    let turn = LaunchTurn::take();
+    wait_for_memory();
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();
@@ -345,7 +443,6 @@ pub fn play(req: &Request) {
     url += &format!(
         "+browsertrackerid:{browser}+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp"
     );
-    let turn = LaunchTurn::take();
     settings_before_launch(req, &live);
     let before = clients();
     // SAFETY: ShellExecuteW with NUL-terminated wide strings
@@ -377,25 +474,38 @@ pub fn play(req: &Request) {
     // the client reads its settings while it starts: a next launch that changes them waits for
     // that (`wait_for_settings_read`), one that does not starts at once
     let _ = std::fs::write(client_started_file(req), pid.to_string());
-    drop(turn);
-    status("running");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if wait_for_stop() {
             let _ = tx.send(());
         }
     });
-    // the first trim once the game has loaded, then every minute
+    // the next client starts once this one has loaded (and, set to trim, been trimmed)
+    wait_until_loaded(pid);
     let trim = req.get("memory") == "trim";
-    let mut next_trim = Instant::now() + Duration::from_secs(45);
+    if trim {
+        trim_memory(pid);
+    }
+    drop(turn);
+    status("running");
+    // then every minute, and at once whenever RAM runs low
+    let mut next_trim = Instant::now() + TRIM_EVERY;
+    let mut last_trim = Instant::now();
+    let mut next_check = Instant::now();
     while alive(pid) {
         if rx.try_recv().is_ok() {
             kill(pid);
             break;
         }
-        if trim && Instant::now() >= next_trim {
-            trim_memory(pid);
-            next_trim = Instant::now() + TRIM_EVERY;
+        let now = Instant::now();
+        if trim && now >= next_check {
+            next_check = now + Duration::from_secs(5);
+            let low = free_mb() < LOW_MEMORY_MB && now - last_trim >= Duration::from_secs(15);
+            if low || now >= next_trim {
+                trim_memory(pid);
+                last_trim = now;
+                next_trim = now + TRIM_EVERY;
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -419,4 +529,21 @@ pub fn reset(_req: &Request) {
         freed += crate::files::remove(&Path::new(&l).join("Roblox").join("logs"));
     }
     status(&format!("files reset, {} MB freed", freed / 1_000_000));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client has loaded once it had 12 s and its memory stopped growing; still growing, or
+    /// too early, it has not.
+    #[test]
+    fn loaded_when_memory_settles() {
+        let growing: Vec<u64> = (0..10).map(|i| 300 + i * 250).collect();
+        assert!(!loaded(&growing));
+        let settled = [300, 900, 1500, 2100, 2500, 2580, 2600, 2610, 2615];
+        assert!(loaded(&settled));
+        // settled but too early
+        assert!(!loaded(&[300, 300, 300, 300]));
+    }
 }

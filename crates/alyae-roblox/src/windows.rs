@@ -93,10 +93,12 @@ fn trim_memory(pid: u32) {
 /// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute.
 const TRIM_EVERY: Duration = Duration::from_secs(60);
 
-/// RAM that must be free before another client starts (with up to 3 loading at once, room for
-/// the ones still growing): a client loading a big map takes
-/// gigabytes, and many loading at once froze a 32 GB PC (owner, 2026-11-17).
+/// RAM that must be free before another client starts while others still load (room for them
+/// to grow too): a client loading a big map takes gigabytes, and many loading at once froze a
+/// 32 GB PC (owner, 2026-11-17).
 const FREE_TO_START_MB: u64 = 6144;
+/// ... and when it would be the only one loading: one Gaia load is about 2.6 GB.
+const FREE_TO_START_ALONE_MB: u64 = 3584;
 /// Below this much free RAM, running alts set to trim do it at once instead of on the minute.
 const LOW_MEMORY_MB: u64 = 2048;
 
@@ -133,10 +135,51 @@ fn working_set_mb(pid: u32) -> Option<u64> {
     }
 }
 
-/// Waits (in the launch turn) until there is room for one more client, at most
-/// `crate::MEMORY_WAIT`.
-fn wait_for_memory() {
-    crate::wait_for_memory(free_mb, FREE_TO_START_MB);
+/// Touched by a launch waiting for memory: running alts set to trim do it at once when it is
+/// newer than their last trim, instead of on their minute.
+fn trim_now_file(req: &Request) -> PathBuf {
+    req.data_dir.join("settings").join("trim_now")
+}
+
+/// Waits (in the launch turn, holding load slot `slot`) until there is room for one more
+/// client, at most `crate::MEMORY_WAIT`; asks the running alts to trim meanwhile.
+fn wait_for_memory(req: &Request, slot: usize) {
+    let ask = trim_now_file(req);
+    let need = || {
+        if others_loading(slot) {
+            FREE_TO_START_MB
+        } else {
+            FREE_TO_START_ALONE_MB
+        }
+    };
+    crate::wait_for_memory(free_mb, need, || {
+        let _ = std::fs::write(&ask, "");
+    });
+}
+
+/// Whether a load slot other than `mine` is held: another client is still loading.
+fn others_loading(mine: usize) -> bool {
+    use windows_sys::Win32::Foundation::{WAIT_ABANDONED_0, WAIT_OBJECT_0};
+    (0..LOAD_SLOTS).filter(|k| *k != mine).any(|k| {
+        // SAFETY: a named mutex, taken for an instant only to see that it is free
+        unsafe {
+            let h = CreateMutexW(
+                std::ptr::null(),
+                0,
+                wide(&format!("Local\\AlyaeRobloxLoad{k}")).as_ptr(),
+            );
+            if h.is_null() {
+                return false;
+            }
+            let r = WaitForSingleObject(h, 0);
+            let free = r == WAIT_OBJECT_0 || r == WAIT_ABANDONED_0;
+            if free {
+                ReleaseMutex(h);
+            }
+            CloseHandle(h);
+            !free
+        }
+    })
 }
 
 /// Whether a client whose memory was `samples` (MB, one every `LOAD_SAMPLE`) has finished
@@ -349,7 +392,7 @@ const LOAD_SLOTS: usize = 3;
 
 /// One of `LOAD_SLOTS` named mutexes, held from a client's start until it has loaded. A
 /// helper that dies leaves its mutex abandoned, which the next waiter simply takes.
-struct LoadSlot(HANDLE);
+struct LoadSlot(HANDLE, usize);
 
 impl LoadSlot {
     fn take() -> Self {
@@ -390,6 +433,7 @@ impl LoadSlot {
                     .get(i)
                     .copied()
                     .unwrap_or_else(|| fail("loading lock")),
+                i,
             )
         }
     }
@@ -453,7 +497,7 @@ pub fn play(req: &Request) {
     // (the turn). Signing in comes after the waits, so the one-time ticket is fresh
     let slot = LoadSlot::take();
     let turn = LaunchTurn::take();
-    wait_for_memory();
+    wait_for_memory(req, slot.1);
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();
@@ -541,9 +585,11 @@ pub fn play(req: &Request) {
     }
     drop(slot);
     status("running");
-    // then every minute, and at once whenever RAM runs low
+    // then every minute, and at once whenever RAM runs low or a launch waits for memory
+    let ask = trim_now_file(req);
     let mut next_trim = Instant::now() + TRIM_EVERY;
     let mut last_trim = Instant::now();
+    let mut trimmed_at = SystemTime::now();
     let mut next_check = Instant::now();
     while alive(pid) {
         if rx.try_recv().is_ok() {
@@ -553,10 +599,15 @@ pub fn play(req: &Request) {
         let now = Instant::now();
         if trim && now >= next_check {
             next_check = now + Duration::from_secs(5);
-            let low = free_mb() < LOW_MEMORY_MB && now - last_trim >= Duration::from_secs(15);
-            if low || now >= next_trim {
+            let asked = std::fs::metadata(&ask)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t > trimmed_at);
+            let soon = now - last_trim >= Duration::from_secs(15);
+            let low = free_mb() < LOW_MEMORY_MB;
+            if ((low || asked) && soon) || now >= next_trim {
                 trim_memory(pid);
                 last_trim = now;
+                trimmed_at = SystemTime::now();
                 next_trim = now + TRIM_EVERY;
             }
         }

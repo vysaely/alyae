@@ -95,6 +95,9 @@ label = "Refresh"
 [[action]]
 id = "login"
 label = "Log in"
+# for several accounts: one a minute (sign-ins close together get the connection throttled; Alyae
+# also pauses longer when Roblox says so)
+gap = 60
 
 # roblox.com signed in as the account, in a window of its own (the saved cookie, a fresh profile)
 [[action]]

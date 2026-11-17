@@ -85,6 +85,15 @@ pub struct App {
     side_for: Option<String>,
     alias_buf: String,
     notes_buf: String,
+    /// the Servers window: open, its list, why there is none, the run in progress, and the
+    /// place and time of the last run (it lists again every `every` seconds while open)
+    servers_open: bool,
+    server_list: Vec<module::ServerRow>,
+    servers_error: Option<String>,
+    servers_child: Option<std::process::Child>,
+    servers_last: Option<(String, std::time::Instant)>,
+    /// the list fullest first (else lowest ping first)
+    servers_by_players: bool,
 }
 
 /// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
@@ -171,6 +180,12 @@ impl App {
             side_for: None,
             alias_buf: String::new(),
             notes_buf: String::new(),
+            servers_open: false,
+            server_list: Vec::new(),
+            servers_error: None,
+            servers_child: None,
+            servers_last: None,
+            servers_by_players: true,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -369,6 +384,18 @@ impl App {
                 Event::WatchEnded => {
                     if let Some(mut c) = self.watching.take() {
                         let _ = c.wait();
+                    }
+                }
+                Event::Servers(answer) => {
+                    if let Some(mut c) = self.servers_child.take() {
+                        let _ = c.wait();
+                    }
+                    match answer {
+                        Ok(list) => {
+                            self.server_list = list;
+                            self.servers_error = None;
+                        }
+                        Err(e) => self.servers_error = Some(e),
                     }
                 }
                 Event::Ended {
@@ -605,7 +632,9 @@ impl eframe::App for App {
             None => self.game_picker(ui),
             Some(g) => {
                 self.tick_watch(&ctx, &g);
+                self.tick_servers(&ctx, &g);
                 self.game_view(ui, &g);
+                self.servers_window(&ctx, &g);
             }
         }
         self.edit_dialog(&ctx);
@@ -2200,6 +2229,190 @@ impl App {
         ctx.request_repaint_after(every);
     }
 
+    /// The Place ID box's text, for the Servers window.
+    fn servers_place(&self, game: &str) -> String {
+        let key = self
+            .module(game)
+            .and_then(|m| m.servers.as_ref())
+            .map(|s| s.place.clone())
+            .unwrap_or_default();
+        self.inputs
+            .get(game)
+            .and_then(|i| i.get(&key))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// While the Servers window is open: lists the servers again every `every` seconds, and at
+    /// once when the place changes. One run at a time.
+    fn tick_servers(&mut self, ctx: &egui::Context, game: &str) {
+        if !self.servers_open {
+            return;
+        }
+        let Some(m) = self.module(game).cloned() else {
+            return;
+        };
+        let Some(s) = m.servers.clone() else { return };
+        let place = self.servers_place(game);
+        if place.is_empty() {
+            return;
+        }
+        let every = Duration::from_secs(s.every.max(10));
+        let due = match &self.servers_last {
+            Some((p, t)) if *p == place => t.elapsed() >= every,
+            _ => {
+                self.server_list.clear();
+                true
+            }
+        };
+        if due && self.servers_child.is_none() {
+            self.servers_last = Some((place.clone(), std::time::Instant::now()));
+            let wake_ctx = self.ctx.clone();
+            match module::servers(&m, &s, &place, &self.dir, self.tx.clone(), move || {
+                if let Some(c) = &wake_ctx {
+                    c.request_repaint();
+                }
+            }) {
+                Ok(child) => self.servers_child = Some(child),
+                Err(e) => self.servers_error = Some(e),
+            }
+        }
+        ctx.request_repaint_after(every);
+    }
+
+    /// The Servers window: the place's public servers, each with Join (the chosen accounts into
+    /// that server) and Copy (its job ID).
+    fn servers_window(&mut self, ctx: &egui::Context, game: &str) {
+        if !self.servers_open {
+            return;
+        }
+        let Some(m) = self.module(game).cloned() else {
+            return;
+        };
+        let (Some(s), Some(primary)) = (m.servers.clone(), m.actions.iter().find(|a| a.primary))
+        else {
+            return;
+        };
+        let place = self.servers_place(game);
+        let ids: Vec<String> = self
+            .selected
+            .iter()
+            .filter(|id| self.accounts.iter().any(|a| &a.id == *id))
+            .cloned()
+            .collect();
+        let can_join = !ids.is_empty() && !self.draft_new;
+        let mut list = self.server_list.clone();
+        if self.servers_by_players {
+            list.sort_by(|a, b| b.players.cmp(&a.players).then(a.ping.cmp(&b.ping)));
+        } else {
+            list.sort_by(|a, b| a.ping.cmp(&b.ping).then(b.players.cmp(&a.players)));
+        }
+        let mut open = true;
+        let mut join = None;
+        let mut refresh = false;
+        egui::Window::new("Servers")
+            .open(&mut open)
+            .default_size([560.0, 440.0])
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if place.is_empty() {
+                        ui.label("Put a place ID or game link in the Place ID box.");
+                    } else {
+                        let players: u64 = list.iter().map(|r| r.players).sum();
+                        ui.label(format!(
+                            "Place {place}: {} servers, {players} players",
+                            list.len()
+                        ));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(self.servers_child.is_none(), egui::Button::new("Refresh"))
+                            .clicked()
+                        {
+                            refresh = true;
+                        }
+                        egui::ComboBox::from_id_salt("servers_sort")
+                            .selected_text(if self.servers_by_players {
+                                "Most players"
+                            } else {
+                                "Lowest ping"
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.servers_by_players, true, "Most players");
+                                ui.selectable_value(&mut self.servers_by_players, false, "Lowest ping");
+                            });
+                    });
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "Lists again every {} s while open. Join sends the {} chosen into that server.",
+                        s.every.max(10),
+                        plural(ids.len())
+                    ))
+                    .weak(),
+                );
+                if let Some(e) = &self.servers_error {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                }
+                if self.servers_child.is_some() && list.is_empty() {
+                    ui.label("Listing…");
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    egui::Grid::new("servers_grid")
+                        .num_columns(5)
+                        .striped(true)
+                        .spacing([14.0, 4.0])
+                        .show(ui, |ui| {
+                            for h in ["PLAYERS", "PING", "FPS", "JOB ID", ""] {
+                                ui.label(RichText::new(h).weak().small());
+                            }
+                            ui.end_row();
+                            for r in &list {
+                                ui.label(format!("{}/{}", r.players, r.max));
+                                ui.label(format!("{} ms", r.ping));
+                                ui.label(format!("{:.0}", r.fps));
+                                let short: String = r.id.chars().take(8).collect();
+                                ui.label(RichText::new(format!("{short}…")).monospace())
+                                    .on_hover_text(&r.id);
+                                ui.horizontal(|ui| {
+                                    let label = if ids.len() > 1 {
+                                        format!("Join ({})", ids.len())
+                                    } else {
+                                        "Join".to_string()
+                                    };
+                                    if ui
+                                        .add_enabled(can_join, egui::Button::new(label))
+                                        .on_disabled_hover_text("Choose accounts in the list first")
+                                        .clicked()
+                                    {
+                                        join = Some(r.id.clone());
+                                    }
+                                    if ui.button("Copy").on_hover_text("Copy the job ID").clicked() {
+                                        ui.ctx().copy_text(r.id.clone());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+            });
+        if refresh {
+            self.servers_last = None;
+        }
+        if !open {
+            self.servers_open = false;
+        }
+        if let Some(id) = join {
+            self.inputs
+                .entry(game.to_string())
+                .or_default()
+                .insert(s.server.clone(), id);
+            self.start_action(&m, &primary.id.clone(), ids);
+        }
+    }
+
     // --- right: launch and the chosen account -----------------------------------------------
 
     /// The right side, as AEAM's: the join boxes and Join Server, Follow, Alias, Description,
@@ -2230,6 +2443,7 @@ impl App {
             self.notes_buf = a.map(|a| a.notes.clone()).unwrap_or_default();
         }
         let mut run = None;
+        let mut toggle_servers = false;
         // two equal columns: every box and button on the right starts on one of two edges
         let full = ui.available_width().floor();
         let gap = look::GAP;
@@ -2267,15 +2481,32 @@ impl App {
                         );
                     });
                 }
-                if ui
-                    .add_enabled_ui(can_run, |ui| {
-                        ui.add_sized([full, h], look::primary(&count(&p.label)))
-                    })
-                    .inner
-                    .clicked()
-                {
-                    run = Some(p.id.clone());
-                }
+                // [Join Server][Servers] when the game lists its servers
+                let servers_w = if m.servers.is_some() { 80.0 } else { 0.0 };
+                ui.horizontal(|ui| {
+                    let w = if servers_w > 0.0 {
+                        full - gap - servers_w
+                    } else {
+                        full
+                    };
+                    if ui
+                        .add_enabled_ui(can_run, |ui| {
+                            ui.add_sized([w, h], look::primary(&count(&p.label)))
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        run = Some(p.id.clone());
+                    }
+                    if servers_w > 0.0
+                        && ui
+                            .add_sized([servers_w, h], egui::Button::new("Servers"))
+                            .on_hover_text("The place's public servers, to join one")
+                            .clicked()
+                    {
+                        toggle_servers = true;
+                    }
+                });
             }
             // one-box buttons: [box][Follow]
             for a in m
@@ -2299,6 +2530,9 @@ impl App {
                     }
                 });
             }
+        }
+        if toggle_servers {
+            self.servers_open = !self.servers_open;
         }
         if let Some(a) = run {
             self.start_action(m, &a, ids.clone());
@@ -3336,6 +3570,42 @@ mod tests {
         for id in ["play", "follow", "login", "check", "browser", "friends"] {
             assert!(!local(id), "{id}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Servers window shows the helper's list; Join puts the server's id in Job ID.
+    #[test]
+    fn servers_window_lists_and_joins() {
+        let (mut h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let s = m.servers.clone().unwrap();
+        assert_eq!(
+            (s.place.as_str(), s.server.as_str(), s.every),
+            ("place", "server", 30)
+        );
+        let id = "11111111-2222-3333-4444-555555555555";
+        h.state_mut().servers_open = true;
+        let tx = h.state().tx.clone();
+        tx.send(Event::Servers(Ok(vec![module::ServerRow {
+            id: id.into(),
+            players: 9,
+            max: 12,
+            ping: 84,
+            fps: 59.9,
+        }])))
+        .unwrap();
+        h.state_mut().poll();
+        assert_eq!(h.state().server_list.len(), 1);
+        h.run();
+        assert!(h.query_by_label("9/12").is_some());
+        tx.send(Event::Servers(Err(
+            "Roblox is rate limiting: try again in a minute".into(),
+        )))
+        .unwrap();
+        h.state_mut().poll();
+        // the last list stays, with the error over it
+        assert_eq!(h.state().server_list.len(), 1);
+        assert!(h.state().servers_error.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

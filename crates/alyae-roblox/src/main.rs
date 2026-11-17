@@ -329,6 +329,22 @@ fn presence(v: &Value) {
     }
 }
 
+/// The Servers window: the public servers of the place in `place` (an ID or a game link), as
+/// one `{"servers": [...]}` line, each `{"id", "players", "max", "ping", "fps"}`.
+fn servers(v: &Value) {
+    let input = v["place"].as_str().unwrap_or("");
+    let place = place_id(input).unwrap_or_else(|| fail("put a place ID or game link in Place ID"));
+    let list = api::servers(place, 3).unwrap_or_else(|e| fail(&e));
+    let list: Vec<Value> = list
+        .into_iter()
+        .map(|s| {
+            json!({ "id": s.id, "players": s.players, "max": s.max, "ping": s.ping,
+                    "fps": (s.fps * 10.0).round() / 10.0 })
+        })
+        .collect();
+    say(json!({ "servers": list, "place": place.to_string() }));
+}
+
 fn main() {
     let action = std::env::args().nth(1).unwrap_or_default();
     let mut line = String::new();
@@ -341,6 +357,10 @@ fn main() {
         serde_json::from_str(&line).unwrap_or_else(|e| fail(&format!("bad request: {e}")));
     if action == "presence" {
         presence(&v);
+        return;
+    }
+    if action == "servers" {
+        servers(&v);
         return;
     }
     let obj = |k: &str| {

@@ -138,7 +138,11 @@ pub fn window(mode: &str) -> Vec<Prop> {
         "small" => vec![
             prop("bool", "Fullscreen", false),
             prop("bool", "StartMaximized", false),
-            prop("Vector2", "StartScreenSize", format!("{},{}", SMALL.0, SMALL.1)),
+            prop(
+                "Vector2",
+                "StartScreenSize",
+                format!("{},{}", SMALL.0, SMALL.1),
+            ),
         ],
         _ => Vec::new(),
     }

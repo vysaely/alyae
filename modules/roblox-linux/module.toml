@@ -71,7 +71,7 @@ label = "FPS cap"
 hint = "empty: the role's (below); 0: no cap"
 # an empty FPS cap by role; no role: Roblox's own setting
 default_by = "role"
-defaults = { main = "330", alt = "6" }
+defaults = { main = "330", alt = "1" }
 
 [[field]]
 key = "window"
@@ -161,7 +161,7 @@ local = true
 [[action.input]]
 key = "fps"
 label = "FPS limit"
-choices = ["keep", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+choices = ["keep", "1", "2", "3", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
 
 [[action.input]]
 key = "window"

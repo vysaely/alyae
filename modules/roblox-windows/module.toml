@@ -61,7 +61,7 @@ label = "FPS cap"
 hint = "empty: the role's (below); 0: no cap"
 # an empty FPS cap by role; no role: Roblox's own setting
 default_by = "role"
-defaults = { main = "330", alt = "6" }
+defaults = { main = "330", alt = "1" }
 
 [[field]]
 key = "window"
@@ -77,7 +77,7 @@ key = "memory"
 label = "Memory"
 kind = "choice"
 choices = ["trim", "normal"]
-hint = "trim: every minute Windows moves the game's idle memory to the page file (an alt keeps ~0.6 GB in RAM instead of ~2.6; wants a big page file); empty: the role's (alt: trim)"
+hint = "trim: every 30 s Windows moves the game's idle memory to the page file (an alt keeps ~0.6 GB in RAM instead of ~2.6; wants a big page file); empty: the role's (alt: trim)"
 default_by = "role"
 defaults = { alt = "trim" }
 
@@ -161,7 +161,7 @@ local = true
 [[action.input]]
 key = "fps"
 label = "FPS limit"
-choices = ["keep", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+choices = ["keep", "1", "2", "3", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
 
 [[action.input]]
 key = "window"

@@ -90,8 +90,9 @@ fn trim_memory(pid: u32) {
     }
 }
 
-/// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute.
-const TRIM_EVERY: Duration = Duration::from_secs(60);
+/// How often an alt's memory is trimmed: it grows back to about 600 MB in a minute at 6 FPS,
+/// less at 1; trimming twice a minute keeps more of it in the page file than in RAM.
+const TRIM_EVERY: Duration = Duration::from_secs(30);
 
 /// RAM that must be free before another client starts while others still load (room for them
 /// to grow too): a client loading a big map takes gigabytes, and many loading at once froze a

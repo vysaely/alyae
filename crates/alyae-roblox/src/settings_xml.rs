@@ -130,7 +130,9 @@ fn axes(v: &str) -> (&str, &str) {
 pub const SMALL: (u32, u32) = (800, 600);
 
 /// The account's Window choice: "fullscreen", "windowed" (a normal window) or "small" (a normal
-/// window of `SMALL`); anything else (empty) leaves Roblox's own.
+/// window of `SMALL`); anything else (empty) leaves Roblox's own. (On Linux Mocktail sizes the
+/// window instead.)
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn window(mode: &str) -> Vec<Prop> {
     match mode {
         "fullscreen" => vec![prop("bool", "Fullscreen", true)],

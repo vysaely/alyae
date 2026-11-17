@@ -2560,19 +2560,23 @@ impl App {
             self.servers_open = false;
         }
         if let Some((server_place, id)) = join {
-            // that server's own place, for this join only: the Place ID box keeps the game's
+            // that server's place and job ID, for this join only: the Place ID and Job ID boxes
+            // keep what was typed in them
             let inputs = self.inputs.entry(game.to_string()).or_default();
-            let before = inputs.get(&s.place).cloned();
+            let before = inputs.clone();
             if !server_place.is_empty() {
                 inputs.insert(s.place.clone(), server_place);
             }
             inputs.insert(s.server.clone(), id);
             self.start_action(&m, &primary.id.clone(), ids);
-            let inputs = self.inputs.entry(game.to_string()).or_default();
-            match before {
-                Some(b) => inputs.insert(s.place.clone(), b),
-                None => inputs.remove(&s.place),
-            };
+            self.inputs.insert(game.to_string(), before.clone());
+            // the join saved the boxes as it ran them: save them back as they are
+            if let Some(st) = &self.store {
+                st.set_setting(
+                    &format!("inputs.{game}"),
+                    &serde_json::to_string(&before).unwrap_or_default(),
+                );
+            }
         }
     }
     // --- right: launch and the chosen account -----------------------------------------------

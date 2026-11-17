@@ -159,6 +159,12 @@ pub fn window_input(v: &str) -> Result<Option<&str>, String> {
     }
 }
 
+/// `text` (a settings file, or None: a new one as Roblox would write it) with `props` set.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn with_props(text: Option<&str>, props: &[Prop]) -> String {
+    set(text.unwrap_or(NEW_FILE), props)
+}
+
 /// Sets `props` in the file at `path`, creating it when Roblox has not written one yet.
 pub fn apply(path: &Path, props: &[Prop]) -> std::io::Result<()> {
     let text = match std::fs::read_to_string(path) {
@@ -447,6 +453,16 @@ mod tests {
         assert_eq!(window_input("keep"), Ok(None));
         assert_eq!(window_input("small"), Ok(Some("small")));
         assert!(window_input("tiny").is_err());
+    }
+
+    /// The text a launch would put in place: the same for alts with the same settings (so the
+    /// launch needs no wait), a new file when there is none.
+    #[test]
+    fn launch_text() {
+        let props = [prop("int", "FramerateCap", 6)];
+        let a = with_props(Some(ROBLOX), &props);
+        assert_eq!(with_props(Some(&a), &props), a);
+        assert!(with_props(None, &props).contains("UserGameSettings"));
     }
 
     #[test]

@@ -85,6 +85,8 @@ id = "play"
 label = "Join Server"
 primary = true
 runs = true
+# several accounts: 2 s apart (joins are not throttled like sign-ins; a refusal still pauses the queue)
+gap = 2
 
 [[action.input]]
 key = "place"
@@ -100,6 +102,7 @@ hint = "job ID or private server link"
 id = "follow"
 label = "Follow"
 runs = true
+gap = 2
 
 [[action.input]]
 key = "follow"

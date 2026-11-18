@@ -307,6 +307,10 @@ pub struct Module {
     /// the "Close all games" button
     #[serde(default)]
     pub close_all: String,
+    /// a helper action that nudges every running game of this kind once, so none is kicked for
+    /// being idle: the "Nudge all" button
+    #[serde(default)]
+    pub nudge_all: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,
@@ -518,6 +522,8 @@ pub enum Event {
     WatchEnded,
     /// what the Servers window's helper answered
     Servers(ServersAnswer),
+    /// a line for the window's message bar (bad: shown as a problem)
+    Note { text: String, bad: bool },
 }
 
 pub struct Running {
@@ -635,12 +641,13 @@ fn request_json(
 
 /// Runs the helper's `action` for `account` and waits for it to end: for short actions the
 /// window waits on (the module's `on_remove`). Its errors are joined into the Err.
+/// Runs a helper action to its end; its last status line, if it said one.
 pub fn run_and_wait(
     module: &Module,
     action: &str,
     account: &Account,
     data_dir: &Path,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (mut child, dir, helper) = spawn_helper(module, action, action, data_dir)?;
     let request = request_json(module, account, &Default::default(), &dir);
     // stdin closes after the request: the helper sees no more lines
@@ -648,12 +655,18 @@ pub fn run_and_wait(
     let sent = stdin.write_all(format!("{request}\n").as_bytes());
     drop(stdin);
     let out = child.stdout.take().expect("piped stdout");
-    let errors: Vec<String> = BufReader::new(out)
+    let (mut errors, mut said) = (Vec::new(), None);
+    for v in BufReader::new(out)
         .lines()
         .map_while(Result::ok)
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
-        .filter_map(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-        .collect();
+    {
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            errors.push(e.to_string());
+        } else if let Some(t) = v.get("status").and_then(|t| t.as_str()) {
+            said = Some(t.to_string());
+        }
+    }
     let status = child.wait().map_err(|e| e.to_string())?;
     sent.map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
     if !errors.is_empty() {
@@ -662,7 +675,7 @@ pub fn run_and_wait(
     if !status.success() {
         return Err(format!("{} '{action}' failed ({status})", helper.display()));
     }
-    Ok(())
+    Ok(said)
 }
 
 /// Runs the module's watch once for `accounts`; its values arrive as one `Event::Watch`, then

@@ -1,0 +1,64 @@
+diff --git a/src/window/window.cc b/src/window/window.cc
+index 03d6974..76a6edb 100644
+--- a/src/window/window.cc
++++ b/src/window/window.cc
+@@ -4,6 +4,7 @@
+ #include <SDL3/SDL_video.h>
+ #include <SDL3/SDL_vulkan.h>
+ #include <dlfcn.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ 
+ #include <algorithm>
+@@ -2325,17 +2326,48 @@ bool PumpEvents() {
+     }
+     return AntiAfk(static_cast<uint64_t>(seconds) * 1000000000ULL);
+   }();
++  // Alyae: MOCKTAIL_NUDGE_FILE names a file; writing it (a new modification time) asks for one
++  // nudge now, the launcher's "Nudge all" button. Looked at once a second.
++  static const char* nudge_file = GetEnvNonEmpty("MOCKTAIL_NUDGE_FILE");
++  static uint64_t nudge_checked_ns = 0;
++  static struct timespec nudge_seen = [] {
++    struct stat st{};
++    return nudge_file != nullptr && stat(nudge_file, &st) == 0 ? st.st_mtim
++                                                                : timespec{};
++  }();
++  bool nudge_asked = false;
++  if (nudge_file != nullptr && now_ns - nudge_checked_ns >= 1000000000ULL) {
++    nudge_checked_ns = now_ns;
++    struct stat st{};
++    if (stat(nudge_file, &st) == 0 &&
++        (st.st_mtim.tv_sec != nudge_seen.tv_sec ||
++         st.st_mtim.tv_nsec != nudge_seen.tv_nsec)) {
++      nudge_seen = st.st_mtim;
++      nudge_asked = true;
++    }
++  }
++  const bool typing =
++      g_text_input_owner != nullptr && g_text_input_owner->active();
+   if (g_state.sdl_window != nullptr &&
+-      anti_afk.Due(SDL_GetTicksNS(), g_text_input_owner != nullptr &&
+-                                         g_text_input_owner->active())) {
++      (anti_afk.Due(SDL_GetTicksNS(), typing) || (nudge_asked && !typing))) {
++    // One pixel and back from where the pointer is: Roblox moves its cursor (or, in shift
++    // lock, the camera) by a pixel and straight back, which nobody sees. which = 0 marks it as
++    // not the player's input.
++    float x = 0.0f;
++    float y = 0.0f;
++    SDL_GetMouseState(&x, &y);
+     SDL_Event nudge{};
+     nudge.type = SDL_EVENT_MOUSE_MOTION;
+     nudge.motion.windowID = SDL_GetWindowID(g_state.sdl_window);
++    nudge.motion.which = 0;
++    nudge.motion.x = x + 1.0f;
++    nudge.motion.y = y;
+     nudge.motion.xrel = 1.0f;
+     SDL_PushEvent(&nudge);
++    nudge.motion.x = x;
+     nudge.motion.xrel = -1.0f;
+     SDL_PushEvent(&nudge);
+-    fprintf(stderr, "  [input] anti-AFK nudge\n");
++    fprintf(stderr, nudge_asked ? "  [input] nudge asked\n" : "  [input] anti-AFK nudge\n");
+   }
+   while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_EVENT_FIRST,
+                         SDL_EVENT_LAST) > 0) {

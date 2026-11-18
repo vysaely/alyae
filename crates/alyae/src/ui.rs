@@ -414,6 +414,10 @@ impl App {
                     crate::log::line(&self.name_of(&account), &text);
                     self.status.insert(account, (text, false));
                 }
+                Event::Note { text, bad } => {
+                    crate::log::line("", &text);
+                    self.message = Some((text, bad));
+                }
                 Event::Error { account, text } => {
                     let name = self
                         .accounts
@@ -1016,6 +1020,32 @@ impl App {
                 {
                     self.unqueue(&chosen);
                     self.stop(&chosen);
+                }
+                if !m.nudge_all.is_empty()
+                    && ui
+                        .button("Nudge all")
+                        .on_hover_text(
+                            "Anti-AFK now: every running game moves the pointer a pixel and \
+                             back, which nobody sees, so no account is kicked for being idle",
+                        )
+                        .clicked()
+                {
+                    let (m, dir, tx) = (m.clone(), self.dir.clone(), self.tx.clone());
+                    let account = Account {
+                        id: "all".into(),
+                        game: m.id.clone(),
+                        ..Default::default()
+                    };
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let (text, bad) =
+                            match module::run_and_wait(&m, &m.nudge_all, &account, &dir) {
+                                Ok(said) => (said.unwrap_or_else(|| "Nudged".into()), false),
+                                Err(e) => (format!("Nudge all: {e}"), true),
+                            };
+                        let _ = tx.send(Event::Note { text, bad });
+                        ctx.request_repaint();
+                    });
                 }
                 if !m.close_all.is_empty()
                     && ui

@@ -349,6 +349,19 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "FFlagAutomaticDRSDisableHighDPIFramebufferHalving": true,
             "FFlagDebugGraphicsPreferOpenGL": true,
             "DFFlagEnableRequestAsyncCompression": false,
+            // the Windows client's loading values where the Android ones are smaller: clothing
+            // jobs, orphan texture budget, content hot cache and bundles, sound budget estimate,
+            // a disk cache (rbx-storage) above the 2.5 GB it fills, and animation tracks per
+            // character (Roblox drops the 51st at 50, and with it a late or missing animation)
+            "DFIntTextureCompositorActiveJobs": 8,
+            "FIntRenderTextureOrphanMinBudgetMB": 64,
+            "DFIntWrapContentProviderHotCacheSize": 20000000,
+            "FIntWrapContentProviderMaxBundleCount": 64,
+            "DFFlagSoundCacheUseBudgetUtilizationEstimator": true,
+            "DFIntRbxStorageDBMaxCapacityMB": 8192,
+            "DFIntRbxStorageCapacityHighMB": 8192,
+            "DFIntRbxStorageCapacityLowMB": 8192,
+            "DFIntReplicatorAnimationTrackLimitPerAnimator": 256,
         })
     } else {
         json!({
@@ -849,6 +862,12 @@ pub fn play(req: &Request) {
     ));
     env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
     env.extend(shiftlock_cursor(req));
+    // Alyae's Mocktail build (patch 10): a main loses Mocktail's phone-sized memory caps, so
+    // textures, meshes, sounds and animations stay loaded instead of being evicted and fetched
+    // again; alts keep them
+    if main {
+        env.push(("MOCKTAIL_LOW_MEMORY_PROFILE".into(), "0".into()));
+    }
     // Alyae's Mocktail build (anti-AFK patch): a nudge after this many seconds without input
     let afk_minutes: u64 = req.get("anti_afk").parse().unwrap_or(0);
     if afk_minutes > 0 {

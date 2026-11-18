@@ -183,24 +183,50 @@ fn running_pid(program: &Path) -> Option<i32> {
     })
 }
 
+/// Every account's running Mocktail game, as process IDs.
+fn running_games() -> Vec<i32> {
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    procs
+        .flatten()
+        .filter_map(|p| {
+            let pid = p.file_name().to_str()?.parse::<i32>().ok()?;
+            let c = fs::read(p.path().join("cmdline")).ok()?;
+            let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
+            let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
+            name.to_str()?.starts_with("mocktail_alyae_").then_some(pid)
+        })
+        .collect()
+}
+
+/// The "Nudge all" button: every running game moves the pointer a pixel and back once (as
+/// anti-AFK does), so Roblox counts the account as active. Each game names its nudge file in
+/// its environment; a game started before that existed has none and is skipped.
+pub fn nudge_all() {
+    let (mut nudged, mut old) = (0, 0);
+    for pid in running_games() {
+        let env = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let file = env
+            .split(|b| *b == 0)
+            .find_map(|kv| kv.strip_prefix(b"MOCKTAIL_NUDGE_FILE="))
+            .map(|v| PathBuf::from(std::ffi::OsStr::from_bytes(v)));
+        match file {
+            Some(f) if fs::write(&f, format!("{:?}", std::time::SystemTime::now())).is_ok() => nudged += 1,
+            _ => old += 1,
+        }
+    }
+    let mut text = format!("{nudged} games nudged");
+    if old > 0 {
+        text += &format!(", {old} started before Nudge all existed (restart them)");
+    }
+    status(&text);
+}
+
 /// The "Close all games" button: every account's Mocktail game (each runs as its own
 /// `mocktail_alyae_...` program) is asked to end, and made to after 4 s.
 pub fn close_all() {
-    let games = || -> Vec<i32> {
-        let Ok(procs) = fs::read_dir("/proc") else {
-            return Vec::new();
-        };
-        procs
-            .flatten()
-            .filter_map(|p| {
-                let pid = p.file_name().to_str()?.parse::<i32>().ok()?;
-                let c = fs::read(p.path().join("cmdline")).ok()?;
-                let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
-                let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
-                name.to_str()?.starts_with("mocktail_alyae_").then_some(pid)
-            })
-            .collect()
-    };
+    let games = running_games;
     let all = games();
     for pid in &all {
         // SAFETY: plain signal to a process ID
@@ -818,6 +844,8 @@ pub fn play(req: &Request) {
         ("XDG_CACHE_HOME".into(), p("cache")),
         ("XDG_STATE_HOME".into(), p("state")),
         ("MOCKTAIL_COOKIE_FILE".into(), p("roblox.cookie")),
+        // Alyae's Mocktail build (patch 11): writing this file asks the game for one nudge now
+        ("MOCKTAIL_NUDGE_FILE".into(), p("nudge")),
         ("MOCKTAIL_DISABLE_FAILURE_DIALOG".into(), "1".into()),
         ("MOCKTAIL_GRAPHICS_BACKEND".into(), "opengl".into()),
         // a Windows PC with mouse and keyboard: Roblox shows its PC layout and settings

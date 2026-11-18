@@ -8,6 +8,8 @@ helper = "alyae-roblox"
 resume = "resume"
 # the "Close all games" button: every Roblox, also ones Alyae did not start
 close_all = "close_all"
+# the "Nudge all" button: every running game moves the pointer a pixel and back once (anti-AFK now)
+nudge_all = "nudge_all"
 title_field = "username"
 # removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
 # AEAM stays; only Mocktail's saved sign-in in it goes)

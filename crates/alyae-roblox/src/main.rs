@@ -478,6 +478,8 @@ fn main() {
         "forget" => linux::forget(&req),
         #[cfg(target_os = "linux")]
         "close_all" => linux::close_all(),
+        #[cfg(target_os = "linux")]
+        "nudge_all" => linux::nudge_all(),
         #[cfg(windows)]
         "close_all" => windows::close_all(),
         #[cfg(target_os = "linux")]

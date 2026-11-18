@@ -59,6 +59,14 @@ pub struct Action {
     /// asked before the action runs (it changes the accounts)
     #[serde(default)]
     pub confirm: String,
+    /// seconds between two accounts when it runs for several (0: Alyae's usual few seconds);
+    /// sign-ins want more, or the game's servers refuse the connection for a while
+    #[serde(default)]
+    pub gap: u64,
+    /// `local = true`: only files on this computer, nothing asked of the game's servers, so it
+    /// runs for every chosen account at once instead of one at a time in the queue
+    #[serde(default)]
+    pub local: bool,
 }
 
 impl Action {
@@ -123,6 +131,144 @@ impl Watch {
     }
 }
 
+/// `[servers]`: the Servers window, the public servers of every place of the game whose place
+/// is in the primary action's `place` box; a row's Join runs the primary action with that
+/// server's place in `place` and its id in the `server` box.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Servers {
+    /// the helper action that lists them. Gets `{"place": box, "data_dir"}` and answers
+    /// `{"places": [{"id", "name"}], "root": start place}`; gets `{"place": box, "of": place id, "data_dir"}` and
+    /// answers `{"servers": [{"id", "players", "max", "ping", "fps"}], "wait": s}` (or
+    /// `{"error", "wait"}`), `wait` being how long the game wants before the next list
+    pub action: String,
+    pub place: String,
+    pub server: String,
+    /// least seconds between two lists, whatever the helper says
+    #[serde(default = "servers_every")]
+    pub every: u64,
+}
+
+fn servers_every() -> u64 {
+    5
+}
+
+/// What one run of the servers action answered.
+#[derive(Debug)]
+pub enum ServersAnswer {
+    /// the game's places, (id, name), and its start place when known (most games refuse a
+    /// direct join to any other)
+    Places {
+        places: Vec<(String, String)>,
+        root: Option<String>,
+    },
+    /// one place's servers, and the seconds to wait before the next list
+    List {
+        place: String,
+        rows: Vec<ServerRow>,
+        wait: u64,
+    },
+    Failed {
+        text: String,
+        wait: u64,
+    },
+}
+
+/// One server of the Servers window.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ServerRow {
+    /// the place it runs (filled in by the window)
+    #[serde(default)]
+    pub place: String,
+    pub id: String,
+    #[serde(default)]
+    pub players: u64,
+    #[serde(default)]
+    pub max: u64,
+    #[serde(default)]
+    pub ping: u64,
+    #[serde(default)]
+    pub fps: f64,
+}
+
+/// Lists the places of the game of `place` (`of` None), or the servers of the place `of`; the
+/// answer arrives as one `Event::Servers`.
+pub fn servers(
+    module: &Module,
+    s: &Servers,
+    place: &str,
+    of: Option<&str>,
+    data_dir: &Path,
+    tx: Sender<Event>,
+    wake: impl Fn() + Send + 'static,
+) -> Result<Child, String> {
+    let (mut child, dir, helper) = spawn_helper(module, &s.action, "Servers", data_dir)?;
+    let mut request = serde_json::json!({ "place": place, "data_dir": dir });
+    if let Some(of) = of {
+        request["of"] = of.into();
+    }
+    let of = of.map(String::from);
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(format!("{request}\n").as_bytes())
+        .map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
+    drop(stdin);
+    let out = child.stdout.take().expect("piped stdout");
+    std::thread::spawn(move || {
+        let mut answer = ServersAnswer::Failed {
+            text: "the helper sent no server list".into(),
+            wait: 20,
+        };
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                answer = servers_answer(&v, of.as_deref()).unwrap_or(answer);
+            }
+        }
+        let _ = tx.send(Event::Servers(answer));
+        wake();
+    });
+    Ok(child)
+}
+
+/// One line of the servers action, for the place `of` (None: the places were asked for).
+pub fn servers_answer(v: &serde_json::Value, of: Option<&str>) -> Option<ServersAnswer> {
+    let wait = v["wait"].as_u64().unwrap_or(20);
+    if let Some(e) = v["error"].as_str() {
+        return Some(ServersAnswer::Failed {
+            text: e.to_string(),
+            wait,
+        });
+    }
+    if let Some(list) = v["places"].as_array() {
+        let places = list
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p["id"].as_str()?.to_string(),
+                    p["name"].as_str().unwrap_or("").to_string(),
+                ))
+            })
+            .collect();
+        let root = v["root"].as_str().map(String::from);
+        return Some(ServersAnswer::Places { places, root });
+    }
+    let list = v.get("servers")?;
+    Some(
+        match serde_json::from_value::<Vec<ServerRow>>(list.clone()) {
+            Ok(mut rows) => {
+                let place = of.unwrap_or_default().to_string();
+                for r in &mut rows {
+                    r.place.clone_from(&place);
+                }
+                ServersAnswer::List { place, rows, wait }
+            }
+            Err(e) => ServersAnswer::Failed {
+                text: format!("a server list Alyae cannot read: {e}"),
+                wait,
+            },
+        },
+    )
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Module {
     /// the game's id: accounts belong to it, so the Linux and Windows modules of one game share them
@@ -148,9 +294,20 @@ pub struct Module {
     /// a helper action run (and waited for) before an account is removed, to delete its files
     #[serde(default)]
     pub on_remove: String,
+    /// a helper action run for every account when Alyae opens, as a running game's action:
+    /// reattaches to the account's game still running from before (Alyae closing leaves the
+    /// games running), or ends at once when there is none
+    #[serde(default)]
+    pub resume: String,
+    /// a helper action that closes every game of this kind, the ones Alyae lost track of too:
+    /// the "Close all games" button
+    #[serde(default)]
+    pub close_all: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,
+    #[serde(default)]
+    pub servers: Option<Servers>,
     #[serde(skip)]
     pub dir: PathBuf,
 }
@@ -355,6 +512,8 @@ pub enum Event {
     /// a watch's helper could not answer
     WatchError(String),
     WatchEnded,
+    /// what the Servers window's helper answered
+    Servers(ServersAnswer),
 }
 
 pub struct Running {

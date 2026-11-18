@@ -34,6 +34,10 @@ pub struct App {
     /// the action inputs (place, server ...) per game
     inputs: HashMap<String, Values>,
     running: HashMap<String, Running>,
+    /// resume helpers still looking for their account's game: running once one says so
+    resuming: HashMap<String, Running>,
+    /// "Close all games" waits for its confirmation
+    confirm_close_all: bool,
     /// short helper actions (Refresh ...): not "running", only waited for
     tasks: Vec<(String, Running)>,
     status: HashMap<String, (String, bool)>,
@@ -65,6 +69,9 @@ pub struct App {
     queue_ended: bool,
     /// the next queued account starts no sooner than this
     queue_next: Option<std::time::Instant>,
+    /// extra wait in the queue after the game's servers refused for too many requests (a
+    /// throttled sign-in): 2 minutes, doubling to 10 while it goes on, none once one works
+    queue_backoff: Duration,
     /// accounts made by Add account or Import whose action (login window, check) is still running:
     /// kept when it works, dropped when it does not
     adding: HashSet<String>,
@@ -82,6 +89,26 @@ pub struct App {
     side_for: Option<String>,
     alias_buf: String,
     notes_buf: String,
+    /// the Servers window: open, the last error, the run in progress
+    servers_open: bool,
+    servers_error: Option<String>,
+    servers_child: Option<std::process::Child>,
+    /// the Place ID text the game's places were looked up for, and those places (id, name)
+    servers_for: String,
+    servers_places: Vec<(String, String)>,
+    /// the game's start place: the others' Join is off unless `servers_direct` (most games
+    /// refuse a direct join to a sub place: error 524)
+    servers_root: Option<String>,
+    servers_direct: bool,
+    /// each place's servers and when they came; the places are asked in turn, one list at a
+    /// time no sooner than `servers_next` (the game allows only a few lists a minute)
+    servers_rows: HashMap<String, (Vec<module::ServerRow>, std::time::Instant)>,
+    servers_next: Option<std::time::Instant>,
+    servers_turn: usize,
+    /// the window shows this place only (None: all)
+    servers_filter: Option<String>,
+    /// the list fullest first (else lowest ping first)
+    servers_by_players: bool,
 }
 
 /// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
@@ -112,6 +139,11 @@ enum Loaded {
 
 const NO_GROUP: &str = "Ungrouped";
 
+/// Why a sub place's server has no Join.
+const SUB_PLACE: &str = "Most games let players join only their start place and send them to the \
+    others themselves: Roblox refuses a direct join with error 524. Join the start place, or \
+    Follow someone in this server. Tick \"Join sub places directly\" for a game that allows it.";
+
 impl App {
     pub fn new(
         ctx: &egui::Context,
@@ -139,6 +171,8 @@ impl App {
             shown_secrets: HashSet::new(),
             inputs: HashMap::new(),
             running: HashMap::new(),
+            resuming: HashMap::new(),
+            confirm_close_all: false,
             tasks: Vec::new(),
             status: HashMap::new(),
             message: None,
@@ -158,6 +192,7 @@ impl App {
             queue_current: None,
             queue_ended: false,
             queue_next: None,
+            queue_backoff: Duration::ZERO,
             adding: HashSet::new(),
             import_text: None,
             bookmark_name: String::new(),
@@ -167,6 +202,18 @@ impl App {
             side_for: None,
             alias_buf: String::new(),
             notes_buf: String::new(),
+            servers_open: false,
+            servers_error: None,
+            servers_child: None,
+            servers_for: String::new(),
+            servers_places: Vec::new(),
+            servers_root: None,
+            servers_direct: false,
+            servers_rows: HashMap::new(),
+            servers_next: None,
+            servers_turn: 0,
+            servers_filter: None,
+            servers_by_players: true,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -182,6 +229,7 @@ impl App {
                 if !problems.is_empty() {
                     app.say(problems.join("; "), true);
                 }
+                app.resume_games();
             }
             Err(e) => app.fatal = Some(e),
         }
@@ -190,6 +238,52 @@ impl App {
 
     fn module(&self, id: &str) -> Option<&Module> {
         self.modules.iter().find(|m| m.id == id)
+    }
+
+    /// Whether `action` is the resume action of `account`'s game.
+    fn is_resume(&self, account: &str, action: &str) -> bool {
+        self.accounts
+            .iter()
+            .find(|a| a.id == account)
+            .and_then(|a| self.module(&a.game))
+            .is_some_and(|m| !m.resume.is_empty() && m.resume == action)
+    }
+
+    /// When Alyae opens: every account's game still running from before (closing Alyae leaves
+    /// the games running) is taken back as running, through its module's resume action. The
+    /// helper ends at once for an account with no game.
+    fn resume_games(&mut self) {
+        let list: Vec<(Module, Account)> = self
+            .accounts
+            .iter()
+            .filter_map(|a| {
+                let m = self.module(&a.game)?;
+                (!m.resume.is_empty()).then(|| (m.clone(), a.clone()))
+            })
+            .collect();
+        for (m, a) in list {
+            let Ok(action) = serde_json::from_value::<module::Action>(serde_json::json!({
+                "id": m.resume, "label": "Resume", "runs": true
+            })) else {
+                continue;
+            };
+            let ctx = self.ctx.clone();
+            if let Ok(Some(r)) = module::start(
+                &m,
+                &action,
+                &a,
+                &Values::default(),
+                &self.dir,
+                self.tx.clone(),
+                move || {
+                    if let Some(c) = &ctx {
+                        c.request_repaint();
+                    }
+                },
+            ) {
+                self.resuming.insert(a.id.clone(), r);
+            }
+        }
     }
 
     fn say(&mut self, text: impl Into<String>, bad: bool) {
@@ -308,6 +402,12 @@ impl App {
                     }
                 }
                 Event::Status { account, text } => {
+                    // a resume helper found the account's game: it runs again
+                    if text.starts_with("running")
+                        && let Some(r) = self.resuming.remove(&account)
+                    {
+                        self.running.insert(account.clone(), r);
+                    }
                     crate::log::line(&self.name_of(&account), &text);
                     self.status.insert(account, (text, false));
                 }
@@ -318,6 +418,41 @@ impl App {
                         .find(|a| a.id == account)
                         .map(|a| self.title(a))
                         .unwrap_or_default();
+                    let current = self
+                        .queue_current
+                        .as_ref()
+                        .is_some_and(|(a, _, _)| *a == account);
+                    // the computer has no room for more: the accounts after would only wait in
+                    // vain too, so the queue stops (the running ones keep running)
+                    if current && is_out_of_memory(&text) && !self.queue.is_empty() {
+                        let left = self.queue.len();
+                        self.queue.clear();
+                        self.queue_next = None;
+                        self.say(
+                            format!(
+                                "{name}: {text}. The queue stopped: {} not started",
+                                plural(left)
+                            ),
+                            true,
+                        );
+                        self.status.insert(account, (text, true));
+                        continue;
+                    }
+                    if is_rate_limit(&text) && current {
+                        self.queue_backoff = (self.queue_backoff * 2)
+                            .clamp(Duration::from_secs(120), Duration::from_secs(600));
+                        if !self.queue.is_empty() {
+                            self.say(
+                                format!(
+                                    "{name}: {text}. The queue waits {} min before the next account",
+                                    self.queue_backoff.as_secs() / 60
+                                ),
+                                true,
+                            );
+                            self.status.insert(account, (text, true));
+                            continue;
+                        }
+                    }
                     self.say(format!("{name}: {text}"), true);
                     self.status.insert(account, (text, true));
                 }
@@ -347,15 +482,58 @@ impl App {
                         let _ = c.wait();
                     }
                 }
+                Event::Servers(answer) => {
+                    if let Some(mut c) = self.servers_child.take() {
+                        let _ = c.wait();
+                    }
+                    let now = std::time::Instant::now();
+                    let least = self
+                        .game
+                        .as_deref()
+                        .and_then(|g| self.module(g))
+                        .and_then(|m| m.servers.as_ref())
+                        .map_or(5, |s| s.every);
+                    let after = |wait: u64| Some(now + Duration::from_secs(wait.max(least)));
+                    match answer {
+                        module::ServersAnswer::Places { places, root } => {
+                            self.servers_places = places;
+                            self.servers_root = root;
+                            self.servers_turn = 0;
+                            self.servers_error = None;
+                            self.servers_next = None;
+                        }
+                        module::ServersAnswer::List { place, rows, wait } => {
+                            self.servers_rows.insert(place, (rows, now));
+                            self.servers_error = None;
+                            self.servers_next = after(wait);
+                        }
+                        module::ServersAnswer::Failed { text, wait } => {
+                            self.servers_error = Some(text);
+                            self.servers_next = after(wait);
+                        }
+                    }
+                }
                 Event::Ended {
                     account,
                     action,
                     ok,
                 } => {
-                    crate::log::line(
-                        &self.name_of(&account),
-                        &format!("{action} ended{}", if ok { "" } else { " with an error" }),
-                    );
+                    // a resume that found no game ends quietly
+                    let quiet = ok && self.is_resume(&account, &action);
+                    if self
+                        .resuming
+                        .get(&account)
+                        .is_some_and(|r| r.action == action)
+                        && let Some(mut r) = self.resuming.remove(&account)
+                    {
+                        let _ = r.child.wait();
+                    }
+                    if !quiet {
+                        crate::log::line(
+                            &self.name_of(&account),
+                            &format!("{action} ended{}", if ok { "" } else { " with an error" }),
+                        );
+                    }
                     if self
                         .running
                         .get(&account)
@@ -380,6 +558,9 @@ impl App {
                         .is_some_and(|(a, act, _)| *a == account && *act == action)
                     {
                         self.queue_ended = true;
+                        if ok {
+                            self.queue_backoff = Duration::ZERO;
+                        }
                     }
                     if self.adding.remove(&account) {
                         self.finish_add(&account, ok);
@@ -426,6 +607,31 @@ impl App {
                 &serde_json::to_string(&all).unwrap_or_default(),
             );
         }
+        // only files here (Settings): nothing to pace, every account at once. One account on
+        // its own does not wait behind a queue either (owner, 2026-11-17): it starts now, and
+        // leaves the queue if it was waiting there (the helper still limits games loading at
+        // once and wants free memory)
+        if action.local || ids.len() == 1 {
+            if !action.local {
+                self.queue
+                    .retain(|j| !(ids.contains(&j.account) && j.action == action.id));
+            }
+            // one account on its own: the helper starts it without waiting for free RAM
+            // (owner, 2026-11-18)
+            let mut inputs = inputs;
+            if !action.local {
+                inputs.insert("_alone".into(), "1".into());
+            }
+            for id in ids {
+                self.start_job(&Job {
+                    game: game.clone(),
+                    action: action.id.clone(),
+                    account: id,
+                    inputs: inputs.clone(),
+                });
+            }
+            return;
+        }
         // one account at a time, a few seconds apart: many sign-ins or joins at once from one
         // connection get it refused by the game's servers (owner, 2026-11-17)
         for id in ids {
@@ -443,16 +649,21 @@ impl App {
     /// the gap after it has passed.
     fn advance_queue(&mut self) {
         let now = std::time::Instant::now();
-        if let Some((id, _, runs)) = self.queue_current.clone() {
-            // ended, or a game that is up and running
+        if let Some((id, action, runs)) = self.queue_current.clone() {
+            // ended, or a game that is up and running ("running, loading" counts: the helper
+            // limits how many load at once itself)
             let done = self.queue_ended
-                || (runs && self.status.get(&id).is_some_and(|(t, _)| t == "running"));
+                || (runs
+                    && self
+                        .status
+                        .get(&id)
+                        .is_some_and(|(t, _)| t.starts_with("running")));
             if !done {
                 return;
             }
             self.queue_current = None;
             if !self.queue.is_empty() {
-                self.queue_next = Some(now + QUEUE_GAP);
+                self.queue_next = Some(now + self.queue_gap(&action) + self.queue_backoff);
             }
         }
         if let Some(at) = self.queue_next {
@@ -523,6 +734,22 @@ impl App {
         }
     }
 
+    /// The wait after one account of `action` before the next: the module's `gap`, else the
+    /// usual one.
+    fn queue_gap(&self, action: &str) -> Duration {
+        let gap = self
+            .game
+            .as_deref()
+            .and_then(|g| self.module(g))
+            .and_then(|m| m.actions.iter().find(|a| a.id == action))
+            .map_or(0, |a| a.gap);
+        if gap == 0 {
+            QUEUE_GAP
+        } else {
+            Duration::from_secs(gap)
+        }
+    }
+
     /// Takes `ids` out of the queue (Stop on accounts still waiting).
     fn unqueue(&mut self, ids: &[String]) {
         self.queue.retain(|j| !ids.contains(&j.account));
@@ -550,12 +777,15 @@ impl eframe::App for App {
             None => self.game_picker(ui),
             Some(g) => {
                 self.tick_watch(&ctx, &g);
+                self.tick_servers(&ctx, &g);
                 self.game_view(ui, &g);
+                self.servers_window(&ctx, &g);
             }
         }
         self.edit_dialog(&ctx);
         self.remove_dialog(&ctx);
         self.form_dialog(&ctx);
+        self.close_all_dialog(&ctx);
         // an accounts file dropped on the window opens the import
         let dropped = ctx.input(|i| {
             i.raw
@@ -767,6 +997,32 @@ impl App {
                         path: crate::transfer::default_path().display().to_string(),
                         ..Default::default()
                     });
+                }
+                // the chosen accounts' games, one or several
+                let chosen: Vec<String> = self
+                    .selected
+                    .iter()
+                    .filter(|id| self.running.contains_key(*id))
+                    .cloned()
+                    .collect();
+                if !chosen.is_empty()
+                    && ui
+                        .button(format!("Close selected ({})", chosen.len()))
+                        .on_hover_text("Closes the games of the chosen accounts")
+                        .clicked()
+                {
+                    self.unqueue(&chosen);
+                    self.stop(&chosen);
+                }
+                if !m.close_all.is_empty()
+                    && ui
+                        .button("Close all games")
+                        .on_hover_text(
+                            "Closes every game of this kind, also ones Alyae did not start",
+                        )
+                        .clicked()
+                {
+                    self.confirm_close_all = true;
                 }
                 if !self.queue.is_empty()
                     && ui
@@ -1573,7 +1829,8 @@ impl App {
                 choice = Some(MenuChoice::Run(a.id.clone()));
             }
         }
-        if ids.iter().any(|id| self.running.contains_key(id)) && ui.button(count("Stop")).clicked()
+        if ids.iter().any(|id| self.running.contains_key(id))
+            && ui.button(count("Close game")).clicked()
         {
             choice = Some(MenuChoice::Stop);
         }
@@ -2023,6 +2280,58 @@ impl App {
         }
     }
 
+    /// "Close all games", once confirmed: the queue stops, every game Alyae runs is asked to
+    /// stop, and the module's close-all action closes the rest (ones started elsewhere or lost
+    /// track of), on a thread of its own.
+    fn close_all_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_close_all {
+            return;
+        }
+        let Some(m) = self.game.as_deref().and_then(|g| self.module(g)).cloned() else {
+            self.confirm_close_all = false;
+            return;
+        };
+        let mut done = None;
+        egui::Modal::new(egui::Id::unique("close_all")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.heading(format!("Close all {} games?", m.name));
+            ui.label("Every one closes now, also the ones Alyae did not start; the queue stops.");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add(look::primary("Close all")).clicked() {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => {
+                self.confirm_close_all = false;
+                self.queue.clear();
+                self.queue_next = None;
+                for r in self.running.values_mut() {
+                    r.stop();
+                }
+                let dir = self.dir.clone();
+                let account = Account {
+                    id: "all".into(),
+                    game: m.id.clone(),
+                    ..Default::default()
+                };
+                std::thread::spawn(move || {
+                    if let Err(e) = module::run_and_wait(&m, &m.close_all, &account, &dir) {
+                        crate::log::line("", &format!("Close all games: {e}"));
+                    }
+                });
+                self.say("Closing all games", false);
+            }
+            Some(false) => self.confirm_close_all = false,
+            None => {}
+        }
+    }
+
     /// Runs `action`, or first opens its form when it asks for values or a confirmation.
     fn start_action(&mut self, m: &Module, action: &str, ids: Vec<String>) {
         if m.actions.iter().any(|a| a.id == action && a.needs_form()) {
@@ -2145,6 +2454,315 @@ impl App {
         ctx.request_repaint_after(every);
     }
 
+    /// The Place ID box's text, for the Servers window.
+    fn servers_place(&self, game: &str) -> String {
+        let key = self
+            .module(game)
+            .and_then(|m| m.servers.as_ref())
+            .map(|s| s.place.clone())
+            .unwrap_or_default();
+        self.inputs
+            .get(game)
+            .and_then(|i| i.get(&key))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// While the Servers window is open: looks up the game's places when the Place ID changes,
+    /// then lists their servers one place at a time, in turn, as fast as the game allows (its
+    /// answer says how long to wait). One run at a time.
+    fn tick_servers(&mut self, ctx: &egui::Context, game: &str) {
+        if !self.servers_open {
+            return;
+        }
+        let Some(m) = self.module(game).cloned() else {
+            return;
+        };
+        let Some(s) = m.servers.clone() else { return };
+        let place = self.servers_place(game);
+        if place.is_empty() || self.servers_child.is_some() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(at) = self.servers_next
+            && now < at
+        {
+            ctx.request_repaint_after(at - now);
+            return;
+        }
+        let of = if self.servers_for != place {
+            // another game, or another place of this one: keep what is known of this game
+            if !self.servers_places.iter().any(|(id, _)| *id == place) {
+                self.servers_places.clear();
+                self.servers_root = None;
+                self.servers_rows.clear();
+                self.servers_filter = None;
+            }
+            self.servers_for = place.clone();
+            if self.servers_places.is_empty() {
+                None
+            } else {
+                return self.tick_servers(ctx, game);
+            }
+        } else if self.servers_places.is_empty() {
+            None
+        } else {
+            // the shown place when one is chosen, else each place in turn
+            let id = match &self.servers_filter {
+                Some(f) => f.clone(),
+                None => {
+                    let i = self.servers_turn % self.servers_places.len();
+                    self.servers_turn += 1;
+                    self.servers_places[i].0.clone()
+                }
+            };
+            Some(id)
+        };
+        let wake_ctx = self.ctx.clone();
+        match module::servers(
+            &m,
+            &s,
+            &place,
+            of.as_deref(),
+            &self.dir,
+            self.tx.clone(),
+            move || {
+                if let Some(c) = &wake_ctx {
+                    c.request_repaint();
+                }
+            },
+        ) {
+            Ok(child) => self.servers_child = Some(child),
+            Err(e) => {
+                self.servers_error = Some(e);
+                self.servers_next = Some(now + Duration::from_secs(20));
+            }
+        }
+    }
+
+    /// A place's name in the Servers window.
+    fn place_name(&self, id: &str) -> String {
+        self.servers_places
+            .iter()
+            .find(|(p, _)| p == id)
+            .map(|(_, n)| n.trim())
+            .filter(|n| !n.is_empty())
+            .map_or_else(|| id.to_string(), String::from)
+    }
+
+    /// The Servers window: the public servers of every place of the game, each with Join (the
+    /// chosen accounts into that server, in its place) and Copy (its job ID).
+    fn servers_window(&mut self, ctx: &egui::Context, game: &str) {
+        if !self.servers_open {
+            return;
+        }
+        let Some(m) = self.module(game).cloned() else {
+            return;
+        };
+        let (Some(s), Some(primary)) = (m.servers.clone(), m.actions.iter().find(|a| a.primary))
+        else {
+            return;
+        };
+        let place = self.servers_place(game);
+        let ids: Vec<String> = self
+            .selected
+            .iter()
+            .filter(|id| self.accounts.iter().any(|a| &a.id == *id))
+            .cloned()
+            .collect();
+        let can_join = !ids.is_empty() && !self.draft_new;
+        let shown = |p: &str| self.servers_filter.as_deref().is_none_or(|f| f == p);
+        let mut list: Vec<module::ServerRow> = self
+            .servers_rows
+            .iter()
+            .filter(|(p, _)| shown(p))
+            .flat_map(|(_, (rows, _))| rows.iter().cloned())
+            .collect();
+        if self.servers_by_players {
+            list.sort_by(|a, b| b.players.cmp(&a.players).then(a.ping.cmp(&b.ping)));
+        } else {
+            list.sort_by(|a, b| a.ping.cmp(&b.ping).then(b.players.cmp(&a.players)));
+        }
+        let several = self.servers_places.len() > 1;
+        let root = self.servers_root.clone();
+        let names: HashMap<String, String> = self
+            .servers_places
+            .iter()
+            .map(|(id, _)| (id.clone(), self.place_name(id)))
+            .collect();
+        // each place: its servers and players, and how old its list is
+        let summary: Vec<String> = self
+            .servers_places
+            .iter()
+            .filter(|(id, _)| shown(id))
+            .map(|(id, _)| match self.servers_rows.get(id) {
+                Some((rows, at)) => format!(
+                    "{}: {} servers, {} players ({} s ago)",
+                    names[id],
+                    rows.len(),
+                    rows.iter().map(|r| r.players).sum::<u64>(),
+                    at.elapsed().as_secs()
+                ),
+                None => format!("{}: not listed yet", names[id]),
+            })
+            .collect();
+        let mut open = true;
+        let mut join = None;
+        let mut refresh = false;
+        egui::Window::new("Servers")
+            .open(&mut open)
+            .default_size([620.0, 460.0])
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if several {
+                        let label = |f: &Option<String>| match f {
+                            Some(id) => names.get(id).cloned().unwrap_or_else(|| id.clone()),
+                            None => format!("All {} places", names.len()),
+                        };
+                        egui::ComboBox::from_id_salt("servers_place")
+                            .selected_text(label(&self.servers_filter))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.servers_filter, None, label(&None));
+                                for (id, _) in &self.servers_places {
+                                    let v = Some(id.clone());
+                                    let text = label(&v);
+                                    ui.selectable_value(&mut self.servers_filter, v, text);
+                                }
+                            });
+                    }
+                    egui::ComboBox::from_id_salt("servers_sort")
+                        .selected_text(if self.servers_by_players {
+                            "Most players"
+                        } else {
+                            "Lowest ping"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.servers_by_players, true, "Most players");
+                            ui.selectable_value(&mut self.servers_by_players, false, "Lowest ping");
+                        });
+                    if ui
+                        .add_enabled(self.servers_child.is_none(), egui::Button::new("Refresh"))
+                        .on_hover_text("List the next place now, if Roblox allows it")
+                        .clicked()
+                    {
+                        refresh = true;
+                    }
+                });
+                if place.is_empty() {
+                    ui.label("Put a place ID or game link in the Place ID box.");
+                }
+                for line in &summary {
+                    ui.label(RichText::new(line).small());
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "Roblox allows about 3 lists a minute: {} listed one at a time, each \
+                         again in turn. Join sends the {} chosen into that server.",
+                        if several {
+                            "the places are"
+                        } else {
+                            "the place is"
+                        },
+                        plural(ids.len())
+                    ))
+                    .weak()
+                    .small(),
+                );
+                if several && root.is_some() {
+                    ui.checkbox(&mut self.servers_direct, "Join sub places directly")
+                        .on_hover_text(SUB_PLACE);
+                }
+                if let Some(e) = &self.servers_error {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                }
+                let direct = self.servers_direct;
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        let cols = if several { 6 } else { 5 };
+                        egui::Grid::new("servers_grid")
+                            .num_columns(cols)
+                            .striped(true)
+                            .spacing([14.0, 4.0])
+                            .show(ui, |ui| {
+                                if several {
+                                    ui.label(RichText::new("PLACE").weak().small());
+                                }
+                                for h in ["PLAYERS", "PING", "FPS", "JOB ID", ""] {
+                                    ui.label(RichText::new(h).weak().small());
+                                }
+                                ui.end_row();
+                                for r in &list {
+                                    if several {
+                                        let name = names.get(&r.place).cloned().unwrap_or_default();
+                                        ui.label(name);
+                                    }
+                                    ui.label(format!("{}/{}", r.players, r.max));
+                                    ui.label(format!("{} ms", r.ping));
+                                    ui.label(format!("{:.0}", r.fps));
+                                    let short: String = r.id.chars().take(8).collect();
+                                    ui.label(RichText::new(format!("{short}…")).monospace())
+                                        .on_hover_text(&r.id);
+                                    ui.horizontal(|ui| {
+                                        let label = if ids.len() > 1 {
+                                            format!("Join ({})", ids.len())
+                                        } else {
+                                            "Join".to_string()
+                                        };
+                                        let sub = root.as_ref().is_some_and(|p| *p != r.place);
+                                        if sub && !direct {
+                                            ui.add_enabled(false, egui::Button::new("Sub place"))
+                                                .on_disabled_hover_text(SUB_PLACE);
+                                        } else if ui
+                                            .add_enabled(can_join, egui::Button::new(label))
+                                            .on_disabled_hover_text(
+                                                "Choose accounts in the list first",
+                                            )
+                                            .clicked()
+                                        {
+                                            join = Some((r.place.clone(), r.id.clone()));
+                                        }
+                                        if ui
+                                            .button("Copy")
+                                            .on_hover_text("Copy the job ID")
+                                            .clicked()
+                                        {
+                                            ui.ctx().copy_text(r.id.clone());
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        if refresh {
+            self.servers_next = None;
+        }
+        if !open {
+            self.servers_open = false;
+        }
+        if let Some((server_place, id)) = join {
+            // that server's place and job ID, for this join only: the Place ID and Job ID boxes
+            // keep what was typed in them
+            let inputs = self.inputs.entry(game.to_string()).or_default();
+            let before = inputs.clone();
+            if !server_place.is_empty() {
+                inputs.insert(s.place.clone(), server_place);
+            }
+            inputs.insert(s.server.clone(), id);
+            self.start_action(&m, &primary.id.clone(), ids);
+            self.inputs.insert(game.to_string(), before.clone());
+            // the join saved the boxes as it ran them: save them back as they are
+            if let Some(st) = &self.store {
+                st.set_setting(
+                    &format!("inputs.{game}"),
+                    &serde_json::to_string(&before).unwrap_or_default(),
+                );
+            }
+        }
+    }
     // --- right: launch and the chosen account -----------------------------------------------
 
     /// The right side, as AEAM's: the join boxes and Join Server, Follow, Alias, Description,
@@ -2175,6 +2793,7 @@ impl App {
             self.notes_buf = a.map(|a| a.notes.clone()).unwrap_or_default();
         }
         let mut run = None;
+        let mut toggle_servers = false;
         // two equal columns: every box and button on the right starts on one of two edges
         let full = ui.available_width().floor();
         let gap = look::GAP;
@@ -2212,15 +2831,32 @@ impl App {
                         );
                     });
                 }
-                if ui
-                    .add_enabled_ui(can_run, |ui| {
-                        ui.add_sized([full, h], look::primary(&count(&p.label)))
-                    })
-                    .inner
-                    .clicked()
-                {
-                    run = Some(p.id.clone());
-                }
+                // [Join Server][Servers] when the game lists its servers
+                let servers_w = if m.servers.is_some() { 80.0 } else { 0.0 };
+                ui.horizontal(|ui| {
+                    let w = if servers_w > 0.0 {
+                        full - gap - servers_w
+                    } else {
+                        full
+                    };
+                    if ui
+                        .add_enabled_ui(can_run, |ui| {
+                            ui.add_sized([w, h], look::primary(&count(&p.label)))
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        run = Some(p.id.clone());
+                    }
+                    if servers_w > 0.0
+                        && ui
+                            .add_sized([servers_w, h], egui::Button::new("Servers"))
+                            .on_hover_text("The place's public servers, to join one")
+                            .clicked()
+                    {
+                        toggle_servers = true;
+                    }
+                });
             }
             // one-box buttons: [box][Follow]
             for a in m
@@ -2244,6 +2880,9 @@ impl App {
                     }
                 });
             }
+        }
+        if toggle_servers {
+            self.servers_open = !self.servers_open;
         }
         if let Some(a) = run {
             self.start_action(m, &a, ids.clone());
@@ -2366,7 +3005,7 @@ impl App {
         }
         if control {
             if ids.iter().any(|id| self.running.contains_key(id))
-                && ui.button(count("Stop")).clicked()
+                && ui.button(count("Close game")).clicked()
             {
                 choice = Some(MenuChoice::Stop);
             }
@@ -2989,6 +3628,11 @@ fn set_value(a: &mut crate::store::Account, k: &str, v: &str, secret: bool) {
 }
 
 /// A helper's error saying the game's servers refused for too many requests.
+/// A helper that gave up starting for lack of memory ("not enough free memory ...").
+fn is_out_of_memory(error: &str) -> bool {
+    error.to_lowercase().contains("not enough free memory")
+}
+
 fn is_rate_limit(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("rate limit") || e.contains("too many requests") || e.contains("429")
@@ -3160,7 +3804,8 @@ mod tests {
         h.get_all_by_label("Wipe").last().unwrap().click();
         h.run();
         assert!(h.state().form.is_none());
-        for _ in 0..50 {
+        // up to 5 s: cmd starts slowly on a busy PC
+        for _ in 0..250 {
             if marker.exists() {
                 break;
             }
@@ -3218,6 +3863,178 @@ mod tests {
         assert!(made("a1") <= made("a2") && made("a2") <= made("a3"));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// An action's own `gap` spaces its queue (Log in: 15 seconds); a throttled one makes the
+    /// queue wait 2 minutes more, doubling to 10, and a run that works ends the extra wait.
+    #[test]
+    fn queue_gap_and_throttle_pause() {
+        let (mut h, dir) = window("roblox");
+        // the repository's Roblox modules: Log in 15 seconds apart, Refresh the usual gap
+        assert_eq!(h.state().queue_gap("login"), Duration::from_secs(15));
+        assert_eq!(h.state().queue_gap("check"), QUEUE_GAP);
+        // joins are not throttled like sign-ins: 2 seconds apart
+        assert_eq!(h.state().queue_gap("play"), Duration::from_secs(2));
+        assert_eq!(h.state().queue_gap("follow"), Duration::from_secs(2));
+        let m = h.state().module("roblox").cloned().unwrap();
+        let a = h.state().new_account(&m);
+        assert!(h.state_mut().save(&a));
+        let tx = h.state().tx.clone();
+        h.state_mut().queue_current = Some((a.id.clone(), "login".into(), false));
+        // one more waiting, so the pause is announced rather than a plain error
+        let waiting = h.state().new_account(&m);
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "login".into(),
+            account: waiting.id,
+            inputs: Values::default(),
+        });
+        for want in [120, 240, 480, 600] {
+            tx.send(Event::Error {
+                account: a.id.clone(),
+                text: "Roblox is rate limiting sign-ins from this connection".into(),
+            })
+            .unwrap();
+            h.state_mut().poll();
+            assert_eq!(h.state().queue_backoff, Duration::from_secs(want));
+        }
+        // another account's error, or one that is no throttle, changes nothing
+        tx.send(Event::Error {
+            account: a.id.clone(),
+            text: "the login window closed before Roblox signed in".into(),
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert_eq!(h.state().queue_backoff, Duration::from_secs(600));
+        tx.send(Event::Ended {
+            account: a.id.clone(),
+            action: "login".into(),
+            ok: true,
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert_eq!(h.state().queue_backoff, Duration::ZERO);
+        // no memory for another game: the waiting accounts are dropped, not started
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "play".into(),
+            account: "waiting".into(),
+            inputs: Values::default(),
+        });
+        h.state_mut().queue_current = Some((a.id.clone(), "play".into(), true));
+        tx.send(Event::Error {
+            account: a.id.clone(),
+            text: "not enough free memory for another Roblox: 3.1 GB free after 3 min, 6 GB needed"
+                .into(),
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert!(h.state().queue.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Settings and Reset files only touch this computer's files: they skip the queue; anything
+    /// that asks Roblox stays in it.
+    #[test]
+    fn one_account_skips_the_queue() {
+        let (mut h, dir) = window("generic");
+        let m = h.state().module("generic").cloned().unwrap();
+        let (a, b) = (h.state().new_account(&m), h.state().new_account(&m));
+        assert!(h.state_mut().save(&a) && h.state_mut().save(&b));
+        // a queue busy with another account, a and b waiting in it
+        h.state_mut().queue_current = Some(("busy".into(), "play".into(), true));
+        for id in [&a.id, &b.id] {
+            h.state_mut().queue.push_back(Job {
+                game: "generic".into(),
+                action: "play".into(),
+                account: id.clone(),
+                inputs: Values::default(),
+            });
+        }
+        // a on its own: started at once (its empty launch command fails here), out of the queue
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        let left: Vec<&str> = h.state().queue.iter().map(|j| j.account.as_str()).collect();
+        assert_eq!(left, vec![b.id.as_str()]);
+        h.state_mut().queue.clear();
+        h.state_mut().queue_current = None;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// "Close all games" asks first; Cancel leaves everything as it is.
+    #[test]
+    fn close_all_asks_first() {
+        let (mut h, dir) = window("roblox");
+        assert_eq!(h.state().module("roblox").unwrap().close_all, "close_all");
+        h.get_by_label("Close all games").click();
+        h.run();
+        assert!(h.state().confirm_close_all);
+        assert!(h.query_by_label("Close all").is_some());
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert!(!h.state().confirm_close_all);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_actions_skip_the_queue() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let local = |id: &str| m.actions.iter().find(|a| a.id == id).unwrap().local;
+        assert!(local("graphics") && local("reset"));
+        for id in ["play", "follow", "login", "check", "browser", "friends"] {
+            assert!(!local(id), "{id}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Servers window shows the helper's list; Join puts the server's id in Job ID.
+    #[test]
+    fn servers_window_lists_and_joins() {
+        let (mut h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let s = m.servers.clone().unwrap();
+        assert_eq!((s.place.as_str(), s.server.as_str()), ("place", "server"));
+        h.state_mut().servers_open = true;
+        let tx = h.state().tx.clone();
+        // the game's places, then one sub place's servers
+        tx.send(Event::Servers(module::ServersAnswer::Places {
+            places: vec![
+                ("100".into(), "Start".into()),
+                ("200".into(), "Khei".into()),
+            ],
+            root: Some("100".into()),
+        }))
+        .unwrap();
+        h.state_mut().poll();
+        let line = r#"{"servers": [{"id": "11111111-2222-3333-4444-555555555555", "players": 9, "max": 12, "ping": 84, "fps": 59.9}], "wait": 20}"#;
+        let answer =
+            module::servers_answer(&serde_json::from_str(line).unwrap(), Some("200")).unwrap();
+        tx.send(Event::Servers(answer)).unwrap();
+        h.state_mut().poll();
+        let rows = &h.state().servers_rows["200"].0;
+        assert_eq!((rows[0].place.as_str(), rows[0].players), ("200", 9));
+        // the next list waits as long as Roblox asked
+        let next = h.state().servers_next.unwrap();
+        assert!(next > std::time::Instant::now() + Duration::from_secs(15));
+        h.run();
+        assert!(h.query_by_label("9/12").is_some());
+        assert!(h.query_by_label("Khei").is_some());
+        // a sub place's server: no Join (error 524) until direct joins are ticked
+        assert!(h.query_by_label("Sub place").is_some());
+        h.state_mut().servers_direct = true;
+        h.run();
+        assert!(h.query_by_label("Sub place").is_none());
+        let failed = module::servers_answer(
+            &serde_json::json!({ "error": "Roblox is rate limiting: try again in a minute", "wait": 38 }),
+            Some("100"),
+        )
+        .unwrap();
+        tx.send(Event::Servers(failed)).unwrap();
+        h.state_mut().poll();
+        // the lists stay, with the error over them
+        assert_eq!(h.state().servers_rows.len(), 1);
+        assert!(h.state().servers_error.is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Right-clicking the Online heading switches its text off and on.

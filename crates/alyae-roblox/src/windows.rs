@@ -16,9 +16,10 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, INFINITE, OpenProcess, PROCESS_TERMINATE, ReleaseMutex, TerminateProcess,
-    WaitForSingleObject,
+    CreateMutexW, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+    PROCESS_TERMINATE, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -71,6 +72,205 @@ fn kill(pid: u32) {
     }
 }
 
+/// Who goes first when the PC is busy: a main runs at high priority; an alt at below normal
+/// (not lower: an alt starved of CPU could lose its connection), with its memory marked low
+/// priority so Windows moves an alt's memory to the page file before a main's. Many alts made
+/// a main stutter at normal priority (owner, 2026-11-17).
+fn set_priority(pid: u32, alt: bool) {
+    use windows_sys::Win32::System::Threading::{
+        BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, MEMORY_PRIORITY_INFORMATION,
+        MEMORY_PRIORITY_LOW, PROCESS_SET_INFORMATION, ProcessMemoryPriority, SetPriorityClass,
+        SetProcessInformation,
+    };
+    // SAFETY: plain process handle use, a correctly sized memory priority struct
+    unsafe {
+        let h: HANDLE = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
+        if h.is_null() {
+            return;
+        }
+        if alt {
+            SetPriorityClass(h, BELOW_NORMAL_PRIORITY_CLASS);
+            let low = MEMORY_PRIORITY_INFORMATION {
+                MemoryPriority: MEMORY_PRIORITY_LOW,
+            };
+            SetProcessInformation(
+                h,
+                ProcessMemoryPriority,
+                (&raw const low).cast(),
+                std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+            );
+        } else {
+            SetPriorityClass(h, HIGH_PRIORITY_CLASS);
+        }
+        CloseHandle(h);
+    }
+}
+
+/// Asks Windows to move the client's memory it is not using right now out to the page file. An
+/// alt idling at a few frames a second keeps only a few hundred MB in RAM after it instead of
+/// gigabytes, so many more fit; what it touches again comes back on its own.
+fn trim_memory(pid: u32) {
+    // SAFETY: plain process handle use
+    unsafe {
+        let h: HANDLE = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA,
+            0,
+            pid,
+        );
+        if !h.is_null() {
+            K32EmptyWorkingSet(h);
+            CloseHandle(h);
+        }
+    }
+}
+
+/// How often an alt's memory is trimmed besides right after it loaded and when memory runs
+/// short: trimming empties the whole working set, the pages the game uses as well, which it
+/// then reads back from the page file. Every 30 s, 23 alts read back ~80 MB/s from a USB
+/// page file (2026-11-18); Windows trims low-priority alts on its own when RAM is short.
+const TRIM_EVERY: Duration = Duration::from_secs(120);
+
+/// RAM that must be free before another client starts while others still load (room for them
+/// to grow too): a client loading a big map takes gigabytes, and many loading at once froze a
+/// 32 GB PC (owner, 2026-11-17).
+const FREE_TO_START_MB: u64 = 6144;
+/// ... and when it would be the only one loading: one Gaia load is about 2.6 GB.
+const FREE_TO_START_ALONE_MB: u64 = 3584;
+/// Below this much free RAM, running alts set to trim do it at once instead of on the minute.
+const LOW_MEMORY_MB: u64 = 2048;
+
+/// Room for another client, in MB: free physical memory, but no more than what Windows can
+/// still promise (commit limit, RAM plus page file) less a reserve. With the commit nearly
+/// used up a new game would make running ones fail to get memory and crash.
+fn start_room_mb() -> u64 {
+    let (phys, commit) = memory();
+    phys.min(commit.saturating_sub(COMMIT_RESERVE_MB))
+}
+
+/// Commit Windows must still be able to promise after a client starts (one Gaia alt commits
+/// about 3 GB).
+const COMMIT_RESERVE_MB: u64 = 4096;
+
+/// Free physical memory, in MB.
+fn free_mb() -> u64 {
+    memory().0
+}
+
+/// (free physical memory, commit Windows can still promise), in MB.
+fn memory() -> (u64, u64) {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: a correctly sized MEMORYSTATUSEX
+    unsafe {
+        let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if GlobalMemoryStatusEx(&mut m) == 0 {
+            return (u64::MAX, u64::MAX);
+        }
+        let mb = 1024 * 1024;
+        (m.ullAvailPhys / mb, m.ullAvailPageFile / mb)
+    }
+}
+
+/// The client's memory in RAM (its working set), in MB.
+fn working_set_mb(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    // SAFETY: plain process handle use, a correctly sized counters struct
+    unsafe {
+        let h: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok = K32GetProcessMemoryInfo(h, &mut c, c.cb) != 0;
+        CloseHandle(h);
+        ok.then_some(c.WorkingSetSize as u64 / (1024 * 1024))
+    }
+}
+
+/// Touched by a launch waiting for memory: running alts set to trim do it at once when it is
+/// newer than their last trim, instead of on their minute.
+fn trim_now_file(req: &Request) -> PathBuf {
+    req.data_dir.join("settings").join("trim_now")
+}
+
+/// Waits (in the launch turn, holding load slot `slot`) until there is room for one more
+/// client, at most `crate::MEMORY_WAIT`; asks the running alts to trim meanwhile.
+fn wait_for_memory(req: &Request, slot: usize) {
+    let ask = trim_now_file(req);
+    let need = || {
+        if others_loading(slot) {
+            FREE_TO_START_MB
+        } else {
+            FREE_TO_START_ALONE_MB
+        }
+    };
+    crate::wait_for_memory(start_room_mb, need, || {
+        let _ = std::fs::write(&ask, "");
+    });
+}
+
+/// Whether a load slot other than `mine` is held: another client is still loading.
+fn others_loading(mine: usize) -> bool {
+    use windows_sys::Win32::Foundation::{WAIT_ABANDONED_0, WAIT_OBJECT_0};
+    (0..LOAD_SLOTS).filter(|k| *k != mine).any(|k| {
+        // SAFETY: a named mutex, taken for an instant only to see that it is free
+        unsafe {
+            let h = CreateMutexW(
+                std::ptr::null(),
+                0,
+                wide(&format!("Local\\AlyaeRobloxLoad{k}")).as_ptr(),
+            );
+            if h.is_null() {
+                return false;
+            }
+            let r = WaitForSingleObject(h, 0);
+            let free = r == WAIT_OBJECT_0 || r == WAIT_ABANDONED_0;
+            if free {
+                ReleaseMutex(h);
+            }
+            CloseHandle(h);
+            !free
+        }
+    })
+}
+
+/// Whether a client whose memory was `samples` (MB, one every `LOAD_SAMPLE`) has finished
+/// loading: it has had `LOAD_LEAST`, and grew less than `LOAD_STILL_MB` over the last three.
+fn loaded(samples: &[u64]) -> bool {
+    let least = (LOAD_LEAST.as_secs() / LOAD_SAMPLE.as_secs()) as usize;
+    samples.len() > least
+        && samples[samples.len() - 4..]
+            .windows(2)
+            .all(|w| w[1] < w[0] + LOAD_STILL_MB)
+}
+
+const LOAD_SAMPLE: Duration = Duration::from_secs(2);
+const LOAD_LEAST: Duration = Duration::from_secs(8);
+const LOAD_STILL_MB: u64 = 40;
+/// A client still growing after this long is let be: the next starts anyway.
+const LOAD_MOST: Duration = Duration::from_secs(120);
+
+/// Waits until the new client has loaded its game (its memory stops growing), so clients load
+/// one after another instead of all at once.
+fn wait_until_loaded(pid: u32) {
+    // "running, loading" is said by the caller
+    let until = Instant::now() + LOAD_MOST;
+    let mut samples = Vec::new();
+    while Instant::now() < until && alive(pid) {
+        match working_set_mb(pid) {
+            Some(mb) => samples.push(mb),
+            None => return,
+        }
+        if loaded(&samples) {
+            return;
+        }
+        std::thread::sleep(LOAD_SAMPLE);
+    }
+}
+
 fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -109,20 +309,43 @@ fn last_launch_file(req: &Request) -> PathBuf {
     req.data_dir.join("settings").join("last_launch")
 }
 
-/// The account's settings put in place before its client starts.
+/// Touched when a client has just started: it reads the shared settings file in the seconds
+/// after, so a launch that would change the file waits until those seconds have passed.
+fn client_started_file(req: &Request) -> PathBuf {
+    req.data_dir.join("settings").join("client_started")
+}
+
+/// How long a new client may still be reading the shared settings file.
+const SETTINGS_READ: Duration = Duration::from_secs(5);
+
+/// Waits until the last client started has had `SETTINGS_READ` to read the shared file.
+fn wait_for_settings_read(req: &Request) {
+    let since = std::fs::metadata(client_started_file(req))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok());
+    if let Some(left) = since.and_then(|s| SETTINGS_READ.checked_sub(s)) {
+        status("waiting for the last Roblox to read its settings");
+        std::thread::sleep(left);
+    }
+}
+
+/// The account's settings put in place before its client starts. Only a change waits for the
+/// client started before to have read the file: alts with the same settings start at once.
 fn settings_before_launch(req: &Request, live: &Path) {
     let own = own_settings(req);
     if let Some(d) = own.parent() {
         let _ = std::fs::create_dir_all(d);
     }
     settings_xml::keep_original(live, &original_settings(req), clients().is_empty());
-    if own.is_file()
-        && let Err(e) = std::fs::copy(&own, live)
-    {
-        fail(&format!(
-            "cannot put this account's Roblox settings in place: {e}"
-        ));
-    }
+    let own_text = own.is_file().then(|| {
+        std::fs::read_to_string(&own).unwrap_or_else(|e| {
+            fail(&format!(
+                "cannot put this account's Roblox settings in place: {e}"
+            ))
+        })
+    });
+    let live_text = std::fs::read_to_string(live).ok();
     let mut props = Vec::new();
     if let Some(fps) = req.fps() {
         let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
@@ -132,10 +355,17 @@ fn settings_before_launch(req: &Request, live: &Path) {
         props.extend(settings_xml::quality(1));
         props.push(settings_xml::prop("float", "MasterVolume", 0));
     }
-    if !props.is_empty()
-        && let Err(e) = settings_xml::apply(live, &props)
-    {
-        fail(&format!("cannot write Roblox's settings: {e}"));
+    props.extend(settings_xml::window(req.window()));
+    let base = own_text.or_else(|| live_text.clone());
+    if base.is_some() || !props.is_empty() {
+        let new = settings_xml::with_props(base.as_deref(), &props);
+        if live_text.as_deref().map(str::trim_end) != Some(new.trim_end()) {
+            wait_for_settings_read(req);
+            let tmp = live.with_extension("alyae-tmp");
+            if let Err(e) = std::fs::write(&tmp, new).and_then(|_| std::fs::rename(&tmp, live)) {
+                fail(&format!("cannot write Roblox's settings: {e}"));
+            }
+        }
     }
     let _ = std::fs::write(last_launch_file(req), &req.id);
 }
@@ -175,12 +405,21 @@ pub fn graphics(req: &Request) {
     }
     let (props, fps) =
         settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
-    if props.is_empty() {
+    let window = settings_xml::window_input(req.input("window")).unwrap_or_else(|e| fail(&e));
+    if props.is_empty() && window.is_none() {
         fail("nothing to change: every value is \"keep\"");
     }
-    // the launch sets FramerateCap from the account's FPS cap: keep the two in step
+    // the launch sets FramerateCap from the account's FPS cap and the window from its Window:
+    // keep them in step
     if let Some(f) = fps {
         say(json!({ "set": { "fps": f.to_string() } }));
+    }
+    if let Some(w) = window {
+        say(json!({ "set": { "window": w } }));
+    }
+    if props.is_empty() {
+        status("window set (used from the next start)");
+        return;
     }
     let own = own_settings(req);
     if let Some(d) = own.parent() {
@@ -198,6 +437,70 @@ pub fn graphics(req: &Request) {
             props.len()
         )),
         Err(e) => fail(&format!("cannot write the settings: {e}")),
+    }
+}
+
+/// How many clients may load their game at the same time. Each loading client of a big map
+/// takes gigabytes until it is loaded and trimmed; the free-memory check before each start
+/// keeps the PC out of trouble, this keeps the start fast.
+const LOAD_SLOTS: usize = 3;
+
+/// One of `LOAD_SLOTS` named mutexes, held from a client's start until it has loaded. A
+/// helper that dies leaves its mutex abandoned, which the next waiter simply takes.
+struct LoadSlot(HANDLE, usize);
+
+impl LoadSlot {
+    fn take() -> Self {
+        use windows_sys::Win32::Foundation::{WAIT_ABANDONED_0, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::WaitForMultipleObjects;
+        // SAFETY: named mutexes; a wait returns with exactly one of them owned
+        unsafe {
+            let slots: Vec<HANDLE> = (0..LOAD_SLOTS)
+                .map(|i| {
+                    let h = CreateMutexW(
+                        std::ptr::null(),
+                        0,
+                        wide(&format!("Local\\AlyaeRobloxLoad{i}")).as_ptr(),
+                    );
+                    if h.is_null() {
+                        fail("cannot create the loading lock");
+                    }
+                    h
+                })
+                .collect();
+            let mut r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, 0);
+            if r == windows_sys::Win32::Foundation::WAIT_TIMEOUT {
+                status(&format!("waiting: {LOAD_SLOTS} games are loading"));
+                r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, INFINITE);
+            }
+            let i = if r >= WAIT_ABANDONED_0 {
+                r - WAIT_ABANDONED_0
+            } else {
+                r - WAIT_OBJECT_0
+            } as usize;
+            for (k, h) in slots.iter().enumerate() {
+                if k != i {
+                    CloseHandle(*h);
+                }
+            }
+            LoadSlot(
+                slots
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| fail("loading lock")),
+                i,
+            )
+        }
+    }
+}
+
+impl Drop for LoadSlot {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned by this thread
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
     }
 }
 
@@ -245,6 +548,23 @@ pub fn play(req: &Request) {
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonMutex").as_ptr());
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonEvent").as_ptr());
     }
+    // up to LOAD_SLOTS clients load at once, each only with room for it; one starts at a time
+    // (the turn). Signing in comes after the waits, so the one-time ticket is fresh
+    let slot = LoadSlot::take();
+    let turn = LaunchTurn::take();
+    // one account started on its own does not wait for free RAM; it still will not start
+    // with the commit (RAM plus page file) all but used up, which would crash games
+    if req.input("_alone") == "1" {
+        let left = memory().1;
+        if left < 1024 {
+            fail(&format!(
+                "{}: Windows can promise only {left} MB more (RAM plus page file). Close a game first",
+                crate::NO_MEMORY
+            ));
+        }
+    } else {
+        wait_for_memory(req, slot.1);
+    }
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();
@@ -284,7 +604,6 @@ pub fn play(req: &Request) {
     url += &format!(
         "+browsertrackerid:{browser}+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp"
     );
-    let turn = LaunchTurn::take();
     settings_before_launch(req, &live);
     let before = clients();
     // SAFETY: ShellExecuteW with NUL-terminated wide strings
@@ -313,24 +632,102 @@ pub fn play(req: &Request) {
         std::thread::sleep(Duration::from_millis(500));
     };
     let _ = std::fs::write(pid_file(req), pid.to_string());
-    // the client reads its settings while it starts: the next launch waits a little longer
-    std::thread::sleep(Duration::from_secs(5));
-    drop(turn);
-    status("running");
+    set_priority(pid, req.is_alt());
+    // the client reads its settings while it starts: a next launch that changes them waits for
+    // that (`wait_for_settings_read`), one that does not starts at once
+    let _ = std::fs::write(client_started_file(req), pid.to_string());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if wait_for_stop() {
             let _ = tx.send(());
         }
     });
+    // the next client may start now; this one keeps its loading slot until it has loaded
+    // (and, set to trim, been trimmed)
+    drop(turn);
+    status("running, loading");
+    wait_until_loaded(pid);
+    let trim = req.get("memory") == "trim";
+    if trim {
+        trim_memory(pid);
+    }
+    drop(slot);
+    status("running");
+    watch_client(req, pid, &live, rx, trim);
+}
+
+/// The "Close all games" button: every Roblox client closes, the ones Alyae lost track of too.
+/// Each account's helper then takes its settings back as after any close.
+pub fn close_all() {
+    let all = clients();
+    for pid in &all {
+        kill(*pid);
+    }
+    status(&format!("{} Roblox closed", all.len()));
+}
+
+/// The Resume action, when Alyae opens: if this account's client still runs from before
+/// (Alyae was closed, the game was left running), watch it again as after a launch: Stop
+/// works, an alt keeps being trimmed, its settings are taken back when it closes. No client:
+/// ends at once, saying nothing.
+pub fn resume(req: &Request) {
+    let Some(pid) = std::fs::read_to_string(pid_file(req))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|p| alive(*p))
+    else {
+        return;
+    };
+    let live = live_settings().unwrap_or_else(|| fail("LOCALAPPDATA is not set"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if wait_for_stop() {
+            let _ = tx.send(());
+        }
+    });
+    set_priority(pid, req.is_alt());
+    status("running (found again)");
+    watch_client(req, pid, &live, rx, req.get("memory") == "trim");
+}
+
+/// While the client runs: a stop from Alyae ends it; set to `trim`, its memory is trimmed every
+/// minute, and at once whenever RAM runs low or a launch waits for memory. After it closed, its
+/// settings are taken back.
+fn watch_client(
+    req: &Request,
+    pid: u32,
+    live: &Path,
+    stop: std::sync::mpsc::Receiver<()>,
+    trim: bool,
+) {
+    let ask = trim_now_file(req);
+    let mut next_trim = Instant::now() + TRIM_EVERY;
+    let mut last_trim = Instant::now();
+    let mut trimmed_at = SystemTime::now();
+    let mut next_check = Instant::now();
     while alive(pid) {
-        if rx.try_recv().is_ok() {
+        if stop.try_recv().is_ok() {
             kill(pid);
             break;
         }
+        let now = Instant::now();
+        if trim && now >= next_check {
+            next_check = now + Duration::from_secs(5);
+            let asked = std::fs::metadata(&ask)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t > trimmed_at);
+            let soon = now - last_trim >= Duration::from_secs(15);
+            let low = free_mb() < LOW_MEMORY_MB;
+            if ((low || asked) && soon) || now >= next_trim {
+                trim_memory(pid);
+                last_trim = now;
+                trimmed_at = SystemTime::now();
+                next_trim = now + TRIM_EVERY;
+            }
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
-    settings_after_exit(req, &live);
+    settings_after_exit(req, live);
     let _ = std::fs::remove_file(pid_file(req));
 }
 
@@ -350,4 +747,21 @@ pub fn reset(_req: &Request) {
         freed += crate::files::remove(&Path::new(&l).join("Roblox").join("logs"));
     }
     status(&format!("files reset, {} MB freed", freed / 1_000_000));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client has loaded once it had 8 s and its memory stopped growing; still growing, or
+    /// too early, it has not.
+    #[test]
+    fn loaded_when_memory_settles() {
+        let growing: Vec<u64> = (0..10).map(|i| 300 + i * 250).collect();
+        assert!(!loaded(&growing));
+        let settled = [300, 900, 1500, 2100, 2500, 2580, 2600, 2610, 2615];
+        assert!(loaded(&settled));
+        // settled but too early
+        assert!(!loaded(&[300, 300, 300, 300]));
+    }
 }

@@ -4,6 +4,10 @@ name = "Roblox Windows"
 platform = "windows"
 description = "Several accounts at once, join servers, 2FA"
 helper = "alyae-roblox"
+# when Alyae opens, each account's game still running from before counts as running again
+resume = "resume"
+# the "Close all games" button: every Roblox, also ones Alyae did not start
+close_all = "close_all"
 title_field = "username"
 
 # Add account opens Roblox's login page and adds the account once it signs in; Import takes
@@ -59,13 +63,33 @@ label = "FPS cap"
 hint = "empty: the role's (below); 0: no cap"
 # an empty FPS cap by role; no role: Roblox's own setting
 default_by = "role"
-defaults = { main = "330", alt = "6" }
+defaults = { main = "330", alt = "1" }
+
+[[field]]
+key = "window"
+label = "Window"
+kind = "choice"
+choices = ["fullscreen", "windowed", "small"]
+hint = "small: an 800x600 window; empty: the role's (main: Roblox's own, alt: small)"
+default_by = "role"
+defaults = { alt = "small" }
+
+[[field]]
+key = "memory"
+label = "Memory"
+kind = "choice"
+choices = ["trim", "normal"]
+hint = "trim: after loading, every 2 min and when memory runs short, Windows moves the game's idle memory to the page file (an alt keeps ~0.6 GB in RAM instead of ~2.6; wants a big page file); empty: the role's (alt: trim)"
+default_by = "role"
+defaults = { alt = "trim" }
 
 [[action]]
 id = "play"
 label = "Join Server"
 primary = true
 runs = true
+# several accounts: 2 s apart (joins are not throttled like sign-ins; a refusal still pauses the queue)
+gap = 2
 
 [[action.input]]
 key = "place"
@@ -81,6 +105,7 @@ hint = "job ID or private server link"
 id = "follow"
 label = "Follow"
 runs = true
+gap = 2
 
 [[action.input]]
 key = "follow"
@@ -95,6 +120,9 @@ label = "Refresh"
 [[action]]
 id = "login"
 label = "Log in"
+# for several accounts: 15 seconds apart (sign-ins close together get the connection throttled;
+# Alyae also pauses longer when Roblox says so)
+gap = 15
 
 # roblox.com signed in as the account, in a window of its own (the saved cookie, a fresh profile)
 [[action]]
@@ -104,6 +132,14 @@ label = "Open in browser"
 # online status of every account, every 15 s while the window is shown and focused; the helper
 # gets only the user IDs and asks Roblox without a cookie, so no account vouches for the others
 # (adding secret = "cookie" makes each account ask about itself only, with its own cookie)
+# the Servers button: the public servers of every place of the game in Place ID (sub places too),
+# asked without a cookie, one place at a time as fast as Roblox allows (3 lists a minute) while
+# its window is open; a server's Join joins it in its own place
+[servers]
+action = "servers"
+place = "place"
+server = "server"
+
 [watch]
 action = "presence"
 every = 15
@@ -121,11 +157,18 @@ fields = ["user_id"]
 [[action]]
 id = "graphics"
 label = "Settings"
+# only this computer's files: every chosen account at once, no queue
+local = true
 
 [[action.input]]
 key = "fps"
 label = "FPS limit"
-choices = ["keep", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+choices = ["keep", "1", "2", "3", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
+
+[[action.input]]
+key = "window"
+label = "Window"
+choices = ["keep", "fullscreen", "windowed", "small"]
 
 [[action.input]]
 key = "quality"
@@ -230,6 +273,7 @@ confirm = "Every other session of these accounts ends (other PCs, phones, browse
 [[action]]
 id = "reset"
 label = "Reset files"
+local = true
 confirm = "Roblox's downloaded-asset cache and logs are removed and made again on the next launch. On Windows every account shares them, so this is for all accounts, and every Roblox must be closed. Kept: the installed Roblox, its settings, the saved cookies. Fixes missing animations or textures when the cache is at fault."
 
 [[action]]

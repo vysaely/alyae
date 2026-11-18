@@ -165,19 +165,91 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
 
 /// Whether this account's Mocktail already runs (its program path names the account).
 fn already_running(program: &Path) -> bool {
+    running_pid(program).is_some()
+}
+
+/// The process ID of the running `program` (by its file name), if one runs.
+fn running_pid(program: &Path) -> Option<i32> {
     let want = program
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
-    let Ok(procs) = fs::read_dir("/proc") else {
-        return false;
-    };
-    procs.flatten().any(|p| {
-        fs::read(p.path().join("cmdline")).is_ok_and(|c| {
-            let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
-            Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name() == Some(want.as_os_str())
-        })
+    fs::read_dir("/proc").ok()?.flatten().find_map(|p| {
+        let pid = p.file_name().to_str()?.parse::<i32>().ok()?;
+        let c = fs::read(p.path().join("cmdline")).ok()?;
+        let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
+        (Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name() == Some(want.as_os_str()))
+            .then_some(pid)
     })
+}
+
+/// The "Close all games" button: every account's Mocktail game (each runs as its own
+/// `mocktail_alyae_...` program) is asked to end, and made to after 4 s.
+pub fn close_all() {
+    let games = || -> Vec<i32> {
+        let Ok(procs) = fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        procs
+            .flatten()
+            .filter_map(|p| {
+                let pid = p.file_name().to_str()?.parse::<i32>().ok()?;
+                let c = fs::read(p.path().join("cmdline")).ok()?;
+                let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
+                let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
+                name.to_str()?.starts_with("mocktail_alyae_").then_some(pid)
+            })
+            .collect()
+    };
+    let all = games();
+    for pid in &all {
+        // SAFETY: plain signal to a process ID
+        unsafe { libc::kill(*pid, libc::SIGTERM) };
+    }
+    let until = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < until && !games().is_empty() {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    for pid in games() {
+        // SAFETY: plain signal to a process ID
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    status(&format!("{} games closed", all.len()));
+}
+
+/// The Resume action, when Alyae opens: if this account's game still runs from before (Alyae
+/// was closed, the game was left running), it counts as running again until it ends, and Stop
+/// ends it. No game: ends at once, saying nothing.
+pub fn resume(req: &Request) {
+    let Some(m) = find_mocktail() else { return };
+    let Some(pid) = running_pid(&m.lib.join(program_name(req))) else {
+        return;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if wait_for_stop() {
+            let _ = tx.send(());
+        }
+    });
+    status("running (found again)");
+    let alive = || Path::new(&format!("/proc/{pid}")).exists();
+    while alive() {
+        if rx.try_recv().is_ok() {
+            status("stopping");
+            // SAFETY: plain signal to a process ID
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            let until = Instant::now() + Duration::from_secs(4);
+            while Instant::now() < until && alive() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if alive() {
+                // SAFETY: plain signal to a process ID
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 use std::os::unix::ffi::OsStrExt;
 
@@ -303,12 +375,21 @@ pub fn graphics(req: &Request) {
     }
     let (props, fps) =
         settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
-    if props.is_empty() {
+    let window = settings_xml::window_input(req.input("window")).unwrap_or_else(|e| fail(&e));
+    if props.is_empty() && window.is_none() {
         fail("nothing to change: every value is \"keep\"");
     }
-    // the launch sets FramerateCap from the account's FPS cap: keep the two in step
+    // the launch sets FramerateCap from the account's FPS cap and the window from its Window:
+    // keep them in step
     if let Some(f) = fps {
         say(json!({ "set": { "fps": f.to_string() } }));
+    }
+    if let Some(w) = window {
+        say(json!({ "set": { "window": w } }));
+    }
+    if props.is_empty() {
+        status("window set (used from the next start)");
+        return;
     }
     let profile = profile_dir(req, &req.data_dir);
     match settings_xml::apply(&settings_file(&profile), &props) {
@@ -416,7 +497,52 @@ fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
     data_dir.join("profiles").join(&req.id)
 }
 
-fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fps_limit: u32) {
+/// RAM that must be free (MemAvailable) before another client starts: many clients loading a
+/// big map at once froze a 32 GB PC (owner, 2026-11-17).
+const FREE_TO_START_MB: u64 = 4096;
+
+/// MemAvailable from `/proc/meminfo` text, in MB.
+fn mem_available_mb(meminfo: &str) -> Option<u64> {
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+        .map(|kb| kb / 1024)
+}
+
+/// Waits (in the launch turn) until there is room for one more client, at most
+/// `crate::MEMORY_WAIT`.
+fn wait_for_memory() {
+    let free = || {
+        fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|t| mem_available_mb(&t))
+            .unwrap_or(u64::MAX)
+    };
+    crate::wait_for_memory(free, || FREE_TO_START_MB, || {});
+}
+
+/// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main
+/// fullscreen, an alt small.
+fn window_size(mode: &str, main: bool) -> (bool, u32, u32) {
+    let small = (false, settings_xml::SMALL.0, settings_xml::SMALL.1);
+    match mode {
+        "small" => small,
+        "windowed" => (false, 1920, 1080),
+        "fullscreen" => (true, 1920, 1080),
+        _ if main => (true, 1920, 1080),
+        _ => small,
+    }
+}
+
+fn prepare_profile(
+    m: &Mocktail,
+    data_dir: &Path,
+    profile: &Path,
+    main: bool,
+    fps_limit: u32,
+    (fullscreen, w, h): (bool, u32, u32),
+) {
     for sub in [
         "data/mocktail",
         "config/mocktail",
@@ -455,7 +581,6 @@ fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fp
     mkdir(&shaders);
     link_dir(&shaders, &profile.join("cache/mesa_shader_cache"));
 
-    let (w, h) = if main { (1920, 1080) } else { (800, 600) };
     let config = format!(
         "version: 1\ndevice: pc-windows-11\ngraphics:\n  backend: opengl\n  frame_rate_limit: {fps_limit}\n  vsync: off\n\
          performance:\n  multithreaded_rendering: true\n  physics_worker_mode: {}\n  gamemode: {}\n\
@@ -464,7 +589,7 @@ fn prepare_profile(m: &Mocktail, data_dir: &Path, profile: &Path, main: bool, fp
         if main { "auto" } else { "off" },
     );
     let window = json!({
-        "fullscreen": main, "maximized": false, "schema_version": 1,
+        "fullscreen": fullscreen, "maximized": false, "schema_version": 1,
         "windowed": { "has_position": false, "height": h, "width": w },
     })
     .to_string();
@@ -608,13 +733,19 @@ pub fn play(req: &Request) {
     // replace it, and at the end it would pass for a renewed cookie
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
     let mut turn = LaunchTurn::take(data_dir);
+    // one account started on its own does not wait for free RAM
+    if req.input("_alone") != "1" {
+        wait_for_memory();
+    }
     status("starting");
+    let window = window_size(req.window(), main);
     prepare_profile(
         &m,
         data_dir,
         &profile,
         main,
         if fps_limit == 10000 { 1000 } else { fps_limit },
+        window,
     );
     engine_settings(&profile, main, fps_limit);
     let tracker_file = profile.join("browser_tracker");
@@ -630,11 +761,7 @@ pub fn play(req: &Request) {
     let cookie_files = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
-    let (w, h) = if main {
-        ("1920", "1080")
-    } else {
-        ("800", "600")
-    };
+    let (w, h) = (window.1.to_string(), window.2.to_string());
     let mut args: Vec<String> = vec!["--windowed".into(), "--graphics".into(), "opengl".into()];
     if let Some(u) = uri(&join) {
         args.push("--launch-uri".into());
@@ -660,8 +787,8 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_TOUCH_MODE".into(), "0".into()),
         ("MOCKTAIL_MOUSE_MODE".into(), "1".into()),
         ("MOCKTAIL_KEYBOARD_MODE".into(), "1".into()),
-        ("MOCKTAIL_WIN_WIDTH".into(), w.into()),
-        ("MOCKTAIL_WIN_HEIGHT".into(), h.into()),
+        ("MOCKTAIL_WIN_WIDTH".into(), w),
+        ("MOCKTAIL_WIN_HEIGHT".into(), h),
         ("MOCKTAIL_WIN_HIGH_DPI".into(), "0".into()),
         (
             "MOCKTAIL_GRAPHICS_QUALITY".into(),
@@ -820,6 +947,12 @@ pub fn play(req: &Request) {
         .spawn()
         .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
     let pid = child.id() as i32;
+    // an alt gives way to a main when the PC is busy (raising a main needs root; lowering the
+    // alts does the same for it): nice 5 for the whole game
+    if !main {
+        // SAFETY: setpriority(2) on the process group the game leads
+        unsafe { libc::setpriority(libc::PRIO_PGRP, pid as libc::id_t, 5) };
+    }
     say(json!({ "status": "running" }));
 
     // a stop from Alyae ends the game; Alyae closing leaves it running
@@ -1001,6 +1134,23 @@ mod tests {
         assert_eq!(owned_profile(&data, &data), None);
         assert_eq!(owned_profile(&data.join("profiles/missing"), &data), None);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn free_memory_from_meminfo() {
+        let t = "MemTotal:       32768000 kB\nMemFree:         1000000 kB\nMemAvailable:    6291456 kB\n";
+        assert_eq!(mem_available_mb(t), Some(6144));
+        assert_eq!(mem_available_mb("MemTotal: 1 kB\n"), None);
+    }
+
+    /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt small).
+    #[test]
+    fn window_by_choice_or_role() {
+        assert_eq!(window_size("", true), (true, 1920, 1080));
+        assert_eq!(window_size("", false), (false, 800, 600));
+        assert_eq!(window_size("small", true), (false, 800, 600));
+        assert_eq!(window_size("windowed", false), (false, 1920, 1080));
+        assert_eq!(window_size("fullscreen", false), (true, 1920, 1080));
     }
 
     #[test]

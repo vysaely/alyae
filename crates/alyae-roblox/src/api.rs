@@ -66,6 +66,150 @@ pub fn user_id_of(username: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("no Roblox user is called '{username}'"))
 }
 
+/// One public server of a place: job ID, players, room, ping (ms) and frame rate.
+#[derive(Debug, PartialEq)]
+pub struct Server {
+    pub id: String,
+    pub players: u64,
+    pub max: u64,
+    pub ping: u64,
+    pub fps: f64,
+}
+
+/// The servers out of one page of Roblox's public server list, and the cursor of the next.
+pub fn servers_page(v: &Value) -> (Vec<Server>, Option<String>) {
+    let list = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some(Server {
+                id: s["id"].as_str()?.to_string(),
+                players: s["playing"].as_u64().unwrap_or(0),
+                max: s["maxPlayers"].as_u64().unwrap_or(0),
+                ping: s["ping"].as_u64().unwrap_or(0),
+                fps: s["fps"].as_f64().unwrap_or(0.0),
+            })
+        })
+        .collect();
+    let next = v["nextPageCursor"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .map(String::from);
+    (list, next)
+}
+
+/// Seconds to wait before the next server-list request, from Roblox's rate-limit headers
+/// (`x-ratelimit-remaining`, `x-ratelimit-reset`, `retry-after`): the rest of the window shared
+/// out over the requests left in it, all of it when none are left. Roblox allows 3 a minute.
+pub fn pace(remaining: Option<u64>, reset: Option<u64>, retry_after: Option<u64>) -> u64 {
+    let reset = reset.unwrap_or(20);
+    let wait = match remaining {
+        Some(0) => reset,
+        Some(n) => reset.div_ceil(n + 1),
+        None => 20,
+    };
+    wait.max(retry_after.unwrap_or(0)).clamp(2, 120)
+}
+
+/// The fullest 100 public servers of one place, asked without a cookie (no account is tied to
+/// the look), and the seconds to wait before asking again; or why not, with the wait.
+pub fn servers(place: u64) -> Result<(Vec<Server>, u64), (String, u64)> {
+    let url = format!(
+        "https://games.roblox.com/v1/games/{place}/servers/Public?sortOrder=Desc&excludeFullGames=false&limit=100"
+    );
+    let mut r = agent()
+        .get(&url)
+        .header("Accept", "application/json")
+        .call()
+        .map_err(|e| (net(e), 20))?;
+    let num =
+        |name: &str| header(&r, name).and_then(|v| v.split(',').next()?.trim().parse::<u64>().ok());
+    let wait = pace(
+        num("x-ratelimit-remaining"),
+        num("x-ratelimit-reset"),
+        num("retry-after"),
+    );
+    if r.status() != 200 {
+        return Err((answer(r.status().as_u16(), "server list"), wait));
+    }
+    let v: Value = r
+        .body_mut()
+        .read_json()
+        .map_err(|e| (e.to_string(), wait))?;
+    Ok((servers_page(&v).0, wait))
+}
+
+/// The game (universe) a place belongs to.
+pub fn universe_of(place: u64) -> Result<u64, String> {
+    let mut r = agent()
+        .get(&format!(
+            "https://apis.roblox.com/universes/v1/places/{place}/universe"
+        ))
+        .header("Accept", "application/json")
+        .call()
+        .map_err(net)?;
+    if r.status() != 200 {
+        return Err(answer(r.status().as_u16(), "game lookup"));
+    }
+    let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+    v["universeId"]
+        .as_u64()
+        .ok_or_else(|| "Roblox knows no game with this place".into())
+}
+
+/// The game's start place: the only one most games let players join directly (the others
+/// they reach by the game's own teleports; a direct join is refused with error 524).
+pub fn root_place(universe: u64) -> Result<u64, String> {
+    let mut r = agent()
+        .get(&format!(
+            "https://games.roblox.com/v1/games?universeIds={universe}"
+        ))
+        .header("Accept", "application/json")
+        .call()
+        .map_err(net)?;
+    if r.status() != 200 {
+        return Err(answer(r.status().as_u16(), "game lookup"));
+    }
+    let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+    v["data"][0]["rootPlaceId"]
+        .as_u64()
+        .ok_or_else(|| "Roblox sent no start place".into())
+}
+
+/// Every place of a game, (place ID, name).
+pub fn places_of(universe: u64) -> Result<Vec<(u64, String)>, String> {
+    let mut out = Vec::new();
+    let mut cursor = String::new();
+    for _ in 0..5 {
+        let mut url = format!(
+            "https://develop.roblox.com/v1/universes/{universe}/places?isUniverseCreation=false&limit=100&sortOrder=Asc"
+        );
+        if !cursor.is_empty() {
+            url += &format!("&cursor={cursor}");
+        }
+        let mut r = agent()
+            .get(&url)
+            .header("Accept", "application/json")
+            .call()
+            .map_err(net)?;
+        if r.status() != 200 {
+            return Err(answer(r.status().as_u16(), "place list"));
+        }
+        let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+        for p in v["data"].as_array().into_iter().flatten() {
+            if let Some(id) = p["id"].as_u64() {
+                out.push((id, p["name"].as_str().unwrap_or("").to_string()));
+            }
+        }
+        match v["nextPageCursor"].as_str().filter(|c| !c.is_empty()) {
+            Some(c) => cursor = c.to_string(),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
 /// Who a request is sent as: the cookie, the device ID (some APIs refuse requests without one)
 /// and the 2FA secret that answers Roblox's two-step challenge.
 #[derive(Default)]
@@ -409,6 +553,31 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_page() {
+        let v = json!({ "nextPageCursor": "abc", "data": [
+            { "id": "11111111-2222-3333-4444-555555555555", "maxPlayers": 12, "playing": 9,
+              "fps": 59.87, "ping": 84, "playerTokens": [] },
+            { "maxPlayers": 12 }
+        ]});
+        let (list, next) = servers_page(&v);
+        assert_eq!(next.as_deref(), Some("abc"));
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].players, list[0].max, list[0].ping), (9, 12, 84));
+        let (_, end) = servers_page(&json!({ "data": [], "nextPageCursor": null }));
+        assert_eq!(end, None);
+    }
+
+    /// 3 requests a minute: the window shared out, all of it once none are left.
+    #[test]
+    fn server_list_pace() {
+        assert_eq!(pace(Some(2), Some(60), None), 20);
+        assert_eq!(pace(Some(1), Some(40), None), 20);
+        assert_eq!(pace(Some(0), Some(38), Some(5)), 38);
+        assert_eq!(pace(None, None, Some(5)), 20);
+        assert_eq!(pace(Some(5), Some(1), None), 2);
+    }
 
     #[test]
     fn base64_round_trip() {

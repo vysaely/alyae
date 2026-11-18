@@ -15,6 +15,7 @@ mod windows;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub struct Request {
     pub id: String,
@@ -42,6 +43,11 @@ impl Request {
     pub fn is_alt(&self) -> bool {
         self.get("role") == "alt"
     }
+    /// The account's Window: "fullscreen", "windowed", "small" (its default by role comes filled
+    /// in from the module), or empty: Roblox's own.
+    pub fn window(&self) -> &str {
+        self.get("window")
+    }
     /// The FPS cap Alyae sets (its default by role comes filled in from the module); None: no
     /// cap of Alyae's, 0: no cap at all.
     pub fn fps(&self) -> Option<u32> {
@@ -60,6 +66,46 @@ pub fn say(v: Value) {
 
 pub fn status(text: &str) {
     say(json!({ "status": text }));
+}
+
+/// How long a launch waits for free memory before it gives up (meanwhile running alts trim).
+pub const MEMORY_WAIT: Duration = Duration::from_secs(180);
+
+/// How a launch that gave up for memory starts its error: Alyae stops the queue on it, as the
+/// accounts after would wait in vain too.
+pub const NO_MEMORY: &str = "not enough free memory for another Roblox";
+
+/// Waits until `free()` (MB) reaches `need()` MB, saying so while it waits and calling
+/// `waiting()` every round (Windows asks the running alts to trim then); gives up after
+/// `MEMORY_WAIT` with a `NO_MEMORY` error.
+pub fn wait_for_memory(free: impl Fn() -> u64, need: impl Fn() -> u64, mut waiting: impl FnMut()) {
+    let until = std::time::Instant::now() + MEMORY_WAIT;
+    let mut said = (0, 0);
+    loop {
+        let (now, need) = (free(), need());
+        if now >= need {
+            return;
+        }
+        if std::time::Instant::now() >= until {
+            fail(&format!(
+                "{NO_MEMORY}: {:.1} GB free after {} min, {:.1} GB needed. Close something or start fewer accounts",
+                now as f64 / 1024.0,
+                MEMORY_WAIT.as_secs() / 60,
+                need as f64 / 1024.0
+            ));
+        }
+        waiting();
+        // a new line only when it changed by half a GB or more
+        if now.abs_diff(said.0) >= 512 || need != said.1 {
+            status(&format!(
+                "waiting for free memory ({:.1} GB free, {:.1} GB needed)",
+                now as f64 / 1024.0,
+                need as f64 / 1024.0
+            ));
+            said = (now, need);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 pub fn fail(text: &str) -> ! {
@@ -232,6 +278,7 @@ fn web_window(request: &Value) -> Option<String> {
     }
     // its steps are passed on as they happen; the cookie line ends it
     let mut cookie = None;
+    let mut error = None;
     if let Some(out) = child.stdout.take() {
         for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -243,9 +290,18 @@ fn web_window(request: &Value) -> Option<String> {
             if let Some(c) = v["cookie"].as_str() {
                 cookie = Some(c.to_string());
             }
+            // Roblox refused (too many sign-ins): Alyae's queue waits longer on this text
+            if let Some(e) = v["error"].as_str() {
+                error = Some(e.to_string());
+            }
         }
     }
     let _ = child.wait();
+    if cookie.is_none()
+        && let Some(e) = error
+    {
+        fail(&e);
+    }
     cookie
 }
 
@@ -314,6 +370,56 @@ fn presence(v: &Value) {
     }
 }
 
+/// The Servers window. Without `of`: every place of the game of `place` (an ID or a game link,
+/// the start place first), as `{"places": [{"id", "name"}]}`. With `of` (one of those): its
+/// servers, `{"servers": [{"id", "players", "max", "ping", "fps"}], "wait": s}`, `wait` being
+/// how long Roblox wants before the next list (3 a minute); or `{"error", "wait"}`.
+fn servers(v: &Value) {
+    let input = v["place"].as_str().unwrap_or("");
+    let place = place_id(input).unwrap_or_else(|| fail("put a place ID or game link in Place ID"));
+    let of = v["of"].as_str().and_then(|s| s.parse::<u64>().ok());
+    let Some(of) = of else {
+        // a game whose places Roblox does not list: the one place
+        let universe = api::universe_of(place).ok();
+        let mut list = universe
+            .map(api::places_of)
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        if !list.iter().any(|(id, _)| *id == place) {
+            list.insert(0, (place, String::new()));
+        }
+        let root = universe.and_then(|u| api::root_place(u).ok());
+        // the start place first
+        list.sort_by_key(|(id, _)| Some(*id) != root);
+        let list: Vec<Value> = list
+            .into_iter()
+            .map(|(id, name)| json!({ "id": id.to_string(), "name": name }))
+            .collect();
+        let mut out = json!({ "places": list });
+        if let Some(r) = root {
+            out["root"] = json!(r.to_string());
+        }
+        say(out);
+        return;
+    };
+    match api::servers(of) {
+        Ok((list, wait)) => {
+            let list: Vec<Value> = list
+                .into_iter()
+                .map(|s| {
+                    json!({ "id": s.id, "players": s.players, "max": s.max, "ping": s.ping,
+                            "fps": (s.fps * 10.0).round() / 10.0 })
+                })
+                .collect();
+            say(json!({ "servers": list, "wait": wait }));
+        }
+        Err((e, wait)) => {
+            say(json!({ "error": e, "wait": wait }));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let action = std::env::args().nth(1).unwrap_or_default();
     let mut line = String::new();
@@ -326,6 +432,10 @@ fn main() {
         serde_json::from_str(&line).unwrap_or_else(|e| fail(&format!("bad request: {e}")));
     if action == "presence" {
         presence(&v);
+        return;
+    }
+    if action == "servers" {
+        servers(&v);
         return;
     }
     let obj = |k: &str| {
@@ -366,6 +476,14 @@ fn main() {
         "reset" => windows::reset(&req),
         #[cfg(target_os = "linux")]
         "forget" => linux::forget(&req),
+        #[cfg(target_os = "linux")]
+        "close_all" => linux::close_all(),
+        #[cfg(windows)]
+        "close_all" => windows::close_all(),
+        #[cfg(target_os = "linux")]
+        "resume" => linux::resume(&req),
+        #[cfg(windows)]
+        "resume" => windows::resume(&req),
         "signout_all" | "logout" | "change_password" | "unblock_all" | "friends" | "privacy" => {
             tools::run(&action, &req)
         }

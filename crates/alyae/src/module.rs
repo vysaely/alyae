@@ -299,6 +299,10 @@ pub struct Module {
     /// games running), or ends at once when there is none
     #[serde(default)]
     pub resume: String,
+    /// a helper action that closes every game of this kind, the ones Alyae lost track of too:
+    /// the "Close all games" button
+    #[serde(default)]
+    pub close_all: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,

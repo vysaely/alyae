@@ -1,0 +1,196 @@
+diff --git a/src/window/window.cc b/src/window/window.cc
+index 6807fa7..03d6974 100644
+--- a/src/window/window.cc
++++ b/src/window/window.cc
+@@ -2399,6 +2399,31 @@ bool PumpEvents() {
+       MarkWindowStateDirty(fullscreen_changed);
+     }
+ 
++    // Alyae: a right-button release that ends the RMB camera drag lets the pointer go first, so
++    // Roblox gets the release where the pointer comes back to (the drag's start), not at the
++    // unclipped drag position clamped to the window edge. SDL drops the motion that would have
++    // told Roblox so (relative mode off flushes queued motion); Apply queues it again.
++    bool right_release_handled = false;
++    if (event.type == SDL_EVENT_MOUSE_BUTTON_UP &&
++        event.button.button == SDL_BUTTON_RIGHT &&
++        g_pointer_capture_owner != nullptr &&
++        g_pointer_capture_owner->captured()) {
++      right_release_handled = true;
++      if (!g_pointer_capture_owner->OnRightButton(
++              false,
++              g_text_input_owner != nullptr && g_text_input_owner->active())) {
++        fprintf(stderr,
++                "  [input] SDL right-button pointer capture update failed\n");
++      }
++      if (!g_pointer_capture_owner->captured()) {
++        float x = 0.0f;
++        float y = 0.0f;
++        SDL_GetMouseState(&x, &y);
++        event.button.x = x;
++        event.button.y = y;
++      }
++    }
++
+     const bool fullscreen_shortcut = HandleFullscreenShortcut(event);
+     platform::PlatformEvent platform_event;
+     const bool converted =
+@@ -2498,7 +2523,8 @@ bool PumpEvents() {
+       fprintf(stderr,
+               "  [input] SDL shift-lock pointer capture update failed\n");
+     }
+-    if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
++    if (!right_release_handled &&
++        (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+          event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+         event.button.button == SDL_BUTTON_RIGHT &&
+         g_pointer_capture_owner != nullptr &&
+diff --git a/src/window/window_pointer_capture_owner.cc b/src/window/window_pointer_capture_owner.cc
+index 58a5d14..e5c34df 100644
+--- a/src/window/window_pointer_capture_owner.cc
++++ b/src/window/window_pointer_capture_owner.cc
+@@ -1,5 +1,6 @@
+ #include "window/window_pointer_capture_owner.h"
+ 
++#include <SDL3/SDL_events.h>
+ #include <SDL3/SDL_mouse.h>
+ #include <SDL3/SDL_video.h>
+ 
+@@ -104,6 +105,11 @@ bool WindowPointerCaptureOwner::Pump(bool text_input_active) {
+   // When capture is released, Roblox still draws its own cursor.
+   // Show the system pointer only when the native client cannot provide one.
+   const bool cursor_visible = !client_active && !capture_requested;
++  if (capture_requested) {
++    native_while_captured_ = native_capture_active;
++  } else if (captured_ && backend_ != nullptr) {
++    backend_->SetReleaseAtCenter(native_while_captured_);
++  }
+   return Apply(capture_requested, cursor_visible);
+ }
+ 
+@@ -203,7 +209,17 @@ bool SdlPointerCaptureBackend::Apply(bool relative_mode, bool cursor_visible) {
+   if (!relative_mode && relative_mode_ && capture_anchor_valid_) {
+     // SDL requires the warp before relative mode is disabled. This preserves
+     // the desktop pointer position across Roblox's transient RMB camera drag.
+-    SDL_WarpMouseInWindow(window, capture_anchor_x_, capture_anchor_y_);
++    float to_x = capture_anchor_x_;
++    float to_y = capture_anchor_y_;
++    int width = 0;
++    int height = 0;
++    if (release_at_center_ && SDL_GetWindowSize(window, &width, &height) &&
++        width > 0 && height > 0) {
++      to_x = static_cast<float>(width) / 2.0f;
++      to_y = static_cast<float>(height) / 2.0f;
++    }
++    release_at_center_ = false;
++    SDL_WarpMouseInWindow(window, to_x, to_y);
+     SDL_SetWindowMouseGrab(window, false);
+   }
+   if (relative_mode != relative_mode_ &&
+@@ -214,10 +230,22 @@ bool SdlPointerCaptureBackend::Apply(bool relative_mode, bool cursor_visible) {
+     }
+     return false;
+   }
++  const bool released = relative_mode_ && !relative_mode;
+   relative_mode_ = relative_mode;
+   if (!relative_mode_) {
+     capture_anchor_valid_ = false;
+   }
++  if (released) {
++    // Alyae: leaving relative mode moves the pointer back and makes the motion that says so,
++    // then flushes queued motion, that one too. Roblox draws its own cursor where it last heard
++    // the pointer was, so without this it stays at the drag's end until the mouse moves.
++    SDL_Event sync{};
++    sync.type = SDL_EVENT_MOUSE_MOTION;
++    sync.motion.windowID = SDL_GetWindowID(window);
++    sync.motion.which = 0;
++    sync.motion.state = SDL_GetMouseState(&sync.motion.x, &sync.motion.y);
++    SDL_PushEvent(&sync);
++  }
+   return cursor_visible ? SDL_ShowCursor() : SDL_HideCursor();
+ }
+ 
+diff --git a/src/window/window_pointer_capture_owner.h b/src/window/window_pointer_capture_owner.h
+index 2d90bf0..2ae5e07 100644
+--- a/src/window/window_pointer_capture_owner.h
++++ b/src/window/window_pointer_capture_owner.h
+@@ -14,6 +14,9 @@ class PointerCaptureBackend {
+  public:
+   virtual ~PointerCaptureBackend() = default;
+   virtual bool Apply(bool relative_mode, bool cursor_visible) = 0;
++  // Alyae: whether the next release puts the pointer at the window's centre (Roblox's own lock
++  // ended, as the Windows client leaves it) instead of where the capture began (an RMB drag).
++  virtual void SetReleaseAtCenter(bool /*center*/) {}
+ };
+ 
+ class WindowPointerCaptureOwner final {
+@@ -69,6 +72,8 @@ class WindowPointerCaptureOwner final {
+   bool discard_next_motion_after_right_drag_ = false;
+   bool captured_ = false;
+   bool cursor_visible_ = true;
++  // Alyae: Roblox's own lock (shift lock, first person) was on in the latest captured pump
++  bool native_while_captured_ = false;
+ };
+ 
+ class SdlPointerCaptureBackend final : public PointerCaptureBackend {
+@@ -76,9 +81,11 @@ class SdlPointerCaptureBackend final : public PointerCaptureBackend {
+   explicit SdlPointerCaptureBackend(void* window) : window_(window) {}
+ 
+   bool Apply(bool relative_mode, bool cursor_visible) override;
++  void SetReleaseAtCenter(bool center) override { release_at_center_ = center; }
+ 
+  private:
+   void* window_ = nullptr;
++  bool release_at_center_ = false;
+   float capture_anchor_x_ = 0.0f;
+   float capture_anchor_y_ = 0.0f;
+   bool relative_mode_ = false;
+diff --git a/tests/window_pointer_capture_owner_test.cc b/tests/window_pointer_capture_owner_test.cc
+index 1fa40e6..c44b079 100644
+--- a/tests/window_pointer_capture_owner_test.cc
++++ b/tests/window_pointer_capture_owner_test.cc
+@@ -15,12 +15,14 @@ class FakeBackend final : public PointerCaptureBackend {
+     calls.push_back({relative_mode, cursor_visible});
+     return succeeds;
+   }
++  void SetReleaseAtCenter(bool center) override { centers.push_back(center); }
+ 
+   struct Call {
+     bool relative_mode;
+     bool cursor_visible;
+   };
+   std::vector<Call> calls;
++  std::vector<bool> centers;
+   bool succeeds = true;
+ };
+ 
+@@ -71,6 +73,30 @@ TEST(WindowPointerCaptureOwnerTest, FollowsNativeMouseLockState) {
+   EXPECT_FALSE(owner.cursor_visible());
+ }
+ 
++// Alyae: Roblox's own lock ends with the pointer at the centre (as on Windows); an RMB drag ends
++// where it began.
++TEST(WindowPointerCaptureOwnerTest, ReleaseCentresOnlyAfterNativeLock) {
++  FakeBackend backend;
++  QueryState query;
++  WindowPointerCaptureOwner owner(&backend);
++  ASSERT_TRUE(owner.RegisterQuery(Query, &query));
++  ASSERT_TRUE(owner.Pump(false));
++
++  ASSERT_TRUE(owner.OnRightButton(true, false));
++  ASSERT_TRUE(owner.captured());
++  ASSERT_TRUE(owner.OnRightButton(false, false));
++  ASSERT_FALSE(owner.captured());
++  ASSERT_EQ(backend.centers, std::vector<bool>({false}));
++
++  query.locked_center = true;
++  ASSERT_TRUE(owner.Pump(false));
++  ASSERT_TRUE(owner.captured());
++  query.locked_center = false;
++  ASSERT_TRUE(owner.Pump(false));
++  ASSERT_FALSE(owner.captured());
++  EXPECT_EQ(backend.centers, std::vector<bool>({false, true}));
++}
++
+ TEST(WindowPointerCaptureOwnerTest, TextInputPreservesNativeShiftLock) {
+   FakeBackend backend;
+   QueryState query{true, true};

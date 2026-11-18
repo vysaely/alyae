@@ -699,7 +699,10 @@ pub fn play(req: &Request) {
     // replace it, and at the end it would pass for a renewed cookie
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
     let mut turn = LaunchTurn::take(data_dir);
-    wait_for_memory();
+    // one account started on its own does not wait for free RAM
+    if req.input("_alone") != "1" {
+        wait_for_memory();
+    }
     status("starting");
     let window = window_size(req.window(), main);
     prepare_profile(

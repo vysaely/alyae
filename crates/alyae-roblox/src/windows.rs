@@ -552,7 +552,19 @@ pub fn play(req: &Request) {
     // (the turn). Signing in comes after the waits, so the one-time ticket is fresh
     let slot = LoadSlot::take();
     let turn = LaunchTurn::take();
-    wait_for_memory(req, slot.1);
+    // one account started on its own does not wait for free RAM; it still will not start
+    // with the commit (RAM plus page file) all but used up, which would crash games
+    if req.input("_alone") == "1" {
+        let left = memory().1;
+        if left < 1024 {
+            fail(&format!(
+                "{}: Windows can promise only {left} MB more (RAM plus page file). Close a game first",
+                crate::NO_MEMORY
+            ));
+        }
+    } else {
+        wait_for_memory(req, slot.1);
+    }
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();

@@ -613,6 +613,12 @@ impl App {
                 self.queue
                     .retain(|j| !(ids.contains(&j.account) && j.action == action.id));
             }
+            // one account on its own: the helper starts it without waiting for free RAM
+            // (owner, 2026-11-18)
+            let mut inputs = inputs;
+            if !action.local {
+                inputs.insert("_alone".into(), "1".into());
+            }
             for id in ids {
                 self.start_job(&Job {
                     game: game.clone(),

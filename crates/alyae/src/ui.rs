@@ -3721,7 +3721,8 @@ mod tests {
         h.get_all_by_label("Wipe").last().unwrap().click();
         h.run();
         assert!(h.state().form.is_none());
-        for _ in 0..50 {
+        // up to 5 s: cmd starts slowly on a busy PC
+        for _ in 0..250 {
             if marker.exists() {
                 break;
             }

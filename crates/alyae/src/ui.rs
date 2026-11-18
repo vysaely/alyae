@@ -36,6 +36,8 @@ pub struct App {
     running: HashMap<String, Running>,
     /// resume helpers still looking for their account's game: running once one says so
     resuming: HashMap<String, Running>,
+    /// "Close all games" waits for its confirmation
+    confirm_close_all: bool,
     /// short helper actions (Refresh ...): not "running", only waited for
     tasks: Vec<(String, Running)>,
     status: HashMap<String, (String, bool)>,
@@ -170,6 +172,7 @@ impl App {
             inputs: HashMap::new(),
             running: HashMap::new(),
             resuming: HashMap::new(),
+            confirm_close_all: false,
             tasks: Vec::new(),
             status: HashMap::new(),
             message: None,
@@ -782,6 +785,7 @@ impl eframe::App for App {
         self.edit_dialog(&ctx);
         self.remove_dialog(&ctx);
         self.form_dialog(&ctx);
+        self.close_all_dialog(&ctx);
         // an accounts file dropped on the window opens the import
         let dropped = ctx.input(|i| {
             i.raw
@@ -993,6 +997,32 @@ impl App {
                         path: crate::transfer::default_path().display().to_string(),
                         ..Default::default()
                     });
+                }
+                // the chosen accounts' games, one or several
+                let chosen: Vec<String> = self
+                    .selected
+                    .iter()
+                    .filter(|id| self.running.contains_key(*id))
+                    .cloned()
+                    .collect();
+                if !chosen.is_empty()
+                    && ui
+                        .button(format!("Close selected ({})", chosen.len()))
+                        .on_hover_text("Closes the games of the chosen accounts")
+                        .clicked()
+                {
+                    self.unqueue(&chosen);
+                    self.stop(&chosen);
+                }
+                if !m.close_all.is_empty()
+                    && ui
+                        .button("Close all games")
+                        .on_hover_text(
+                            "Closes every game of this kind, also ones Alyae did not start",
+                        )
+                        .clicked()
+                {
+                    self.confirm_close_all = true;
                 }
                 if !self.queue.is_empty()
                     && ui
@@ -1799,7 +1829,8 @@ impl App {
                 choice = Some(MenuChoice::Run(a.id.clone()));
             }
         }
-        if ids.iter().any(|id| self.running.contains_key(id)) && ui.button(count("Stop")).clicked()
+        if ids.iter().any(|id| self.running.contains_key(id))
+            && ui.button(count("Close game")).clicked()
         {
             choice = Some(MenuChoice::Stop);
         }
@@ -2245,6 +2276,58 @@ impl App {
                 }
             }
             Some(false) => self.confirm_remove.clear(),
+            None => {}
+        }
+    }
+
+    /// "Close all games", once confirmed: the queue stops, every game Alyae runs is asked to
+    /// stop, and the module's close-all action closes the rest (ones started elsewhere or lost
+    /// track of), on a thread of its own.
+    fn close_all_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_close_all {
+            return;
+        }
+        let Some(m) = self.game.as_deref().and_then(|g| self.module(g)).cloned() else {
+            self.confirm_close_all = false;
+            return;
+        };
+        let mut done = None;
+        egui::Modal::new(egui::Id::unique("close_all")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.heading(format!("Close all {} games?", m.name));
+            ui.label("Every one closes now, also the ones Alyae did not start; the queue stops.");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add(look::primary("Close all")).clicked() {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => {
+                self.confirm_close_all = false;
+                self.queue.clear();
+                self.queue_next = None;
+                for r in self.running.values_mut() {
+                    r.stop();
+                }
+                let dir = self.dir.clone();
+                let account = Account {
+                    id: "all".into(),
+                    game: m.id.clone(),
+                    ..Default::default()
+                };
+                std::thread::spawn(move || {
+                    if let Err(e) = module::run_and_wait(&m, &m.close_all, &account, &dir) {
+                        crate::log::line("", &format!("Close all games: {e}"));
+                    }
+                });
+                self.say("Closing all games", false);
+            }
+            Some(false) => self.confirm_close_all = false,
             None => {}
         }
     }
@@ -2922,7 +3005,7 @@ impl App {
         }
         if control {
             if ids.iter().any(|id| self.running.contains_key(id))
-                && ui.button(count("Stop")).clicked()
+                && ui.button(count("Close game")).clicked()
             {
                 choice = Some(MenuChoice::Stop);
             }
@@ -3874,6 +3957,21 @@ mod tests {
         assert_eq!(left, vec![b.id.as_str()]);
         h.state_mut().queue.clear();
         h.state_mut().queue_current = None;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// "Close all games" asks first; Cancel leaves everything as it is.
+    #[test]
+    fn close_all_asks_first() {
+        let (mut h, dir) = window("roblox");
+        assert_eq!(h.state().module("roblox").unwrap().close_all, "close_all");
+        h.get_by_label("Close all games").click();
+        h.run();
+        assert!(h.state().confirm_close_all);
+        assert!(h.query_by_label("Close all").is_some());
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert!(!h.state().confirm_close_all);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -6,6 +6,8 @@ description = "Several accounts at once, join servers, 2FA"
 helper = "alyae-roblox"
 # when Alyae opens, each account's game still running from before counts as running again
 resume = "resume"
+# the "Close all games" button: every Roblox, also ones Alyae did not start
+close_all = "close_all"
 title_field = "username"
 # removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
 # AEAM stays; only Mocktail's saved sign-in in it goes)

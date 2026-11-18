@@ -656,6 +656,16 @@ pub fn play(req: &Request) {
     watch_client(req, pid, &live, rx, trim);
 }
 
+/// The "Close all games" button: every Roblox client closes, the ones Alyae lost track of too.
+/// Each account's helper then takes its settings back as after any close.
+pub fn close_all() {
+    let all = clients();
+    for pid in &all {
+        kill(*pid);
+    }
+    status(&format!("{} Roblox closed", all.len()));
+}
+
 /// The Resume action, when Alyae opens: if this account's client still runs from before
 /// (Alyae was closed, the game was left running), watch it again as after a launch: Stop
 /// works, an alt keeps being trimmed, its settings are taken back when it closes. No client:

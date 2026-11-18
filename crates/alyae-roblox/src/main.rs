@@ -477,6 +477,10 @@ fn main() {
         #[cfg(target_os = "linux")]
         "forget" => linux::forget(&req),
         #[cfg(target_os = "linux")]
+        "close_all" => linux::close_all(),
+        #[cfg(windows)]
+        "close_all" => windows::close_all(),
+        #[cfg(target_os = "linux")]
         "resume" => linux::resume(&req),
         #[cfg(windows)]
         "resume" => windows::resume(&req),

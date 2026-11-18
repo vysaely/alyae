@@ -6,6 +6,8 @@ description = "Several accounts at once, join servers, 2FA"
 helper = "alyae-roblox"
 # when Alyae opens, each account's game still running from before counts as running again
 resume = "resume"
+# the "Close all games" button: every Roblox, also ones Alyae did not start
+close_all = "close_all"
 title_field = "username"
 
 # Add account opens Roblox's login page and adds the account once it signs in; Import takes

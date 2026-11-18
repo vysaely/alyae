@@ -183,6 +183,40 @@ fn running_pid(program: &Path) -> Option<i32> {
     })
 }
 
+/// The "Close all games" button: every account's Mocktail game (each runs as its own
+/// `mocktail_alyae_...` program) is asked to end, and made to after 4 s.
+pub fn close_all() {
+    let games = || -> Vec<i32> {
+        let Ok(procs) = fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        procs
+            .flatten()
+            .filter_map(|p| {
+                let pid = p.file_name().to_str()?.parse::<i32>().ok()?;
+                let c = fs::read(p.path().join("cmdline")).ok()?;
+                let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
+                let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
+                name.to_str()?.starts_with("mocktail_alyae_").then_some(pid)
+            })
+            .collect()
+    };
+    let all = games();
+    for pid in &all {
+        // SAFETY: plain signal to a process ID
+        unsafe { libc::kill(*pid, libc::SIGTERM) };
+    }
+    let until = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < until && !games().is_empty() {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    for pid in games() {
+        // SAFETY: plain signal to a process ID
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    status(&format!("{} games closed", all.len()));
+}
+
 /// The Resume action, when Alyae opens: if this account's game still runs from before (Alyae
 /// was closed, the game was left running), it counts as running again until it ends, and Stop
 /// ends it. No game: ends at once, saying nothing.

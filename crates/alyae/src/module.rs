@@ -15,9 +15,13 @@ pub struct Field {
     pub label: String,
     #[serde(default)]
     pub secret: bool,
-    /// "text" (default), "totp" (shows the live code), "choice"
+    /// "text" (default), "totp" (shows the live code), "choice", "image" (a picture from `dir`)
     #[serde(default)]
     pub kind: String,
+    /// for "image": the folder of pictures to pick from, in the game's data folder; Add copies a
+    /// new one in. The value is the file's name.
+    #[serde(default)]
+    pub dir: String,
     #[serde(default)]
     pub choices: Vec<String>,
     #[serde(default)]

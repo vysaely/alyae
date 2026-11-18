@@ -109,6 +109,8 @@ pub struct App {
     servers_filter: Option<String>,
     /// the list fullest first (else lowest ping first)
     servers_by_players: bool,
+    /// an "image" field's picture being chosen in the system's picker: the field and the answer
+    adding_image: Option<(String, std::sync::mpsc::Receiver<Option<std::path::PathBuf>>)>,
 }
 
 /// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
@@ -214,6 +216,7 @@ impl App {
             servers_turn: 0,
             servers_filter: None,
             servers_by_players: true,
+            adding_image: None,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -3091,6 +3094,59 @@ impl App {
         }
     }
 
+    /// A picture from `dir` by name ("none": the game's own), and Add: a PNG from anywhere,
+    /// copied into `dir` and chosen.
+    fn image_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        f: &crate::module::Field,
+        dir: &std::path::Path,
+        v: &mut String,
+    ) {
+        if let Some((key, rx)) = &self.adding_image
+            && *key == f.key
+        {
+            match rx.try_recv() {
+                Ok(Some(src)) => {
+                    self.adding_image = None;
+                    match copy_image(&src, dir) {
+                        Ok(name) => *v = name,
+                        Err(e) => self.message = Some((format!("{}: {e}", f.label), true)),
+                    }
+                }
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.adding_image = None
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+            }
+        }
+        let shown = if v.is_empty() { "none" } else { v.as_str() }.to_string();
+        row(ui, |ui| {
+            if ui
+                .add_enabled(self.adding_image.is_none(), egui::Button::new("Add…"))
+                .on_hover_text("a PNG of your own")
+                .clicked()
+            {
+                self.adding_image = Some((f.key.clone(), pick_image()));
+            }
+            egui::ComboBox::from_id_salt(("image", &f.key))
+                .selected_text(&shown)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(v.is_empty(), "none").clicked() {
+                        v.clear();
+                    }
+                    for name in images_in(dir) {
+                        if ui.selectable_label(*v == name, &name).clicked() {
+                            *v = name;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(&f.hint);
+        });
+    }
+
     fn editor(&mut self, ui: &mut egui::Ui, m: &Module) {
         if self.selected.len() > 1 {
             ui.label(format!("{} accounts chosen. The buttons above run for all of them; right-click them for everything else.", self.selected.len()));
@@ -3149,7 +3205,10 @@ impl App {
                     };
                     let mut v = map.get(&f.key).cloned().unwrap_or_default();
                     let key = (d.id.clone(), f.key.clone());
-                    if f.kind == "choice" && !f.choices.is_empty() {
+                    if f.kind == "image" && !f.dir.is_empty() {
+                        let dir = self.dir.join("games").join(&m.id).join(&f.dir);
+                        self.image_field(ui, f, &dir, &mut v);
+                    } else if f.kind == "choice" && !f.choices.is_empty() {
                         // empty is a choice of its own: the game's own setting
                         let shown = if v.is_empty() {
                             "none".to_string()
@@ -3319,6 +3378,49 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// The PNG pictures in `dir` by name, hidden ones (starting with '.') left out.
+fn images_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.') && n.to_ascii_lowercase().ends_with(".png"))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// `src` copied into `dir` under its own name (a picture already there by that name is replaced);
+/// the name it got.
+fn copy_image(src: &std::path::Path, dir: &std::path::Path) -> Result<String, String> {
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.starts_with('.') && n.to_ascii_lowercase().ends_with(".png"))
+        .ok_or("a .png file, please")?
+        .to_string();
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let to = dir.join(&name);
+    if src != to {
+        std::fs::copy(src, &to).map_err(|e| e.to_string())?;
+    }
+    Ok(name)
+}
+
+/// The system's file picker for one PNG, on a thread of its own.
+fn pick_image() -> std::sync::mpsc::Receiver<Option<std::path::PathBuf>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut d = rfd::FileDialog::new().add_filter("Pictures", &["png", "PNG"]);
+        if let Some(dir) = dirs::picture_dir() {
+            d = d.set_directory(dir);
+        }
+        let _ = tx.send(d.pick_file());
+    });
+    rx
 }
 
 /// The system's file picker on a thread of its own (the window keeps drawing meanwhile): where to

@@ -68,6 +68,13 @@ choices = ["off", "12", "15", "18"]
 hint = "minutes without input before a 1 px nudge (Roblox kicks after 20)"
 
 [[field]]
+key = "cursor"
+label = "Shift-lock cursor"
+kind = "image"
+dir = "cursors"
+hint = "drawn in place of Roblox's shift-lock icon; Add takes a PNG of your own"
+
+[[field]]
 key = "fps"
 label = "FPS cap"
 hint = "empty: the role's (below); 0: no cap"

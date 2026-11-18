@@ -300,15 +300,40 @@ fn set_affinity(cpus: &[usize]) {
 }
 
 /// The link Mocktail joins with: a place, and a server in it (job ID, or a private server's link
-/// code). Follow arrives here already turned into the followed user's place and server.
+/// code). A follow carries the user instead of their server, so Roblox joins them its own way
+/// (join type 1, as the friend Join button): a sub place's or a game-made server refuses a join by
+/// job ID ("restricted"). Mocktail still wants a place, so the followed user's goes along.
 fn uri(j: &Join) -> Option<String> {
     let mut u = format!("roblox://experiences/start?placeId={}", j.place?);
-    if let Some(job) = &j.job {
+    if let Some(user) = j.follow {
+        u += &format!("&userId={user}");
+    } else if let Some(job) = &j.job {
         u += &format!("&gameInstanceId={job}");
     } else if let Some(code) = &j.link_code {
         u += &format!("&linkCode={code}");
     }
     Some(u)
+}
+
+/// Alyae's Mocktail build (shift-lock icon patch) draws the account's chosen picture from
+/// `<data>/cursors` in place of Roblox's shift-lock icon, which it finds by comparing uploads
+/// with `.roblox_lock_reference.png` there (Roblox's own icon, taken from its cache). Without
+/// either file, Roblox's icon stays.
+fn shiftlock_cursor(req: &Request) -> Vec<(String, String)> {
+    let name = req.get("cursor");
+    let dir = req.data_dir.join("cursors");
+    let (pic, reference) = (dir.join(name), dir.join(".roblox_lock_reference.png"));
+    if name.is_empty() || name.contains('/') || !pic.is_file() {
+        return Vec::new();
+    }
+    if !reference.is_file() {
+        status("shift-lock cursor: .roblox_lock_reference.png is missing in the cursors folder");
+        return Vec::new();
+    }
+    vec![
+        ("MOCKTAIL_SHIFTLOCK_CURSOR".into(), pic.display().to_string()),
+        ("MOCKTAIL_SHIFTLOCK_ORIGINAL".into(), reference.display().to_string()),
+    ]
 }
 
 /// FastFlags: the low-cost set for alts; for a main, only what AEAM's main ran with by default.
@@ -823,6 +848,7 @@ pub fn play(req: &Request) {
         flags.clone(),
     ));
     env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
+    env.extend(shiftlock_cursor(req));
     // Alyae's Mocktail build (anti-AFK patch): a nudge after this many seconds without input
     let afk_minutes: u64 = req.get("anti_afk").parse().unwrap_or(0);
     if afk_minutes > 0 {
@@ -1022,7 +1048,7 @@ mod tests {
             uri(&j).as_deref(),
             Some("roblox://experiences/start?placeId=1&gameInstanceId=j")
         );
-        // a follow arrives with the user's place and server; without a place there is no link
+        // a follow joins by user, not by the user's server; without a place there is no link
         // (Mocktail refuses one: "requires a positive placeId")
         let j = Join {
             place: Some(2),
@@ -1032,7 +1058,7 @@ mod tests {
         };
         assert_eq!(
             uri(&j).as_deref(),
-            Some("roblox://experiences/start?placeId=2&gameInstanceId=s")
+            Some("roblox://experiences/start?placeId=2&userId=9")
         );
         let j = Join {
             place: None,

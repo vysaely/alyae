@@ -247,6 +247,7 @@ impl App {
                 if !problems.is_empty() {
                     app.say(problems.join("; "), true);
                 }
+                app.add_module_images();
                 app.resume_games();
             }
             Err(e) => app.fatal = Some(e),
@@ -256,6 +257,27 @@ impl App {
 
     fn module(&self, id: &str) -> Option<&Module> {
         self.modules.iter().find(|m| m.id == id)
+    }
+
+    /// Pictures a module ships for an "image" field (in the module's own folder named by the
+    /// field's `dir`) are copied into the game's folder of them when missing there, so they are
+    /// in the field's list.
+    fn add_module_images(&mut self) {
+        let mut problems = Vec::new();
+        for m in &self.modules {
+            for f in m.fields.iter().filter(|f| f.kind == "image" && !f.dir.is_empty()) {
+                let from = m.dir.join(&f.dir);
+                let to = self.dir.join("games").join(&m.id).join(&f.dir);
+                for name in images_in(&from).into_iter().filter(|n| !to.join(n).exists()) {
+                    if let Err(e) = copy_image(&from.join(&name), &to) {
+                        problems.push(format!("{name}: {e}"));
+                    }
+                }
+            }
+        }
+        if !problems.is_empty() {
+            self.say(format!("Pictures not added: {}", problems.join("; ")), true);
+        }
     }
 
     /// Whether `action` is the resume action of `account`'s game.
@@ -4060,6 +4082,16 @@ mod tests {
         assert!(marker.exists(), "the confirmed action did not run");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// The cursor the Roblox Linux module ships is in the field's list from the start.
+    #[test]
+    #[cfg(unix)]
+    fn shipped_cursor_is_listed() {
+        let (_h, dir) = window("roblox");
+        let cursors = dir.join("games/roblox/cursors");
+        assert_eq!(images_in(&cursors), ["diamond_cross.png"]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Close all games stops this game's accounts only, and shows what the close-all action

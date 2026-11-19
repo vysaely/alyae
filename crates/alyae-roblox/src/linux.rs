@@ -406,21 +406,40 @@ fn uri(j: &Join) -> Option<String> {
     Some(u)
 }
 
+/// Roblox's own shift-lock icon, which Alyae's Mocktail build compares uploads with: the
+/// client's MouseLockedCursor.png from the newest payload (by folder time) that has one (not
+/// every version ships it), else a `.roblox_lock_reference.png` put in `cursors` by hand.
+fn lock_reference(payloads: &Path, cursors: &Path) -> Option<PathBuf> {
+    let newest = fs::read_dir(payloads)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|p| {
+            let icon = p.path().join("assets/content/textures/MouseLockedCursor.png");
+            let time = p.metadata().and_then(|m| m.modified()).ok()?;
+            icon.is_file().then_some((time, icon))
+        })
+        .max_by_key(|(time, _)| *time)
+        .map(|(_, icon)| icon);
+    newest.or_else(|| Some(cursors.join(".roblox_lock_reference.png")).filter(|f| f.is_file()))
+}
+
 /// Alyae's Mocktail build (shift-lock icon patch) draws the account's chosen picture from
 /// `<data>/cursors` in place of Roblox's shift-lock icon, which it finds by comparing uploads
-/// with `.roblox_lock_reference.png` there (Roblox's own icon, taken from its cache). Without
-/// either file, Roblox's icon stays.
-fn shiftlock_cursor(req: &Request) -> Vec<(String, String)> {
+/// with Roblox's own (`lock_reference`). Without either, Roblox's icon stays.
+fn shiftlock_cursor(req: &Request, m: &Mocktail) -> Vec<(String, String)> {
     let name = req.get("cursor");
     let dir = req.data_dir.join("cursors");
-    let (pic, reference) = (dir.join(name), dir.join(".roblox_lock_reference.png"));
+    let pic = dir.join(name);
     if name.is_empty() || name.contains('/') || !pic.is_file() {
         return Vec::new();
     }
-    if !reference.is_file() {
-        status("shift-lock cursor: .roblox_lock_reference.png is missing in the cursors folder");
+    let Some(reference) = lock_reference(&m.data.join("payloads"), &dir) else {
+        status(
+            "shift-lock cursor: no installed Roblox version has MouseLockedCursor.png; Roblox's icon stays",
+        );
         return Vec::new();
-    }
+    };
     vec![
         ("MOCKTAIL_SHIFTLOCK_CURSOR".into(), pic.display().to_string()),
         ("MOCKTAIL_SHIFTLOCK_ORIGINAL".into(), reference.display().to_string()),
@@ -1031,7 +1050,7 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_MULTITHREADED_RENDERING".into(), "1".into()),
     ];
     env.extend(role_env(role, fps_limit, &window));
-    env.extend(shiftlock_cursor(req));
+    env.extend(shiftlock_cursor(req, &m));
     let meta = m.data.join("metadata");
     if meta.is_dir() {
         for (k, f) in [
@@ -1504,6 +1523,29 @@ mod tests {
             assert!(!any_game(other), "{other}");
         }
         assert!(alyae_game("mocktail_alyae_abc") && !alyae_game("mocktail_acc_1"));
+    }
+
+    /// The shift-lock reference comes from the newest payload that has it, else from the file
+    /// put in the cursors folder by hand.
+    #[test]
+    fn shiftlock_reference() {
+        let root = std::env::temp_dir().join(format!("alyae-lock-{}", std::process::id()));
+        let (payloads, cursors) = (root.join("payloads"), root.join("cursors"));
+        fs::create_dir_all(&cursors).unwrap();
+        assert_eq!(lock_reference(&payloads, &cursors), None);
+        let hand = cursors.join(".roblox_lock_reference.png");
+        fs::write(&hand, "png").unwrap();
+        assert_eq!(lock_reference(&payloads, &cursors), Some(hand));
+        let icon = |v: &str| payloads.join(v).join("assets/content/textures/MouseLockedCursor.png");
+        for v in ["1-old", "2-new"] {
+            fs::create_dir_all(icon(v).parent().unwrap()).unwrap();
+            fs::write(icon(v), v).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // a newer payload without the icon does not count
+        fs::create_dir_all(payloads.join("3-none/assets")).unwrap();
+        assert_eq!(lock_reference(&payloads, &cursors), Some(icon("2-new")));
+        let _ = fs::remove_dir_all(root);
     }
 
     /// A nudge file that cannot be written is a failure, not a game started before Anti-AFK.

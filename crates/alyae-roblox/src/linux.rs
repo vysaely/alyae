@@ -245,10 +245,16 @@ pub fn close_all() {
 
 /// The Resume action, when Alyae opens: if this account's game still runs from before (Alyae
 /// was closed, the game was left running), it counts as running again until it ends, and Stop
-/// ends it. No game: ends at once, saying nothing.
+/// ends it; at its end a renewed cookie is saved as after Join Server. No game: a renewed cookie
+/// a game left while Alyae was closed is saved; otherwise it ends at once, saying nothing.
 pub fn resume(req: &Request) {
-    let Some(m) = find_mocktail() else { return };
-    let Some(pid) = running_pid(&m.lib.join(program_name(req))) else {
+    let profile = profile_dir(req, &req.data_dir);
+    let cookie = req.cookie();
+    let pid = find_mocktail().and_then(|m| running_pid(&m.lib.join(program_name(req))));
+    let Some(pid) = pid else {
+        if profile.join(PICKUP).exists() {
+            after_game(&profile, &cookie, false);
+        }
         return;
     };
     let mut stop = Stop::listen();
@@ -270,6 +276,38 @@ pub fn resume(req: &Request) {
             break;
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+    after_game(&profile, &cookie, stop.alyae_gone);
+}
+
+/// Left in a profile by a game that ended while Alyae was closed: its data/auth sign-in may hold
+/// a renewed cookie for the next start of Alyae to save.
+const PICKUP: &str = "renewed-cookie-pending";
+
+/// The cookie Mocktail kept in data/auth when it is one Roblox renewed (not `cookie`).
+fn renewed_cookie(profile: &Path, cookie: &str) -> Option<String> {
+    let text = fs::read_to_string(profile.join("data/auth/roblox.cookie")).ok()?;
+    let renewed = api::clean_cookie(&text);
+    (renewed != cookie && renewed.starts_with("_|WARNING")).then_some(renewed)
+}
+
+/// After a game ended: a cookie Roblox renewed meanwhile (Mocktail keeps the session in
+/// data/auth) goes to Alyae, and the plain-text sign-in files go. With Alyae closed nobody would
+/// read it: Mocktail's file stays, marked for the next start of Alyae (`resume`).
+fn after_game(profile: &Path, cookie: &str, alyae_gone: bool) {
+    let _ = fs::remove_file(profile.join("roblox.cookie"));
+    let (kept, pickup) = (profile.join("data/auth/roblox.cookie"), profile.join(PICKUP));
+    if alyae_gone {
+        if kept.exists() {
+            let _ = write_private(&pickup, "");
+        }
+        return;
+    }
+    if let Some(renewed) = renewed_cookie(profile, cookie) {
+        say(json!({ "set": { "cookie": renewed } }));
+    }
+    for f in [kept, pickup] {
+        let _ = fs::remove_file(f);
     }
 }
 use std::os::unix::ffi::OsStrExt;
@@ -900,8 +938,10 @@ pub fn play(req: &Request) {
     let profile = profile_dir(req, data_dir);
     mkdir(&profile);
     // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
-    // replace it, and at the end it would pass for a renewed cookie
+    // replace it, and at the end it would pass for a renewed cookie. (One left for pickup was
+    // saved when Alyae opened, by `resume`.)
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
+    let _ = fs::remove_file(profile.join(PICKUP));
     // a second copy earlier versions wrote, which Mocktail never read
     let _ = fs::remove_file(profile.join("data/mocktail/roblox.cookie"));
     // one account started on its own does not wait for free RAM. The turn comes after the
@@ -932,7 +972,6 @@ pub fn play(req: &Request) {
             let _ = write_private(&tracker_file, &format!("{t}\n"));
             Some(t)
         });
-    let cookie_file = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
     let mut args: Vec<String> = vec!["--windowed".into(), "--graphics".into(), "opengl".into()];
@@ -1075,10 +1114,13 @@ pub fn play(req: &Request) {
             Ok(())
         });
     }
+    // written last, so a launch that fails before the game starts leaves no copy of the cookie
+    let cookie_file = write_cookie(&profile, &cookie, tracker.as_deref());
     let started = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
+    let mut child = cmd.spawn().unwrap_or_else(|e| {
+        let _ = fs::remove_file(&cookie_file);
+        fail(&format!("cannot start Mocktail: {e}"))
+    });
     let pid = child.id() as i32;
     say(json!({ "status": "running" }));
     let code = loop {
@@ -1101,17 +1143,7 @@ pub fn play(req: &Request) {
         }
         std::thread::sleep(Duration::from_millis(250));
     };
-    // Mocktail keeps the session in data/auth; Roblox may have renewed the cookie meanwhile
-    let kept = profile.join("data/auth/roblox.cookie");
-    if let Ok(text) = fs::read_to_string(&kept) {
-        let renewed = api::clean_cookie(&text);
-        if !renewed.is_empty() && renewed != cookie && renewed.starts_with("_|WARNING") {
-            say(json!({ "set": { "cookie": renewed } }));
-        }
-    }
-    for f in [&cookie_file, &kept] {
-        let _ = fs::remove_file(f);
-    }
+    after_game(&profile, &cookie, stop.alyae_gone);
     if !code.success() && started.elapsed() < Duration::from_secs(20) {
         let why = tail(&log_path, log_start);
         fail(&if why.is_empty() {
@@ -1400,6 +1432,32 @@ mod tests {
         prepare_profile(&m, &data, &p, Role::Alt, Some(1), &Window::AsIs);
         assert!(!shared.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// After a game: with Alyae there the renewed cookie is read and every sign-in file goes;
+    /// with Alyae closed Mocktail's stays, marked, for the next start of Alyae.
+    #[test]
+    fn renewed_cookie_waits_for_alyae() {
+        let p = std::env::temp_dir().join(format!("alyae-renew-{}", std::process::id()));
+        let kept = p.join("data/auth/roblox.cookie");
+        fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        let write = || {
+            fs::write(p.join("roblox.cookie"), ".ROBLOSECURITY=old\n").unwrap();
+            fs::write(&kept, ".ROBLOSECURITY=_|WARNING:new\n").unwrap();
+        };
+        write();
+        after_game(&p, "old", true);
+        assert!(!p.join("roblox.cookie").exists());
+        assert!(kept.exists() && p.join(PICKUP).exists());
+        assert_eq!(renewed_cookie(&p, "old").as_deref(), Some("_|WARNING:new"));
+        assert_eq!(renewed_cookie(&p, "_|WARNING:new"), None);
+        // the next start of Alyae (resume, no game) saves it and cleans up
+        after_game(&p, "old", false);
+        assert!(!kept.exists() && !p.join(PICKUP).exists());
+        write();
+        after_game(&p, "old", false);
+        assert!(!kept.exists() && !p.join("roblox.cookie").exists());
+        let _ = fs::remove_dir_all(p);
     }
 
     /// Only alts are held to CPUs; a main keeps every core.

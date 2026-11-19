@@ -145,6 +145,8 @@ action = "presence"
 every = 15
 column = "Online"
 fields = ["user_id"]
+# an account that looks offline publicly (privacy) is asked again as itself, once a minute
+secret = "cookie"
 
 [watch.colors]
 "In game" = "#3dd68c"

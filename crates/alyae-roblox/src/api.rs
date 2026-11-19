@@ -3,7 +3,10 @@
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const UA: &str = "Alyae/0.1 (game account manager)";
+/// Desktop Chrome on Windows (in Chrome's reduced form, minor versions zeroed): Roblox's web
+/// calls then come with the same User-Agent as most of its visitors', instead of one that names
+/// an account manager.
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()

@@ -19,7 +19,8 @@ pub struct Field {
     #[serde(default)]
     pub kind: String,
     /// for "image": the folder of pictures to pick from, in the game's data folder; Add copies a
-    /// new one in. The value is the file's name.
+    /// new one in, and pictures in the module's own folder of this name are copied in when
+    /// missing. The value is the file's name.
     #[serde(default)]
     pub dir: String,
     #[serde(default)]

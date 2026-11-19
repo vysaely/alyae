@@ -1633,8 +1633,7 @@ impl App {
             return String::new();
         }
         let role = match a.value("role") {
-            "main" => "H",
-            "alt" => "L",
+            r @ ("main" | "alt") => r,
             _ => "",
         };
         let fps = match m.value_of(a, "fps").parse::<u32>() {
@@ -3893,6 +3892,21 @@ mod tests {
         assert!(h.state().adding.is_empty());
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// The Mode column names the role as the Role field does.
+    #[test]
+    fn mode_names_the_role() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let mut a = h.state().new_account(&m);
+        set_value(&mut a, "role", "alt", false);
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
+        set_value(&mut a, "role", "main", false);
+        assert_eq!(h.state().mode(&m, &a), "main \u{2022} 330 FPS");
+        set_value(&mut a, "role", "", false);
+        assert_eq!(h.state().mode(&m, &a), "");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

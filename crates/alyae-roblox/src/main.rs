@@ -5,6 +5,7 @@
 //! on stdin closes the game.
 
 mod api;
+mod browser;
 mod files;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -264,8 +265,10 @@ fn browser(req: &Request) {
 }
 
 /// Runs `alyae-roblox-login` with one request line, passes its steps on and returns the cookie
-/// it printed, if any.
+/// it printed, if any. The window sends the User-Agent the helper's own calls send.
 fn web_window(request: &Value) -> Option<String> {
+    let mut request = request.clone();
+    request["user_agent"] = json!(browser::user_agent());
     let exe = std::env::current_exe()
         .ok()
         .and_then(|e| {

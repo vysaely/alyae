@@ -280,8 +280,9 @@ pub fn resume(req: &Request) {
 use std::os::unix::ffi::OsStrExt;
 
 /// Logical CPUs for alts: the upper ~35% of physical cores (with their SMT siblings), so a busy
-/// alt never shares a core with the main. (main, alt) sets; None when there is nothing to split.
-fn cpu_sets() -> Option<(Vec<usize>, Vec<usize>)> {
+/// alt never shares a core with the main. A main is not pinned: with no alt running it has every
+/// core, and the alts are fenced in anyway. None when there is nothing to split.
+fn alt_cpus() -> Option<Vec<usize>> {
     let n = std::thread::available_parallelism().map_or(1, |n| n.get());
     if n < 4 {
         return None;
@@ -306,12 +307,17 @@ fn cpu_sets() -> Option<(Vec<usize>, Vec<usize>)> {
         return None;
     }
     let alt_cores = ((cores.len() as f64 * 0.35) as usize).max(1);
-    let alt: Vec<usize> = cores[cores.len() - alt_cores..]
-        .iter()
-        .flat_map(|(_, v)| v.clone())
-        .collect();
-    let main: Vec<usize> = (0..n).filter(|c| !alt.contains(c)).collect();
-    Some((main, alt))
+    Some(
+        cores[cores.len() - alt_cores..]
+            .iter()
+            .flat_map(|(_, v)| v.clone())
+            .collect(),
+    )
+}
+
+/// The CPUs the game is held to: an alt's (`alt_cpus`); any other runs where the system puts it.
+fn affinity(alt: bool) -> Option<Vec<usize>> {
+    if alt { alt_cpus() } else { None }
 }
 
 fn set_affinity(cpus: &[usize]) {
@@ -919,7 +925,7 @@ pub fn play(req: &Request) {
     }
     env.push(("LD_LIBRARY_PATH".into(), ld.join(":")));
 
-    let sets = cpu_sets();
+    let affinity = affinity(!main);
     let mut cmd = if !main && on_path("systemd-run") {
         // alts in a low-weight scope: the desktop and the main come first
         let mut c = Command::new("systemd-run");
@@ -931,7 +937,7 @@ pub fn play(req: &Request) {
             "-pCPUWeight=1",
             "-pIOWeight=1",
         ]);
-        if let Some((_, alt)) = &sets {
+        if let Some(alt) = &affinity {
             c.arg(format!(
                 "-pAllowedCPUs={}",
                 alt.iter()
@@ -971,7 +977,6 @@ pub fn play(req: &Request) {
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone().unwrap_or_else(|e| fail(&e.to_string())))
         .stderr(log);
-    let affinity = sets.map(|(m, a)| if main { m } else { a });
     // SAFETY: only async-signal-safe calls between fork and exec
     unsafe {
         cmd.pre_exec(move || {
@@ -980,14 +985,17 @@ pub fn play(req: &Request) {
                 set_affinity(cpus);
             }
             if !main {
-                // no realtime or raised priority for alts, and a low share of the CPU
+                // an alt gives way to a main when the PC is busy (raising a main needs root;
+                // lowering the alts does the same for it): nice 5, inherited by everything the
+                // game starts. Not lower: an alt starved of CPU can lose its connection. No
+                // realtime or raised priority for it afterwards either
+                libc::nice(5);
                 let zero = libc::rlimit {
                     rlim_cur: 0,
                     rlim_max: 0,
                 };
                 libc::setrlimit(libc::RLIMIT_RTPRIO, &zero);
                 libc::setrlimit(libc::RLIMIT_NICE, &zero);
-                libc::nice(15);
             }
             Ok(())
         });
@@ -997,12 +1005,6 @@ pub fn play(req: &Request) {
         .spawn()
         .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
     let pid = child.id() as i32;
-    // an alt gives way to a main when the PC is busy (raising a main needs root; lowering the
-    // alts does the same for it): nice 5 for the whole game
-    if !main {
-        // SAFETY: setpriority(2) on the process group the game leads
-        unsafe { libc::setpriority(libc::PRIO_PGRP, pid as libc::id_t, 5) };
-    }
     say(json!({ "status": "running" }));
 
     // a stop from Alyae ends the game; Alyae closing leaves it running
@@ -1262,6 +1264,16 @@ mod tests {
         prepare_profile(&m, &data, &p, false, 1, (false, 800, 600));
         assert!(!shared.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// Only alts are held to CPUs; a main keeps every core.
+    #[test]
+    fn only_alts_are_pinned() {
+        assert_eq!(affinity(false), None);
+        if let Some(cpus) = affinity(true) {
+            let n = std::thread::available_parallelism().unwrap().get();
+            assert!(!cpus.is_empty() && cpus.len() < n);
+        }
     }
 
     #[test]

@@ -618,24 +618,19 @@ fn prepare_profile(
         }
         _ => {}
     }
-    // downloaded assets: alts share one cache (fewer downloads, no CDN rate limits); a main keeps
-    // its own, as Roblox deletes files its own index evicts
-    let shared_assets = data_dir.join("shared_rbx_storage");
-    mkdir(&shared_assets);
+    // downloaded assets: every profile keeps its own (Mocktail makes the folder), as Roblox
+    // deletes files its own index evicts, also ones another account's index still lists. A
+    // link to the folder alts once shared goes; only the link: the shared files stay until
+    // the last alt using it has let go, then the empty folder goes
     for dest in [
         profile.join("data/mocktail/rbx-storage"),
         profile.join("data/rbx-storage"),
     ] {
-        let is_link = fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink());
-        if main && is_link {
+        if fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink()) {
             let _ = fs::remove_file(&dest);
         }
-        if main {
-            mkdir(&dest);
-        } else if fs::symlink_metadata(&dest).is_err() {
-            link_dir(&shared_assets, &dest);
-        }
     }
+    let _ = fs::remove_dir(data_dir.join("shared_rbx_storage"));
     let shaders = data_dir.join("shared_mesa_shader_cache");
     mkdir(&shaders);
     link_dir(&shaders, &profile.join("cache/mesa_shader_cache"));
@@ -1241,6 +1236,31 @@ mod tests {
         ] {
             assert!(fs::symlink_metadata(p.join(unread)).is_err(), "{unread} written");
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// An alt's link to the once-shared asset cache goes, the files behind it stay, and the
+    /// shared folder goes once empty.
+    #[test]
+    fn alts_keep_their_own_assets() {
+        let root = std::env::temp_dir().join(format!("alyae-assets-{}", std::process::id()));
+        let (data, p) = (root.join("alyae"), root.join("profile"));
+        let m = Mocktail {
+            bin: root.join("lib/mocktail"),
+            lib: root.join("lib"),
+            data: root.join("share"),
+        };
+        let shared = data.join("shared_rbx_storage");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("asset"), "a").unwrap();
+        fs::create_dir_all(p.join("data")).unwrap();
+        symlink(&shared, p.join("data/rbx-storage")).unwrap();
+        prepare_profile(&m, &data, &p, false, 1, (false, 800, 600));
+        assert!(fs::symlink_metadata(p.join("data/rbx-storage")).is_err());
+        assert_eq!(fs::read_to_string(shared.join("asset")).unwrap(), "a");
+        fs::remove_file(shared.join("asset")).unwrap();
+        prepare_profile(&m, &data, &p, false, 1, (false, 800, 600));
+        assert!(!shared.exists());
         let _ = fs::remove_dir_all(root);
     }
 

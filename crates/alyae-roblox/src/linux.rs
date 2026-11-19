@@ -374,17 +374,15 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "FFlagAutomaticDRS": false,
             "FFlagAutomaticDRSDisableHighDPIFramebufferHalving": true,
             "FFlagDebugGraphicsPreferOpenGL": true,
-            "DFFlagEnableRequestAsyncCompression": false,
             // the Windows client's loading values where the Android ones are smaller: clothing
             // jobs, orphan texture budget, content hot cache and bundles, sound budget estimate,
             // a disk cache (rbx-storage) above the 2.5 GB it fills, and animation tracks per
             // character (Roblox drops the 51st at 50, and with it a late or missing animation)
-            "DFIntTextureCompositorActiveJobs": 8,
+            "FIntTextureCompositorActiveJobs": 8,
             "FIntRenderTextureOrphanMinBudgetMB": 64,
             "DFIntWrapContentProviderHotCacheSize": 20000000,
             "FIntWrapContentProviderMaxBundleCount": 64,
             "DFFlagSoundCacheUseBudgetUtilizationEstimator": true,
-            "DFIntRbxStorageDBMaxCapacityMB": 8192,
             "DFIntRbxStorageCapacityHighMB": 8192,
             "DFIntRbxStorageCapacityLowMB": 8192,
             "DFIntReplicatorAnimationTrackLimitPerAnimator": 256,
@@ -398,13 +396,10 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "FFlagDebugDisableDRS": true,
             "FFlagAutomaticDRS": false,
             "FFlagAutomaticDRSDisableHighDPIFramebufferHalving": true,
-            "DFFlagSkipHighResolutiontextureMipsOnLowMemoryDevices2": true,
-            "DFFlagEnableRequestAsyncCompression": false,
         })
     };
     // Roblox keeps decoded animation clips on Windows but not in the Android build Mocktail runs
     f["FFlagAnimationClipMemCacheEnabled"] = json!(true);
-    f["FFlagDebugDisableCrashReporting"] = json!(true);
     f["FStringRobloxAnalyticsURL"] = json!("");
     f
 }

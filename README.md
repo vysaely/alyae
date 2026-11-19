@@ -40,8 +40,10 @@ cd alyae
 modules/roblox-linux/mocktail/build.sh
 ```
 
-`build.sh` builds Mocktail with Alyae's patches. If AEAM already installed Mocktail you can skip
-it, but anti-AFK only works with this build. To update, run `git pull` and both scripts again.
+`build.sh` builds Mocktail with Alyae's patches. With a Mocktail installed otherwise (by AEAM,
+say) Join Server works, but the shift-lock cursor, Anti-AFK, a main's low-memory profile and the
+camera-drag cursor fix need this build; Alyae says so when it starts a game on another one. To
+update, run `git pull` and both scripts again.
 
 To uninstall, run `./install.sh --uninstall`. Your accounts in `~/.local/share/alyae` are kept.
 

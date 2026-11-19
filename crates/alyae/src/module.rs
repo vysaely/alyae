@@ -384,7 +384,7 @@ impl Module {
         self.field(key).is_some_and(|f| f.secret)
     }
 
-    fn helper_path(&self) -> Option<PathBuf> {
+    pub fn helper_path(&self) -> Option<PathBuf> {
         if self.helper.is_empty() {
             return None;
         }
@@ -600,6 +600,10 @@ fn account_json(module: &Module, a: &Account) -> serde_json::Map<String, serde_j
     out
 }
 
+/// Alyae's Browser setting: helpers send the default system browser's identity instead of
+/// Alyae's own (ALYAE_BROWSER=system).
+pub static SYSTEM_BROWSER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The module's helper started for `action`, with its data folder.
 fn spawn_helper(
     module: &Module,
@@ -614,6 +618,9 @@ fn spawn_helper(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&helper);
     no_console(&mut cmd);
+    if SYSTEM_BROWSER.load(std::sync::atomic::Ordering::Relaxed) {
+        cmd.env("ALYAE_BROWSER", "system");
+    }
     let child = cmd
         .arg(action)
         .stdin(Stdio::piped())

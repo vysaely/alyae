@@ -232,6 +232,10 @@ impl App {
             Ok((s, (list, problems))) => {
                 app.accounts = list;
                 app.watch_text = s.setting("watch_text").is_none_or(|v| v != "0");
+                module::SYSTEM_BROWSER.store(
+                    s.setting("browser").is_some_and(|v| v == "system"),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 app.anti_afk = s
                     .setting("anti_afk")
                     .and_then(|v| v.parse().ok())
@@ -758,6 +762,32 @@ impl App {
         }
     }
 
+    /// The Browser choice: which browser Alyae's web calls and its login window say they are.
+    fn browser_choice(&mut self, ui: &mut egui::Ui) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let label = |system: bool| if system { "Browser: system" } else { "Browser: Alyae" };
+        let mut system = module::SYSTEM_BROWSER.load(Relaxed);
+        let before = system;
+        egui::ComboBox::from_id_salt("browser")
+            .selected_text(label(system))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut system, false, label(false));
+                ui.selectable_value(&mut system, true, label(true));
+            })
+            .response
+            .on_hover_text(
+                "What Roblox's website sees for every account (and the login window). Alyae: \
+                 Chrome on Windows, the same everywhere. System: your default browser and its \
+                 version, Alyae's when it cannot be read. Pick one and keep it.",
+            );
+        if system != before {
+            module::SYSTEM_BROWSER.store(system, Relaxed);
+            if let Some(s) = &self.store {
+                s.set_setting("browser", if system { "system" } else { "alyae" });
+            }
+        }
+    }
+
     /// Anti-AFK: when its time comes, every game module's helper nudges its running games.
     fn tick_anti_afk(&mut self, ctx: &egui::Context) {
         if self.anti_afk == 0 || self.running.is_empty() {
@@ -1125,6 +1155,9 @@ impl App {
                 }
                 if !m.anti_afk.is_empty() {
                     self.anti_afk_choice(ui);
+                }
+                if m.helper_path().is_some() {
+                    self.browser_choice(ui);
                 }
                 if !m.close_all.is_empty()
                     && ui

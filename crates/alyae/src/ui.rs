@@ -66,8 +66,9 @@ pub struct App {
     form: Option<(String, Vec<String>)>,
     /// an action for several accounts runs for one at a time: the ones still waiting
     queue: VecDeque<Job>,
-    /// the queued account whose action runs now: (account, action, the action runs a game)
-    queue_current: Option<(String, String, bool)>,
+    /// the queued account whose action runs now: (account, game, action, the action runs a
+    /// game)
+    queue_current: Option<(String, String, String, bool)>,
     /// the current queued action has ended (its Ended event came)
     queue_ended: bool,
     /// the next queued account starts no sooner than this
@@ -442,7 +443,7 @@ impl App {
                     let current = self
                         .queue_current
                         .as_ref()
-                        .is_some_and(|(a, _, _)| *a == account);
+                        .is_some_and(|(a, ..)| *a == account);
                     // the computer has no room for more: the accounts after would only wait in
                     // vain too, so the queue stops (the running ones keep running)
                     if current && is_out_of_memory(&text) && !self.queue.is_empty() {
@@ -576,7 +577,7 @@ impl App {
                     if self
                         .queue_current
                         .as_ref()
-                        .is_some_and(|(a, act, _)| *a == account && *act == action)
+                        .is_some_and(|(a, _, act, _)| *a == account && *act == action)
                     {
                         self.queue_ended = true;
                         if ok {
@@ -670,7 +671,7 @@ impl App {
     /// the gap after it has passed.
     fn advance_queue(&mut self) {
         let now = std::time::Instant::now();
-        if let Some((id, action, runs)) = self.queue_current.clone() {
+        if let Some((id, game, action, runs)) = self.queue_current.clone() {
             // ended, or a game that is up and running ("running, loading" counts: the helper
             // limits how many load at once itself)
             let done = self.queue_ended
@@ -684,7 +685,7 @@ impl App {
             }
             self.queue_current = None;
             if !self.queue.is_empty() {
-                self.queue_next = Some(now + self.queue_gap(&action) + self.queue_backoff);
+                self.queue_next = Some(now + self.queue_gap(&game, &action) + self.queue_backoff);
             }
         }
         if let Some(at) = self.queue_next {
@@ -698,7 +699,7 @@ impl App {
         }
         while let Some(job) = self.queue.pop_front() {
             if let Some(runs) = self.start_job(&job) {
-                self.queue_current = Some((job.account, job.action, runs));
+                self.queue_current = Some((job.account, job.game, job.action, runs));
                 self.queue_ended = false;
                 return;
             }
@@ -822,11 +823,11 @@ impl App {
 
     /// The wait after one account of `action` before the next: the module's `gap`, else the
     /// usual one.
-    fn queue_gap(&self, action: &str) -> Duration {
+    /// The pause after `game`'s `action` before the next queued account starts (the queue
+    /// keeps going while another game is shown).
+    fn queue_gap(&self, game: &str, action: &str) -> Duration {
         let gap = self
-            .game
-            .as_deref()
-            .and_then(|g| self.module(g))
+            .module(game)
             .and_then(|m| m.actions.iter().find(|a| a.id == action))
             .map_or(0, |a| a.gap);
         if gap == 0 {
@@ -4070,22 +4071,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods);
     }
 
+    /// The gap after a queued action is its own game's, also while another game is shown.
+    #[test]
+    fn queue_gap_follows_the_job() {
+        let (mut h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let (a, next) = (h.state().new_account(&m), h.state().new_account(&m));
+        assert!(h.state_mut().save(&a) && h.state_mut().save(&next));
+        h.state_mut().queue_current = Some((a.id, "roblox".into(), "login".into(), false));
+        h.state_mut().queue_ended = true;
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "login".into(),
+            account: next.id,
+            inputs: Values::default(),
+        });
+        h.state_mut().game = Some("generic".into());
+        h.state_mut().advance_queue();
+        let wait = h.state().queue_next.unwrap() - std::time::Instant::now();
+        assert!(wait > Duration::from_secs(14), "waited {wait:?}, not Log in's 15 s");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// An action's own `gap` spaces its queue (Log in: 15 seconds); a throttled one makes the
     /// queue wait 2 minutes more, doubling to 10, and a run that works ends the extra wait.
     #[test]
     fn queue_gap_and_throttle_pause() {
         let (mut h, dir) = window("roblox");
         // the repository's Roblox modules: Log in 15 seconds apart, Refresh the usual gap
-        assert_eq!(h.state().queue_gap("login"), Duration::from_secs(15));
-        assert_eq!(h.state().queue_gap("check"), QUEUE_GAP);
+        assert_eq!(h.state().queue_gap("roblox", "login"), Duration::from_secs(15));
+        assert_eq!(h.state().queue_gap("roblox", "check"), QUEUE_GAP);
         // joins are not throttled like sign-ins: 2 seconds apart
-        assert_eq!(h.state().queue_gap("play"), Duration::from_secs(2));
-        assert_eq!(h.state().queue_gap("follow"), Duration::from_secs(2));
+        assert_eq!(h.state().queue_gap("roblox", "play"), Duration::from_secs(2));
+        assert_eq!(h.state().queue_gap("roblox", "follow"), Duration::from_secs(2));
         let m = h.state().module("roblox").cloned().unwrap();
         let a = h.state().new_account(&m);
         assert!(h.state_mut().save(&a));
         let tx = h.state().tx.clone();
-        h.state_mut().queue_current = Some((a.id.clone(), "login".into(), false));
+        h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "login".into(), false));
         // one more waiting, so the pause is announced rather than a plain error
         let waiting = h.state().new_account(&m);
         h.state_mut().queue.push_back(Job {
@@ -4126,7 +4149,7 @@ mod tests {
             account: "waiting".into(),
             inputs: Values::default(),
         });
-        h.state_mut().queue_current = Some((a.id.clone(), "play".into(), true));
+        h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "play".into(), true));
         tx.send(Event::Error {
             account: a.id.clone(),
             text: "not enough free memory for another Roblox: 3.1 GB free after 3 min, 6 GB needed"
@@ -4147,7 +4170,7 @@ mod tests {
         let (a, b) = (h.state().new_account(&m), h.state().new_account(&m));
         assert!(h.state_mut().save(&a) && h.state_mut().save(&b));
         // a queue busy with another account, a and b waiting in it
-        h.state_mut().queue_current = Some(("busy".into(), "play".into(), true));
+        h.state_mut().queue_current = Some(("busy".into(), "roblox".into(), "play".into(), true));
         for id in [&a.id, &b.id] {
             h.state_mut().queue.push_back(Job {
                 game: "generic".into(),

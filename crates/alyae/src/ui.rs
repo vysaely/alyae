@@ -2341,32 +2341,59 @@ impl App {
         match done {
             Some(true) => {
                 let ids = std::mem::take(&mut self.confirm_remove);
-                for id in &ids {
-                    // the module's files go first (quick); the row goes even when that fails
-                    let account = self.accounts.iter().find(|a| &a.id == id).cloned();
-                    if let Some(a) = account
-                        && let Some(m) = self.module(&a.game).filter(|m| !m.on_remove.is_empty())
-                        && let Err(e) = module::run_and_wait(m, &m.on_remove, &a, &self.dir)
-                    {
-                        self.say(format!("{}: files not deleted: {e}", self.title(&a)), true);
-                    }
-                    let res = self.store.as_ref().map(|s| s.delete(id));
-                    match res {
-                        Some(Ok(())) => {
-                            self.accounts.retain(|a| &a.id != id);
-                            self.selected.remove(id);
-                            if self.focus.as_ref() == Some(id) {
-                                self.focus = None;
-                                self.draft = None;
-                            }
-                        }
-                        Some(Err(e)) => self.say(format!("Not removed: {e}"), true),
-                        None => {}
-                    }
-                }
+                self.remove_accounts(&ids);
             }
             Some(false) => self.confirm_remove.clear(),
             None => {}
+        }
+    }
+
+    /// Removes the accounts `ids` once confirmed. One whose game runs stays (its game would keep
+    /// using the files). The module's files go on a thread after the row, as a big profile
+    /// folder takes a while; a failure there is a message.
+    fn remove_accounts(&mut self, ids: &[String]) {
+        for id in ids {
+            let Some(a) = self.accounts.iter().find(|a| &a.id == id).cloned() else {
+                continue;
+            };
+            if self.running.contains_key(id) {
+                self.say(
+                    format!("{}: not removed: close its game first", self.title(&a)),
+                    true,
+                );
+                continue;
+            }
+            match self.store.as_ref().map(|s| s.delete(id)) {
+                Some(Ok(())) => {
+                    self.accounts.retain(|a| &a.id != id);
+                    self.selected.remove(id);
+                    if self.focus.as_ref() == Some(id) {
+                        self.focus = None;
+                        self.draft = None;
+                    }
+                }
+                Some(Err(e)) => {
+                    self.say(format!("Not removed: {e}"), true);
+                    continue;
+                }
+                None => continue,
+            }
+            if let Some(m) = self.module(&a.game).filter(|m| !m.on_remove.is_empty()) {
+                let (m, dir, tx, title) =
+                    (m.clone(), self.dir.clone(), self.tx.clone(), self.title(&a));
+                let ctx = self.ctx.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = module::run_and_wait(&m, &m.on_remove, &a, &dir) {
+                        let _ = tx.send(Event::Note {
+                            text: format!("{title}: files not deleted: {e}"),
+                            bad: true,
+                        });
+                        if let Some(c) = ctx {
+                            c.request_repaint();
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -4018,6 +4045,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(marker.exists(), "the confirmed action did not run");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// An account whose game runs is not removed; the others are.
+    #[test]
+    #[cfg(unix)]
+    fn running_account_is_not_removed() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        std::fs::write(
+            mods.join("t/module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\n[[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\ncommand = 'sleep 30'\n",
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let (mut playing, idle) = (h.state().new_account(&m), h.state().new_account(&m));
+        set_value(&mut playing, "login", "playing", false);
+        assert!(h.state_mut().save(&playing) && h.state_mut().save(&idle));
+        h.state_mut().run_action("play", vec![playing.id.clone()]);
+        assert!(h.state().running.contains_key(&playing.id));
+        h.state_mut()
+            .remove_accounts(&[playing.id.clone(), idle.id.clone()]);
+        let ids: Vec<&str> = h.state().accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, [playing.id.as_str()]);
+        assert_eq!(
+            h.state().message,
+            Some(("playing: not removed: close its game first".into(), true))
+        );
+        for r in h.state_mut().running.values_mut() {
+            r.stop();
+        }
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }

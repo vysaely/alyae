@@ -1,7 +1,8 @@
 //! Alyae's Roblox helper. Alyae runs `alyae-roblox <action>` and writes one JSON line: the account
 //! (`account`: its fields and secrets), the button's `inputs` and a `data_dir` for this game.
-//! Answers are JSON lines: `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`. While a game
-//! runs the helper waits for it; a `stop` line on stdin closes the game.
+//! Answers are JSON lines: `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`, `{"warn":"..."}`
+//! (a line for Alyae's message bar). While a game runs the helper waits for it; a `stop` line
+//! on stdin closes the game.
 
 mod api;
 mod files;

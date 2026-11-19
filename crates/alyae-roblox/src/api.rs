@@ -3,16 +3,25 @@
 use serde_json::{Value, json};
 use std::time::Duration;
 
-/// Desktop Chrome on Windows (in Chrome's reduced form, minor versions zeroed): Roblox's web
-/// calls then come with the same User-Agent as most of its visitors', instead of one that names
-/// an account manager.
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
-
+/// Every call goes out as Chrome on Windows sends it (browser.rs), the login window's identity
+/// too: its User-Agent, client hints and Accept-Language. A header a call sets itself stays.
 fn agent() -> ureq::Agent {
+    let headers = crate::browser::headers();
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(10)))
-        .user_agent(UA)
+        .user_agent(crate::browser::user_agent())
+        .middleware(
+            move |mut r: ureq::http::Request<ureq::SendBody>,
+                  next: ureq::middleware::MiddlewareNext| {
+                for (name, value) in &headers {
+                    if let Ok(v) = ureq::http::HeaderValue::from_str(value) {
+                        r.headers_mut().entry(*name).or_insert(v);
+                    }
+                }
+                next.handle(r)
+            },
+        )
         .build()
         .into()
 }
@@ -556,6 +565,38 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a call puts on the wire, read by a one-request server on this computer: Chrome's
+    /// User-Agent and client hints, and the call's own Accept kept.
+    #[test]
+    fn calls_go_out_as_chrome() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", server.local_addr().unwrap());
+        let got = std::thread::spawn(move || {
+            let (mut c, _) = server.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = c.read(&mut buf).unwrap();
+            c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_lowercase()
+        });
+        agent()
+            .get(&url)
+            .header("Accept", "application/json")
+            .call()
+            .unwrap();
+        let got = got.join().unwrap();
+        let has = |line: &str| got.lines().any(|l| l == line.to_lowercase());
+        assert!(has(&format!(
+            "user-agent: {}",
+            crate::browser::user_agent()
+        )));
+        assert!(has("sec-ch-ua-platform: \"windows\""));
+        assert!(has("sec-ch-ua-mobile: ?0"));
+        assert!(has("accept: application/json"));
+        assert!(got.contains("\nsec-ch-ua: \"") && got.contains("\naccept-language: "));
+    }
 
     #[test]
     fn server_page() {

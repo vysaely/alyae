@@ -52,6 +52,16 @@ To uninstall, run `./install.sh --uninstall`. Your accounts in `~/.local/share/a
 **Accounts file** (bottom right) saves every account into one file locked with a password. Open it
 on another PC with Add Account → From an accounts file.
 
+## What Roblox sees
+
+Every Roblox web call and the sign-in window say they are Chrome on Windows, on Linux too: one
+User-Agent for every account, with the client-hint headers (`sec-ch-ua`) Chrome sends and your
+system language as `Accept-Language`. A cookie is then made and used by the same "browser". The
+Chrome version is one constant in `crates/alyae-roblox/src/browser.rs`, to raise as Chrome moves
+on. What this cannot change: the connection itself (TLS and HTTP/2 details) is not Chrome's, and
+the sign-in window is WebKitGTK on Linux and WebView2 on Windows underneath, whose own scripts
+and client hints can still tell.
+
 ## License
 
 [GPL-3.0](LICENSE). The patches in `modules/roblox-linux/mocktail/` change Mocktail, which is

@@ -5,7 +5,8 @@
 //! the `.ROBLOSECURITY` cookie Roblox then sets is printed as `{"cookie":"..."}` and the window
 //! closes. Closing the window prints no cookie.
 //!
-//! Input (one JSON line on stdin): {"username", "password", "totp"}.
+//! Input (one JSON line on stdin): {"username", "password", "totp", "user_agent"}; the
+//! User-Agent is the one the helper's own Roblox calls send (Chrome on Windows).
 //!
 //! With a `cookie` instead, the window is that account signed in on roblox.com (Open in browser):
 //! the cookie goes into the fresh profile and the home page opens. On close, a cookie Roblox
@@ -185,10 +186,12 @@ impl Profile {
     }
 }
 
-/// An incognito web view in `window` with `profile`, set up by `setup`.
+/// An incognito web view in `window` with `profile` and the User-Agent `ua` (the web view's
+/// own when empty), set up by `setup`.
 fn web_view<'a>(
     window: &tao::window::Window,
     profile: &'a mut Profile,
+    ua: &str,
     setup: impl FnOnce(WebViewBuilder<'a>) -> WebViewBuilder<'a>,
 ) -> wry::WebView {
     #[cfg(not(target_os = "linux"))]
@@ -198,7 +201,10 @@ fn web_view<'a>(
         let _ = profile;
         WebViewBuilder::new()
     };
-    let builder = setup(builder.with_incognito(true));
+    let mut builder = setup(builder.with_incognito(true));
+    if !ua.is_empty() {
+        builder = builder.with_user_agent(ua);
+    }
     #[cfg(not(target_os = "linux"))]
     let view = builder.build(window).expect("a web view");
     #[cfg(target_os = "linux")]
@@ -226,7 +232,7 @@ fn session_cookie_for(value: String) -> wry::cookie::Cookie<'static> {
 }
 
 /// Roblox's site signed in as the account, from its saved cookie.
-fn browse(username: &str, cookie: String) {
+fn browse(username: &str, cookie: String, ua: &str) {
     let event_loop = EventLoopBuilder::new().build();
     let window = WindowBuilder::new()
         .with_title(format!("Roblox: {username}"))
@@ -234,7 +240,7 @@ fn browse(username: &str, cookie: String) {
         .build(&event_loop)
         .expect("a window");
     let mut profile = Profile::new();
-    let webview = web_view(&window, &mut profile, |b| {
+    let webview = web_view(&window, &mut profile, ua, |b| {
         b.with_url("about:blank")
             .with_navigation_handler(|url| may_open(&url))
     });
@@ -274,9 +280,9 @@ fn main() {
     let req: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
     let field = |k: &str| req[k].as_str().unwrap_or("").to_string();
     let (username, password, totp) = (field("username"), field("password"), field("totp"));
-    let cookie = field("cookie");
+    let (cookie, ua) = (field("cookie"), field("user_agent"));
     if !cookie.is_empty() {
-        browse(&username, cookie);
+        browse(&username, cookie, &ua);
         return;
     }
     let creds = json!({ "username": username, "password": password });
@@ -293,7 +299,7 @@ fn main() {
         .build(&event_loop)
         .expect("a window");
     let mut profile = Profile::new();
-    let webview = web_view(&window, &mut profile, |b| {
+    let webview = web_view(&window, &mut profile, &ua, |b| {
         b.with_url("https://www.roblox.com/login")
             .with_initialization_script(SCRIPT)
             // the window stays on Roblox: links elsewhere do not open in it

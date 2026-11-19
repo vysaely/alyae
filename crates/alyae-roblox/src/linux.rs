@@ -4,7 +4,7 @@
 //! are left out.
 
 use crate::files::{clear, remove};
-use crate::{Join, Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
+use crate::{Join, Request, Role, api, fail, join_from, say, settings_xml, status, wait_for_stop};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
@@ -368,10 +368,11 @@ fn shiftlock_cursor(req: &Request) -> Vec<(String, String)> {
     ]
 }
 
-/// FastFlags: the low-cost set for alts; for a main, only what AEAM's main ran with by default.
-fn fast_flags(main: bool) -> serde_json::Value {
-    let mut f = if main {
-        json!({
+/// FastFlags: the low-cost set for alts; for a main, only what AEAM's main ran with by default;
+/// with no role, only the two every account gets.
+fn fast_flags(role: Role) -> serde_json::Value {
+    let mut f = match role {
+        Role::Main => json!({
             "FStringRenderTextureBudgetByRam": "",
             "DFFlagTextureQualityOverrideEnabled": true,
             "DFIntTextureQualityOverride": 3,
@@ -392,9 +393,8 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "DFIntRbxStorageCapacityHighMB": 8192,
             "DFIntRbxStorageCapacityLowMB": 8192,
             "DFIntReplicatorAnimationTrackLimitPerAnimator": 256,
-        })
-    } else {
-        json!({
+        }),
+        Role::Alt => json!({
             "FStringRenderTextureBudgetByRam": "",
             "DFFlagTextureQualityOverrideEnabled": true,
             "DFIntTextureQualityOverride": 1,
@@ -402,7 +402,8 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "FFlagDebugDisableDRS": true,
             "FFlagAutomaticDRS": false,
             "FFlagAutomaticDRSDisableHighDPIFramebufferHalving": true,
-        })
+        }),
+        Role::AsIs => json!({}),
     };
     // Roblox keeps decoded animation clips on Windows but not in the Android build Mocktail runs
     f["FFlagAnimationClipMemCacheEnabled"] = json!(true);
@@ -410,14 +411,20 @@ fn fast_flags(main: bool) -> serde_json::Value {
     f
 }
 
-/// Before each launch: Roblox's frame cap follows the account's; alts are kept at graphics
-/// level 1 and muted. A main's graphics level, sensitivity and volume are left to Roblox's menu
-/// and the Graphics button.
-fn engine_settings(profile: &Path, main: bool, fps_cap: u32) {
-    let mut props = vec![settings_xml::prop("int", "FramerateCap", fps_cap)];
-    if !main {
+/// Before each launch: Roblox's frame cap follows the account's FPS cap, if it has one; alts
+/// are kept at graphics level 1 and muted. Any other graphics level, sensitivity and volume are
+/// left to Roblox's menu and the Settings button.
+fn engine_settings(profile: &Path, role: Role, fps_cap: Option<u32>) {
+    let mut props: Vec<_> = fps_cap
+        .map(|f| settings_xml::prop("int", "FramerateCap", f))
+        .into_iter()
+        .collect();
+    if role == Role::Alt {
         props.extend(settings_xml::quality(1));
         props.push(settings_xml::prop("float", "MasterVolume", 0));
+    }
+    if props.is_empty() {
+        return;
     }
     if let Err(e) = settings_xml::apply(&settings_file(profile), &props) {
         fail(&format!("cannot write Roblox's settings: {e}"));
@@ -587,26 +594,119 @@ fn wait_for_memory() {
     crate::wait_for_memory(free, || FREE_TO_START_MB, || {});
 }
 
-/// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main
-/// fullscreen, an alt small.
-fn window_size(mode: &str, main: bool) -> (bool, u32, u32) {
-    let small = (false, settings_xml::SMALL.0, settings_xml::SMALL.1);
-    match mode {
-        "small" => small,
-        "windowed" => (false, 1920, 1080),
-        "fullscreen" => (true, 1920, 1080),
-        _ if main => (true, 1920, 1080),
-        _ => small,
+/// What a launch does to Mocktail's window.
+#[derive(Debug, PartialEq)]
+enum Window {
+    /// as Mocktail left it
+    AsIs,
+    /// not fullscreen, at the size Mocktail kept (its own 1280x720 the first time). Mocktail
+    /// sizes in logical desktop units: the display's pixel size (from /sys/class/drm) is wrong
+    /// under scaling, and which display the window opens on is not known
+    Windowed,
+    /// fullscreen or not, at this size
+    Sized { fullscreen: bool, w: u32, h: u32 },
+}
+
+/// The account's Window as Mocktail's. Empty: a main fullscreen, an alt small, no role as
+/// Mocktail left it.
+fn window_plan(mode: &str, role: Role) -> Window {
+    let (w, h) = settings_xml::SMALL;
+    match (mode, role) {
+        ("small", _) | ("", Role::Alt) => Window::Sized {
+            fullscreen: false,
+            w,
+            h,
+        },
+        ("windowed", _) => Window::Windowed,
+        ("fullscreen", _) | ("", Role::Main) => Window::Sized {
+            fullscreen: true,
+            w: 1920,
+            h: 1080,
+        },
+        _ => Window::AsIs,
     }
+}
+
+/// Mocktail's saved window state with fullscreen off and the rest (size, place, maximized)
+/// kept; None when there is no state object to keep.
+fn windowed_state(saved: &str) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(saved).ok()?;
+    v.as_object_mut()?.insert("fullscreen".into(), json!(false));
+    Some(v.to_string())
+}
+
+/// Mocktail's config.yaml: what every account runs with, and what its role, FPS cap and Window
+/// ask for. A key left out is Mocktail's own.
+fn mocktail_config(role: Role, fps_limit: Option<u32>, window: &Window) -> String {
+    let mut c = String::from("version: 1\ndevice: pc-windows-11\ngraphics:\n  backend: opengl\n");
+    if let Some(f) = fps_limit {
+        c += &format!("  frame_rate_limit: {f}\n  vsync: off\n");
+    }
+    c += "performance:\n  multithreaded_rendering: true\n";
+    match role {
+        Role::Main => c += "  physics_worker_mode: throughput\n  gamemode: auto\n",
+        Role::Alt => c += "  physics_worker_mode: auto\n  gamemode: off\n",
+        Role::AsIs => {}
+    }
+    c += "window:\n";
+    if let Window::Sized { w, h, .. } = window {
+        c += &format!("  width: {w}\n  height: {h}\n");
+    }
+    c + "  high_dpi: false\nupdates:\n  automatic: false\n"
+}
+
+/// The environment a launch sets from the account's role, FPS cap and Window: no role with
+/// those fields empty sets none of it but the two fast flags every account gets.
+fn role_env(role: Role, fps_limit: Option<u32>, window: &Window) -> Vec<(String, String)> {
+    let mut env: Vec<(&str, String)> = Vec::new();
+    if let Window::Sized { w, h, .. } = window {
+        env.push(("MOCKTAIL_WIN_WIDTH", w.to_string()));
+        env.push(("MOCKTAIL_WIN_HEIGHT", h.to_string()));
+    }
+    if let Some(f) = fps_limit {
+        env.extend([
+            ("vblank_mode", "0".into()),
+            ("MOCKTAIL_FRAME_RATE_LIMIT", f.to_string()),
+            ("MOCKTAIL_VSYNC", "off".into()),
+            ("SDL_VIDEO_WAYLAND_ALLOW_TEARING", "1".into()),
+        ]);
+    }
+    match role {
+        Role::Main => env.extend([
+            ("MOCKTAIL_GRAPHICS_QUALITY", "manual".into()),
+            ("MOCKTAIL_PHYSICS_WORKER_MODE", "throughput".into()),
+            ("MOCKTAIL_F11_FULLSCREEN", "1".into()),
+            ("MOCKTAIL_FULLSCREEN_READINESS", "1".into()),
+            // Alyae's Mocktail build (patch 10): a main loses Mocktail's phone-sized memory
+            // caps, so textures, meshes, sounds and animations stay loaded instead of being
+            // evicted and fetched again; alts keep them
+            ("MOCKTAIL_LOW_MEMORY_PROFILE", "0".into()),
+        ]),
+        Role::Alt => env.extend([
+            ("MOCKTAIL_GRAPHICS_QUALITY", "1".into()),
+            ("MOCKTAIL_PHYSICS_WORKER_MODE", "auto".into()),
+            ("MOCKTAIL_F11_FULLSCREEN", "0".into()),
+            ("MOCKTAIL_FULLSCREEN_READINESS", "0".into()),
+            ("SDL_AUDIODRIVER", "dummy".into()),
+            ("PULSE_SERVER", "/dev/null".into()),
+            ("ALSA_CARD", "Dummy".into()),
+            ("MOCKTAIL_ENGINE_PUMP_REST", "sleep".into()),
+        ]),
+        Role::AsIs => {}
+    }
+    let flags = fast_flags(role).to_string();
+    env.push(("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON", flags.clone()));
+    env.push(("MOCKTAIL_FAST_FLAGS_JSON", flags));
+    env.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 fn prepare_profile(
     m: &Mocktail,
     data_dir: &Path,
     profile: &Path,
-    main: bool,
-    fps_limit: u32,
-    (fullscreen, w, h): (bool, u32, u32),
+    role: Role,
+    fps_limit: Option<u32>,
+    window: &Window,
 ) {
     for sub in ["data/mocktail", "cache/mocktail"] {
         mkdir(&profile.join(sub));
@@ -641,25 +741,36 @@ fn prepare_profile(
     mkdir(&shaders);
     link_dir(&shaders, &profile.join("cache/mesa_shader_cache"));
 
-    let config = format!(
-        "version: 1\ndevice: pc-windows-11\ngraphics:\n  backend: opengl\n  frame_rate_limit: {fps_limit}\n  vsync: off\n\
-         performance:\n  multithreaded_rendering: true\n  physics_worker_mode: {}\n  gamemode: {}\n\
-         window:\n  width: {w}\n  height: {h}\n  high_dpi: false\nupdates:\n  automatic: false\n",
-        if main { "throughput" } else { "auto" },
-        if main { "auto" } else { "off" },
-    );
-    let window = json!({
-        "fullscreen": fullscreen, "maximized": false, "schema_version": 1,
-        "windowed": { "has_position": false, "height": h, "width": w },
-    })
-    .to_string();
-    for (file, text) in [
-        (profile.join("config/config.yaml"), &config),
-        (profile.join("state/window-state.json"), &window),
-    ] {
-        if let Err(e) = write_private(&file, text) {
+    let put = |file: &Path, text: &str| {
+        if let Err(e) = write_private(file, text) {
             fail(&format!("cannot write {}: {e}", file.display()));
         }
+    };
+    put(
+        &profile.join("config/config.yaml"),
+        &mocktail_config(role, fps_limit, window),
+    );
+    let state = profile.join("state/window-state.json");
+    match window {
+        Window::AsIs => {}
+        Window::Windowed => match fs::read_to_string(&state)
+            .ok()
+            .and_then(|t| windowed_state(&t))
+        {
+            Some(t) => put(&state, &t),
+            // nothing to keep: Mocktail opens windowed at its own size
+            None => {
+                let _ = fs::remove_file(&state);
+            }
+        },
+        Window::Sized { fullscreen, w, h } => put(
+            &state,
+            &json!({
+                "fullscreen": fullscreen, "maximized": false, "schema_version": 1,
+                "windowed": { "has_position": false, "height": h, "width": w },
+            })
+            .to_string(),
+        ),
     }
     // written ahead so concurrent first starts do not race on it inside Mocktail
     let platform = r#"{"profile_revision":"device-v1-pc-windows-11-t0-m1-k1","schema_version":1}"#;
@@ -773,9 +884,10 @@ pub fn play(req: &Request) {
         );
     };
     let data_dir = &req.data_dir;
-    let main = !req.is_alt();
-    let fps = req.fps().unwrap_or(0);
-    let fps_limit = if fps == 0 || fps >= 1000 { 10000 } else { fps };
+    let role = req.role();
+    let fps_limit = req
+        .fps()
+        .map(|f| if f == 0 || f >= 1000 { 10000 } else { f });
     let program = account_program(&m, req, data_dir);
     if already_running(&program) {
         fail("this account is already running");
@@ -794,16 +906,16 @@ pub fn play(req: &Request) {
         wait_for_memory();
     }
     status("starting");
-    let window = window_size(req.window(), main);
+    let window = window_plan(req.window(), role);
     prepare_profile(
         &m,
         data_dir,
         &profile,
-        main,
-        if fps_limit == 10000 { 1000 } else { fps_limit },
-        window,
+        role,
+        fps_limit.map(|f| if f == 10000 { 1000 } else { f }),
+        &window,
     );
-    engine_settings(&profile, main, fps_limit);
+    engine_settings(&profile, role, fps_limit);
     let tracker_file = profile.join("browser_tracker");
     let tracker = fs::read_to_string(&tracker_file)
         .ok()
@@ -817,7 +929,6 @@ pub fn play(req: &Request) {
     let cookie_file = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
-    let (w, h) = (window.1.to_string(), window.2.to_string());
     let mut args: Vec<String> = vec!["--windowed".into(), "--graphics".into(), "opengl".into()];
     if let Some(u) = uri(&join) {
         args.push("--launch-uri".into());
@@ -845,54 +956,11 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_TOUCH_MODE".into(), "0".into()),
         ("MOCKTAIL_MOUSE_MODE".into(), "1".into()),
         ("MOCKTAIL_KEYBOARD_MODE".into(), "1".into()),
-        ("MOCKTAIL_WIN_WIDTH".into(), w),
-        ("MOCKTAIL_WIN_HEIGHT".into(), h),
         ("MOCKTAIL_WIN_HIGH_DPI".into(), "0".into()),
-        (
-            "MOCKTAIL_GRAPHICS_QUALITY".into(),
-            if main { "manual".into() } else { "1".into() },
-        ),
-        ("vblank_mode".into(), "0".into()),
-        ("MOCKTAIL_FRAME_RATE_LIMIT".into(), fps_limit.to_string()),
-        ("MOCKTAIL_VSYNC".into(), "off".into()),
-        ("SDL_VIDEO_WAYLAND_ALLOW_TEARING".into(), "1".into()),
         ("MOCKTAIL_MULTITHREADED_RENDERING".into(), "1".into()),
-        (
-            "MOCKTAIL_PHYSICS_WORKER_MODE".into(),
-            if main {
-                "throughput".into()
-            } else {
-                "auto".into()
-            },
-        ),
-        (
-            "MOCKTAIL_F11_FULLSCREEN".into(),
-            if main { "1".into() } else { "0".into() },
-        ),
-        (
-            "MOCKTAIL_FULLSCREEN_READINESS".into(),
-            if main { "1".into() } else { "0".into() },
-        ),
     ];
-    let flags = fast_flags(main).to_string();
-    env.push((
-        "MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON".into(),
-        flags.clone(),
-    ));
-    env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
+    env.extend(role_env(role, fps_limit, &window));
     env.extend(shiftlock_cursor(req));
-    // Alyae's Mocktail build (patch 10): a main loses Mocktail's phone-sized memory caps, so
-    // textures, meshes, sounds and animations stay loaded instead of being evicted and fetched
-    // again; alts keep them
-    if main {
-        env.push(("MOCKTAIL_LOW_MEMORY_PROFILE".into(), "0".into()));
-    }
-    if !main {
-        env.push(("SDL_AUDIODRIVER".into(), "dummy".into()));
-        env.push(("PULSE_SERVER".into(), "/dev/null".into()));
-        env.push(("ALSA_CARD".into(), "Dummy".into()));
-        env.push(("MOCKTAIL_ENGINE_PUMP_REST".into(), "sleep".into()));
-    }
     let meta = m.data.join("metadata");
     if meta.is_dir() {
         for (k, f) in [
@@ -925,8 +993,9 @@ pub fn play(req: &Request) {
     }
     env.push(("LD_LIBRARY_PATH".into(), ld.join(":")));
 
-    let affinity = affinity(!main);
-    let mut cmd = if !main && on_path("systemd-run") {
+    let alt = role == Role::Alt;
+    let affinity = affinity(alt);
+    let mut cmd = if alt && on_path("systemd-run") {
         // alts in a low-weight scope: the desktop and the main come first
         let mut c = Command::new("systemd-run");
         c.args([
@@ -984,7 +1053,7 @@ pub fn play(req: &Request) {
             if let Some(cpus) = &affinity {
                 set_affinity(cpus);
             }
-            if !main {
+            if alt {
                 // an alt gives way to a main when the PC is busy (raising a main needs root;
                 // lowering the alts does the same for it): nice 5, inherited by everything the
                 // game starts. Not lower: an alt starved of CPU can lose its connection. No
@@ -1195,14 +1264,83 @@ mod tests {
         assert_eq!(mem_available_mb("MemTotal: 1 kB\n"), None);
     }
 
-    /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt small).
+    /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt
+    /// small, no role as Mocktail left it). Windowed leaves the size to Mocktail.
     #[test]
     fn window_by_choice_or_role() {
-        assert_eq!(window_size("", true), (true, 1920, 1080));
-        assert_eq!(window_size("", false), (false, 800, 600));
-        assert_eq!(window_size("small", true), (false, 800, 600));
-        assert_eq!(window_size("windowed", false), (false, 1920, 1080));
-        assert_eq!(window_size("fullscreen", false), (true, 1920, 1080));
+        let (small, full) = (
+            Window::Sized {
+                fullscreen: false,
+                w: 800,
+                h: 600,
+            },
+            Window::Sized {
+                fullscreen: true,
+                w: 1920,
+                h: 1080,
+            },
+        );
+        assert_eq!(window_plan("", Role::Main), full);
+        assert_eq!(window_plan("", Role::Alt), small);
+        assert_eq!(window_plan("", Role::AsIs), Window::AsIs);
+        assert_eq!(window_plan("small", Role::Main), small);
+        assert_eq!(window_plan("windowed", Role::Alt), Window::Windowed);
+        assert_eq!(window_plan("fullscreen", Role::AsIs), full);
+    }
+
+    /// Windowed turns fullscreen off and keeps the size and place Mocktail saved.
+    #[test]
+    fn windowed_keeps_the_saved_size() {
+        let saved = r#"{"fullscreen":true,"maximized":false,"schema_version":1,
+            "windowed":{"has_position":true,"x":10,"y":20,"width":1500,"height":900},
+            "configured":{"width":1280,"height":720}}"#;
+        let v: serde_json::Value = serde_json::from_str(&windowed_state(saved).unwrap()).unwrap();
+        assert_eq!(v["fullscreen"], false);
+        assert_eq!(v["windowed"]["width"], 1500);
+        assert_eq!(v["configured"]["height"], 720);
+        assert_eq!(windowed_state("not json"), None);
+        assert_eq!(windowed_state("[1]"), None);
+        // no size of Alyae's in the config either
+        assert!(!mocktail_config(Role::Main, None, &Window::Windowed).contains("width"));
+    }
+
+    /// No role and no FPS cap or Window: nothing of the roles' is forced on the game.
+    #[test]
+    fn no_role_leaves_roblox_as_it_is() {
+        let env = role_env(Role::AsIs, None, &Window::AsIs);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
+                "MOCKTAIL_FAST_FLAGS_JSON"
+            ]
+        );
+        let flags = fast_flags(Role::AsIs);
+        assert!(flags.get("DFIntTextureQualityOverride").is_none());
+        assert!(flags.get("FFlagDebugDisableDRS").is_none());
+        let config = mocktail_config(Role::AsIs, None, &Window::AsIs);
+        for forced in ["frame_rate_limit", "vsync", "physics_worker_mode", "gamemode", "width"] {
+            assert!(!config.contains(forced), "{forced} in {config}");
+        }
+        // what the account's own fields ask for still applies
+        let env = role_env(Role::AsIs, Some(60), &Window::AsIs);
+        assert!(env.contains(&("MOCKTAIL_FRAME_RATE_LIMIT".into(), "60".into())));
+        // a main and an alt keep theirs
+        let main = role_env(Role::Main, Some(330), &window_plan("", Role::Main));
+        assert!(main.contains(&("MOCKTAIL_LOW_MEMORY_PROFILE".into(), "0".into())));
+        assert!(main.contains(&("MOCKTAIL_WIN_WIDTH".into(), "1920".into())));
+        let alt = role_env(Role::Alt, Some(1), &window_plan("", Role::Alt));
+        assert!(alt.contains(&("MOCKTAIL_GRAPHICS_QUALITY".into(), "1".into())));
+    }
+
+    /// No role and no FPS cap: Roblox's settings file is left alone.
+    #[test]
+    fn no_role_leaves_roblox_settings() {
+        let dir = std::env::temp_dir().join(format!("alyae-asis-{}", std::process::id()));
+        engine_settings(&dir, Role::AsIs, None);
+        assert!(!settings_file(&dir).exists());
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// A launch writes only the files Mocktail reads under the roots Alyae gives it, and
@@ -1220,7 +1358,7 @@ mod tests {
         fs::write(m.data.join("current.json"), "{}").unwrap();
         fs::create_dir_all(p.join("config")).unwrap();
         fs::write(p.join("config/fflags.json"), r#"{"FFlagOld":true}"#).unwrap();
-        prepare_profile(&m, &data, &p, true, 60, (false, 800, 600));
+        prepare_profile(&m, &data, &p, Role::Main, Some(60), &window_plan("small", Role::Main));
         for made in [
             "config/config.yaml",
             "state/window-state.json",
@@ -1257,11 +1395,11 @@ mod tests {
         fs::write(shared.join("asset"), "a").unwrap();
         fs::create_dir_all(p.join("data")).unwrap();
         symlink(&shared, p.join("data/rbx-storage")).unwrap();
-        prepare_profile(&m, &data, &p, false, 1, (false, 800, 600));
+        prepare_profile(&m, &data, &p, Role::Alt, Some(1), &Window::AsIs);
         assert!(fs::symlink_metadata(p.join("data/rbx-storage")).is_err());
         assert_eq!(fs::read_to_string(shared.join("asset")).unwrap(), "a");
         fs::remove_file(shared.join("asset")).unwrap();
-        prepare_profile(&m, &data, &p, false, 1, (false, 800, 600));
+        prepare_profile(&m, &data, &p, Role::Alt, Some(1), &Window::AsIs);
         assert!(!shared.exists());
         let _ = fs::remove_dir_all(root);
     }
@@ -1279,14 +1417,14 @@ mod tests {
     #[test]
     fn frame_cap_kept_in_step() {
         let dir = std::env::temp_dir().join(format!("alyae-rbx-{}", std::process::id()));
-        engine_settings(&dir, false, 6);
+        engine_settings(&dir, Role::Alt, Some(6));
         let f = dir.join("data/files/appData/GlobalBasicSettings_13.xml");
         assert!(
             fs::read_to_string(&f)
                 .unwrap()
                 .contains("<int name=\"FramerateCap\">6</int>")
         );
-        engine_settings(&dir, false, 30);
+        engine_settings(&dir, Role::Alt, Some(30));
         let t = fs::read_to_string(&f).unwrap();
         assert!(t.contains("<int name=\"FramerateCap\">30</int>") && !t.contains(">6<"));
         let _ = fs::remove_dir_all(dir);

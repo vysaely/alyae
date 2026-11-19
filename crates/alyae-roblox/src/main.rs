@@ -39,9 +39,12 @@ impl Request {
             .unwrap_or("")
             .trim()
     }
-    /// An alt runs small, muted and slow; a main or an account with no role runs as Roblox would.
-    pub fn is_alt(&self) -> bool {
-        self.get("role") == "alt"
+    pub fn role(&self) -> Role {
+        match self.get("role") {
+            "main" => Role::Main,
+            "alt" => Role::Alt,
+            _ => Role::AsIs,
+        }
     }
     /// The account's Window: "fullscreen", "windowed", "small" (its default by role comes filled
     /// in from the module), or empty: Roblox's own.
@@ -56,6 +59,18 @@ impl Request {
     pub fn cookie(&self) -> String {
         api::clean_cookie(self.get("cookie"))
     }
+}
+
+/// The account's Role field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Role {
+    /// full FPS and quality, first in line for the CPU
+    Main,
+    /// small, muted and slow, last in line
+    Alt,
+    /// no role: Roblox runs as it is; only what the account's own fields (FPS cap, Window)
+    /// ask for changes
+    AsIs,
 }
 
 pub fn say(v: Value) {

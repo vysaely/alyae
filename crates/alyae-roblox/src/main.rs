@@ -339,46 +339,52 @@ fn check(req: &Request) {
     }
 }
 
-/// Online status of the accounts. Without cookies (the usual case) one cookie-less request per 100
-/// user IDs: Roblox answers it for everyone whose privacy shows their status publicly. An account
-/// sent with its own cookie asks about itself only, with that cookie, so no account's session is
-/// ever used to look up another (that would tell Roblox the accounts belong together).
+/// Online status of the accounts: one cookie-less request per 100 user IDs, which Roblox answers
+/// for everyone whose privacy shows their status publicly. An account that looks offline there
+/// and was sent with its cookie is asked again as itself (an account always sees its own status),
+/// about itself only, so no account's session is ever used to look up another (that would tell
+/// Roblox the accounts belong together). Those own checks are spread: each account at most once
+/// a minute (a quarter of them per 15 s run); one not due this run keeps the value Alyae has.
 fn presence(v: &Value) {
     let accounts = v["accounts"].as_array().cloned().unwrap_or_default();
     let field = |a: &Value, k: &str| a["account"][k].as_str().unwrap_or("").trim().to_string();
-    let mut public: Vec<(u64, String)> = Vec::new();
-    let mut own: Vec<(u64, String, String)> = Vec::new();
+    let mut all: Vec<(u64, String, String)> = Vec::new();
     for a in &accounts {
         let (Ok(user), Some(id)) = (field(a, "user_id").parse::<u64>(), a["id"].as_str()) else {
             continue;
         };
-        let cookie = api::clean_cookie(&field(a, "cookie"));
-        if cookie.is_empty() {
-            public.push((user, id.to_string()));
-        } else {
-            own.push((user, id.to_string(), cookie));
-        }
+        all.push((user, id.to_string(), api::clean_cookie(&field(a, "cookie"))));
     }
     let mut map = Map::new();
-    let mut put = |list: Vec<(u64, String)>, by_user: &[(u64, String)]| {
-        for (user, text) in list {
-            for (_, id) in by_user.iter().filter(|(u, _)| *u == user) {
-                map.insert(id.clone(), json!(text));
-            }
-        }
-    };
     let mut errors = Vec::new();
-    if !public.is_empty() {
-        let ids: Vec<u64> = public.iter().map(|(u, _)| *u).collect();
-        match api::presence(&ids, "") {
-            Ok(list) => put(list, &public),
-            Err(e) => errors.push(e),
+    let ids: Vec<u64> = all.iter().map(|(u, ..)| *u).collect();
+    let public = if ids.is_empty() {
+        Vec::new()
+    } else {
+        api::presence(&ids, "").unwrap_or_else(|e| {
+            errors.push(e);
+            Vec::new()
+        })
+    };
+    let turn = unix_secs() / 15 % 4;
+    for (i, (user, id, cookie)) in all.iter().enumerate() {
+        let seen = public.iter().find(|(u, _)| u == user).map(|(_, t)| t.as_str());
+        let hidden = matches!(seen, None | Some("Offline" | "Invisible"));
+        if !hidden || cookie.is_empty() {
+            if let Some(t) = seen {
+                map.insert(id.clone(), json!(t));
+            }
+            continue;
         }
-    }
-    for (user, id, cookie) in own {
-        match api::presence(&[user], &cookie) {
-            Ok(list) => put(list, &[(user, id)]),
-            Err(e) => errors.push(e),
+        if own_check_due(i, turn) {
+            match api::presence(&[*user], cookie) {
+                Ok(list) => {
+                    if let Some((_, t)) = list.into_iter().next() {
+                        map.insert(id.clone(), json!(t));
+                    }
+                }
+                Err(e) => errors.push(e),
+            }
         }
     }
     if !map.is_empty() || errors.is_empty() {
@@ -387,6 +393,17 @@ fn presence(v: &Value) {
     if let Some(e) = errors.first() {
         fail(e);
     }
+}
+
+/// Whether the account at `index` gets its own check in this 15 s `turn` (0-3): each once a minute.
+fn own_check_due(index: usize, turn: u64) -> bool {
+    index as u64 % 4 == turn
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// The Servers window. Without `of`: every place of the game of `place` (an ID or a game link,
@@ -591,5 +608,14 @@ mod tests {
             Some("abcDEF123456789012")
         );
         assert_eq!(query_value(link, "linkCode"), None);
+    }
+
+    #[test]
+    fn own_checks_once_a_minute_each() {
+        for i in 0..47 {
+            let turns = (0..4).filter(|&t| own_check_due(i, t)).count();
+            assert_eq!(turns, 1, "account {i}");
+        }
+        assert_eq!((0..47).filter(|&i| own_check_due(i, 2)).count(), 12);
     }
 }

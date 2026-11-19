@@ -12,6 +12,9 @@
 #   06 shiftlock-zoom          the scroll wheel zooms in shift lock
 #   07 browser-tracker-cookie  the account's device ID reaches Roblox with its sign-in
 #   08 anti-afk                MOCKTAIL_ANTI_AFK_SECONDS: a 1 px nudge after that long without input
+#   09 pointer-release         the right-button camera drag ends where it started, not at the window edge
+#   10 low-memory-profile      MOCKTAIL_LOW_MEMORY_PROFILE=0: no phone-sized memory caps (Alyae's mains)
+#   11 nudge-now               MOCKTAIL_NUDGE_FILE: writing that file asks for one nudge now (Anti-AFK)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

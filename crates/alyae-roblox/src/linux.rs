@@ -602,21 +602,21 @@ fn prepare_profile(
     fps_limit: u32,
     (fullscreen, w, h): (bool, u32, u32),
 ) {
-    for sub in [
-        "data/mocktail",
-        "config/mocktail",
-        "cache/mocktail",
-        "state/mocktail",
-    ] {
+    for sub in ["data/mocktail", "cache/mocktail"] {
         mkdir(&profile.join(sub));
     }
     // the Roblox client (payloads) is shared; the chosen version is copied
-    let payloads = m.data.join("payloads");
-    link_dir(&payloads, &profile.join("data/mocktail/payloads"));
-    link_dir(&payloads, &profile.join("data/payloads"));
+    link_dir(&m.data.join("payloads"), &profile.join("data/payloads"));
     if let Ok(cur) = fs::read(m.data.join("current.json")) {
         let _ = fs::write(profile.join("data/current.json"), &cur);
-        let _ = fs::write(profile.join("data/mocktail/current.json"), &cur);
+    }
+    // Mocktail adds the flags in <config root>/fflags.json to the ones Alyae passes: one left by
+    // AEAM would keep its old flags
+    match fs::remove_file(profile.join("config/fflags.json")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            fail(&format!("cannot remove AEAM's fflags.json: {e}"))
+        }
+        _ => {}
     }
     // downloaded assets: alts share one cache (fewer downloads, no CDN rate limits); a main keeps
     // its own, as Roblox deletes files its own index evicts
@@ -653,10 +653,8 @@ fn prepare_profile(
     })
     .to_string();
     for (file, text) in [
-        (profile.join("config/mocktail/config.yaml"), &config),
         (profile.join("config/config.yaml"), &config),
         (profile.join("state/window-state.json"), &window),
-        (profile.join("state/mocktail/window-state.json"), &window),
     ] {
         if let Err(e) = write_private(&file, text) {
             fail(&format!("cannot write {}: {e}", file.display()));
@@ -676,21 +674,17 @@ fn prepare_profile(
     }
 }
 
-fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> Vec<PathBuf> {
+/// The sign-in file Mocktail reads (MOCKTAIL_COOKIE_FILE).
+fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> PathBuf {
     let mut line = format!(".ROBLOSECURITY={cookie}\n");
     if let Some(t) = tracker {
         line += &format!("RBXEventTrackerV2={t}\n");
     }
-    let paths = vec![
-        profile.join("roblox.cookie"),
-        profile.join("data/mocktail/roblox.cookie"),
-    ];
-    for p in &paths {
-        if let Err(e) = write_private(p, &line) {
-            fail(&format!("cannot write the sign-in file: {e}"));
-        }
+    let path = profile.join("roblox.cookie");
+    if let Err(e) = write_private(&path, &line) {
+        fail(&format!("cannot write the sign-in file: {e}"));
     }
-    paths
+    path
 }
 
 fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
@@ -791,6 +785,8 @@ pub fn play(req: &Request) {
     // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
     // replace it, and at the end it would pass for a renewed cookie
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
+    // a second copy earlier versions wrote, which Mocktail never read
+    let _ = fs::remove_file(profile.join("data/mocktail/roblox.cookie"));
     let mut turn = LaunchTurn::take(data_dir);
     // one account started on its own does not wait for free RAM
     if req.input("_alone") != "1" {
@@ -817,7 +813,7 @@ pub fn play(req: &Request) {
             let _ = write_private(&tracker_file, &format!("{t}\n"));
             Some(t)
         });
-    let cookie_files = write_cookie(&profile, &cookie, tracker.as_deref());
+    let cookie_file = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
     let (w, h) = (window.1.to_string(), window.2.to_string());
@@ -859,7 +855,6 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_FRAME_RATE_LIMIT".into(), fps_limit.to_string()),
         ("MOCKTAIL_VSYNC".into(), "off".into()),
         ("SDL_VIDEO_WAYLAND_ALLOW_TEARING".into(), "1".into()),
-        ("MOCKTAIL_SWAPCHAIN_IMAGES".into(), "3".into()),
         ("MOCKTAIL_MULTITHREADED_RENDERING".into(), "1".into()),
         (
             "MOCKTAIL_PHYSICS_WORKER_MODE".into(),
@@ -1050,7 +1045,7 @@ pub fn play(req: &Request) {
             say(json!({ "set": { "cookie": renewed } }));
         }
     }
-    for f in cookie_files.iter().chain([&kept]) {
+    for f in [&cookie_file, &kept] {
         let _ = fs::remove_file(f);
     }
     if !code.success() && started.elapsed() < Duration::from_secs(20) {
@@ -1211,6 +1206,42 @@ mod tests {
         assert_eq!(window_size("small", true), (false, 800, 600));
         assert_eq!(window_size("windowed", false), (false, 1920, 1080));
         assert_eq!(window_size("fullscreen", false), (true, 1920, 1080));
+    }
+
+    /// A launch writes only the files Mocktail reads under the roots Alyae gives it, and
+    /// takes away an fflags.json AEAM left.
+    #[test]
+    fn profile_has_only_what_mocktail_reads() {
+        let root = std::env::temp_dir().join(format!("alyae-prep-{}", std::process::id()));
+        let (data, p) = (root.join("alyae"), root.join("profile"));
+        let m = Mocktail {
+            bin: root.join("lib/mocktail"),
+            lib: root.join("lib"),
+            data: root.join("share"),
+        };
+        fs::create_dir_all(m.data.join("payloads")).unwrap();
+        fs::write(m.data.join("current.json"), "{}").unwrap();
+        fs::create_dir_all(p.join("config")).unwrap();
+        fs::write(p.join("config/fflags.json"), r#"{"FFlagOld":true}"#).unwrap();
+        prepare_profile(&m, &data, &p, true, 60, (false, 800, 600));
+        for made in [
+            "config/config.yaml",
+            "state/window-state.json",
+            "data/current.json",
+            "data/payloads",
+        ] {
+            assert!(fs::symlink_metadata(p.join(made)).is_ok(), "{made} missing");
+        }
+        for unread in [
+            "config/fflags.json",
+            "config/mocktail/config.yaml",
+            "state/mocktail/window-state.json",
+            "data/mocktail/current.json",
+            "data/mocktail/payloads",
+        ] {
+            assert!(fs::symlink_metadata(p.join(unread)).is_err(), "{unread} written");
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -479,7 +479,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         "close_all" => linux::close_all(),
         #[cfg(target_os = "linux")]
-        "nudge_all" => linux::nudge_all(),
+        "anti_afk" => linux::anti_afk(),
         #[cfg(windows)]
         "close_all" => windows::close_all(),
         #[cfg(target_os = "linux")]

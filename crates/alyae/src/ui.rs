@@ -9,7 +9,10 @@ use egui_extras::{Column, TableBuilder};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// The Anti-AFK intervals offered, in minutes (Roblox kicks after 20 idle).
+const ANTI_AFK_MINUTES: [u64; 3] = [12, 15, 18];
 
 pub struct App {
     store: Option<Store>,
@@ -53,7 +56,7 @@ pub struct App {
     /// the module's watch (online status): its values by account, the run in progress, the last run
     watch_values: HashMap<String, String>,
     watching: Option<std::process::Child>,
-    last_watch: Option<(String, std::time::Instant)>,
+    last_watch: Option<(String, Instant)>,
     /// the watch's last error, shown once until it changes or the watch works again
     watch_error: Option<String>,
     /// extra wait before the next watch run after the game refused for too many requests:
@@ -81,6 +84,10 @@ pub struct App {
     bookmark_name: String,
     /// the watch column shows its text (else only the dot, the text on hover)
     watch_text: bool,
+    /// Anti-AFK: every running game is nudged this often, in minutes (0: off)
+    anti_afk: u64,
+    /// when Anti-AFK last nudged (or was turned on)
+    anti_afk_last: Instant,
     /// the accounts-file dialog, when open
     transfer: Option<Transfer>,
     /// the Edit Account window (every field of the chosen account) is open
@@ -102,7 +109,7 @@ pub struct App {
     servers_direct: bool,
     /// each place's servers and when they came; the places are asked in turn, one list at a
     /// time no sooner than `servers_next` (the game allows only a few lists a minute)
-    servers_rows: HashMap<String, (Vec<module::ServerRow>, std::time::Instant)>,
+    servers_rows: HashMap<String, (Vec<module::ServerRow>, Instant)>,
     servers_next: Option<std::time::Instant>,
     servers_turn: usize,
     /// the window shows this place only (None: all)
@@ -199,6 +206,8 @@ impl App {
             import_text: None,
             bookmark_name: String::new(),
             watch_text: true,
+            anti_afk: 0,
+            anti_afk_last: Instant::now(),
             transfer: None,
             edit_open: false,
             side_for: None,
@@ -222,6 +231,11 @@ impl App {
             Ok((s, (list, problems))) => {
                 app.accounts = list;
                 app.watch_text = s.setting("watch_text").is_none_or(|v| v != "0");
+                app.anti_afk = s
+                    .setting("anti_afk")
+                    .and_then(|v| v.parse().ok())
+                    .filter(|m| ANTI_AFK_MINUTES.contains(m))
+                    .unwrap_or(0);
                 let last = s
                     .setting("last_game")
                     .filter(|g| app.modules.iter().any(|m| &m.id == g));
@@ -692,6 +706,71 @@ impl App {
     }
 
     /// Starts `job`'s action; Some(whether it runs a game) when it started.
+    /// The Anti-AFK choice: off, or a nudge for every running game this often.
+    fn anti_afk_choice(&mut self, ui: &mut egui::Ui) {
+        let label = |m: u64| {
+            if m == 0 {
+                "Anti-AFK: off".to_string()
+            } else {
+                format!("Anti-AFK: every {m} min")
+            }
+        };
+        let before = self.anti_afk;
+        egui::ComboBox::from_id_salt("anti_afk")
+            .selected_text(label(self.anti_afk))
+            .show_ui(ui, |ui| {
+                for m in std::iter::once(0).chain(ANTI_AFK_MINUTES) {
+                    ui.selectable_value(&mut self.anti_afk, m, label(m));
+                }
+            })
+            .response
+            .on_hover_text(
+                "Every running game moves the pointer one pixel and back, so Roblox does not \
+                 kick it after 20 minutes idle. Skipped while you type in chat. Works while \
+                 Alyae is open.",
+            );
+        if self.anti_afk != before {
+            self.anti_afk_last = Instant::now();
+            if let Some(s) = &self.store {
+                s.set_setting("anti_afk", &self.anti_afk.to_string());
+            }
+        }
+    }
+
+    /// Anti-AFK: when its time comes, every game module's helper nudges its running games.
+    fn tick_anti_afk(&mut self, ctx: &egui::Context) {
+        if self.anti_afk == 0 || self.running.is_empty() {
+            return;
+        }
+        let every = Duration::from_secs(self.anti_afk * 60);
+        let gone = self.anti_afk_last.elapsed();
+        if gone < every {
+            ctx.request_repaint_after(every - gone);
+            return;
+        }
+        self.anti_afk_last = Instant::now();
+        ctx.request_repaint_after(every);
+        for m in self.modules.iter().filter(|m| !m.anti_afk.is_empty()) {
+            let (m, dir, tx) = (m.clone(), self.dir.clone(), self.tx.clone());
+            let account = Account {
+                id: "all".into(),
+                game: m.id.clone(),
+                ..Default::default()
+            };
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                // only a failure is worth a message; a nudge every few minutes is not
+                if let Err(e) = module::run_and_wait(&m, &m.anti_afk, &account, &dir) {
+                    let _ = tx.send(Event::Note {
+                        text: format!("Anti-AFK: {e}"),
+                        bad: true,
+                    });
+                    ctx.request_repaint();
+                }
+            });
+        }
+    }
+
     fn start_job(&mut self, job: &Job) -> Option<bool> {
         let m = self.module(&job.game).cloned()?;
         let action = m.actions.iter().find(|a| a.id == job.action).cloned()?;
@@ -780,6 +859,7 @@ impl eframe::App for App {
         if self.running.values().any(Running::is_command) {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        self.tick_anti_afk(&ctx);
         match self.game.clone() {
             None => self.game_picker(ui),
             Some(g) => {
@@ -1021,31 +1101,8 @@ impl App {
                     self.unqueue(&chosen);
                     self.stop(&chosen);
                 }
-                if !m.nudge_all.is_empty()
-                    && ui
-                        .button("Nudge all")
-                        .on_hover_text(
-                            "Anti-AFK now: every running game moves the pointer a pixel and \
-                             back, which nobody sees, so no account is kicked for being idle",
-                        )
-                        .clicked()
-                {
-                    let (m, dir, tx) = (m.clone(), self.dir.clone(), self.tx.clone());
-                    let account = Account {
-                        id: "all".into(),
-                        game: m.id.clone(),
-                        ..Default::default()
-                    };
-                    let ctx = ui.ctx().clone();
-                    std::thread::spawn(move || {
-                        let (text, bad) =
-                            match module::run_and_wait(&m, &m.nudge_all, &account, &dir) {
-                                Ok(said) => (said.unwrap_or_else(|| "Nudged".into()), false),
-                                Err(e) => (format!("Nudge all: {e}"), true),
-                            };
-                        let _ = tx.send(Event::Note { text, bad });
-                        ctx.request_repaint();
-                    });
+                if !m.anti_afk.is_empty() {
+                    self.anti_afk_choice(ui);
                 }
                 if !m.close_all.is_empty()
                     && ui

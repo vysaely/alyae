@@ -200,10 +200,10 @@ fn running_games() -> Vec<i32> {
         .collect()
 }
 
-/// The "Nudge all" button: every running game moves the pointer a pixel and back once (as
+/// Anti-AFK (Alyae runs it every few minutes): every running game moves the pointer a pixel and back once (as
 /// anti-AFK does), so Roblox counts the account as active. Each game names its nudge file in
 /// its environment; a game started before that existed has none and is skipped.
-pub fn nudge_all() {
+pub fn anti_afk() {
     let (mut nudged, mut old) = (0, 0);
     for pid in running_games() {
         let env = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
@@ -218,7 +218,7 @@ pub fn nudge_all() {
     }
     let mut text = format!("{nudged} games nudged");
     if old > 0 {
-        text += &format!(", {old} started before Nudge all existed (restart them)");
+        text += &format!(", {old} started before Anti-AFK existed (restart them)");
     }
     status(&text);
 }
@@ -895,14 +895,6 @@ pub fn play(req: &Request) {
     // again; alts keep them
     if main {
         env.push(("MOCKTAIL_LOW_MEMORY_PROFILE".into(), "0".into()));
-    }
-    // Alyae's Mocktail build (anti-AFK patch): a nudge after this many seconds without input
-    let afk_minutes: u64 = req.get("anti_afk").parse().unwrap_or(0);
-    if afk_minutes > 0 {
-        env.push((
-            "MOCKTAIL_ANTI_AFK_SECONDS".into(),
-            (afk_minutes.min(19) * 60).to_string(),
-        ));
     }
     if !main {
         env.push(("SDL_AUDIODRIVER".into(), "dummy".into()));

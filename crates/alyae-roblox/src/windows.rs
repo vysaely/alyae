@@ -132,7 +132,7 @@ const TRIM_EVERY: Duration = Duration::from_secs(120);
 
 /// RAM that must be free before another client starts while others still load (room for them
 /// to grow too): a client loading a big map takes gigabytes, and many loading at once froze a
-/// 32 GB PC (owner, 2026-11-17).
+/// 32 GB PC.
 const FREE_TO_START_MB: u64 = 6144;
 /// ... and when it would be the only one loading: one Gaia load is about 2.6 GB.
 const FREE_TO_START_ALONE_MB: u64 = 3584;

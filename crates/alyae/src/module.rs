@@ -639,9 +639,9 @@ fn request_json(
     })
 }
 
-/// Runs the helper's `action` for `account` and waits for it to end: for short actions the
-/// window waits on (the module's `on_remove`). Its errors are joined into the Err.
-/// Runs a helper action to its end; its last status line, if it said one.
+/// Runs the helper's `action` for `account` and waits for it to end, for short actions (the
+/// module's `on_remove`, `close_all`, `anti_afk`): Ok holds its last status line, if it said
+/// one; its errors are joined into the Err.
 pub fn run_and_wait(
     module: &Module,
     action: &str,

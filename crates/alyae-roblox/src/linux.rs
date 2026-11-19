@@ -204,7 +204,7 @@ fn running_games() -> Vec<i32> {
 /// anti-AFK does), so Roblox counts the account as active. Each game names its nudge file in
 /// its environment; a game started before that existed has none and is skipped.
 pub fn anti_afk() {
-    let (mut nudged, mut old) = (0, 0);
+    let (mut nudged, mut old, mut failed) = (0, 0, Vec::new());
     for pid in running_games() {
         let env = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
         let file = env
@@ -212,15 +212,30 @@ pub fn anti_afk() {
             .find_map(|kv| kv.strip_prefix(b"MOCKTAIL_NUDGE_FILE="))
             .map(|v| PathBuf::from(std::ffi::OsStr::from_bytes(v)));
         match file {
-            Some(f) if fs::write(&f, format!("{:?}", std::time::SystemTime::now())).is_ok() => nudged += 1,
-            _ => old += 1,
+            None => old += 1,
+            Some(f) => match fs::write(&f, format!("{:?}", std::time::SystemTime::now())) {
+                Ok(()) => nudged += 1,
+                Err(e) => failed.push(format!("{}: {e}", f.display())),
+            },
         }
     }
+    match nudge_report(nudged, old, &failed) {
+        Ok(text) => status(&text),
+        Err(text) => fail(&text),
+    }
+}
+
+/// What Anti-AFK says after a round; Err when a nudge file could not be written.
+fn nudge_report(nudged: usize, old: usize, failed: &[String]) -> Result<String, String> {
     let mut text = format!("{nudged} games nudged");
     if old > 0 {
         text += &format!(", {old} started before Anti-AFK existed (restart them)");
     }
-    status(&text);
+    if failed.is_empty() {
+        Ok(text)
+    } else {
+        Err(format!("{text}, {} not: {}", failed.len(), failed.join("; ")))
+    }
 }
 
 /// The "Close all games" button: every account's Mocktail game (each runs as its own
@@ -1458,6 +1473,20 @@ mod tests {
         after_game(&p, "old", false);
         assert!(!kept.exists() && !p.join("roblox.cookie").exists());
         let _ = fs::remove_dir_all(p);
+    }
+
+    /// A nudge file that cannot be written is a failure, not a game started before Anti-AFK.
+    #[test]
+    fn failed_nudge_is_a_failure() {
+        assert_eq!(nudge_report(2, 0, &[]), Ok("2 games nudged".into()));
+        assert_eq!(
+            nudge_report(1, 1, &[]),
+            Ok("1 games nudged, 1 started before Anti-AFK existed (restart them)".into())
+        );
+        assert_eq!(
+            nudge_report(1, 0, &["/p/nudge: denied".into()]),
+            Err("1 games nudged, 1 not: /p/nudge: denied".into())
+        );
     }
 
     /// Only alts are held to CPUs; a main keeps every core.

@@ -308,9 +308,9 @@ pub struct Module {
     #[serde(default)]
     pub close_all: String,
     /// a helper action that nudges every running game of this kind once, so none is kicked for
-    /// being idle: the "Nudge all" button
+    /// being idle: Anti-AFK runs it every few minutes
     #[serde(default)]
-    pub nudge_all: String,
+    pub anti_afk: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,

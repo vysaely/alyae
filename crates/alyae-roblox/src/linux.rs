@@ -4,7 +4,7 @@
 //! are left out.
 
 use crate::files::{clear, remove};
-use crate::{Join, Request, Role, api, fail, join_from, say, settings_xml, status, wait_for_stop};
+use crate::{Join, Request, Role, Stop, api, fail, join_from, say, settings_xml, status};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
@@ -251,16 +251,11 @@ pub fn resume(req: &Request) {
     let Some(pid) = running_pid(&m.lib.join(program_name(req))) else {
         return;
     };
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if wait_for_stop() {
-            let _ = tx.send(());
-        }
-    });
+    let mut stop = Stop::listen();
     status("running (found again)");
     let alive = || Path::new(&format!("/proc/{pid}")).exists();
     while alive() {
-        if rx.try_recv().is_ok() {
+        if stop.asked() {
             status("stopping");
             // SAFETY: plain signal to a process ID
             unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -582,16 +577,16 @@ fn mem_available_mb(meminfo: &str) -> Option<u64> {
         .map(|kb| kb / 1024)
 }
 
-/// Waits (in the launch turn) until there is room for one more client, at most
-/// `crate::MEMORY_WAIT`.
-fn wait_for_memory() {
+/// Waits until there is room for one more client, at most `crate::MEMORY_WAIT`; a stop ends the
+/// wait and the helper.
+fn wait_for_memory(stop: &mut Stop) {
     let free = || {
         fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|t| mem_available_mb(&t))
             .unwrap_or(u64::MAX)
     };
-    crate::wait_for_memory(free, || FREE_TO_START_MB, || {});
+    crate::wait_for_memory(free, || FREE_TO_START_MB, || stop.end_if_asked());
 }
 
 /// What a launch does to Mocktail's window.
@@ -852,7 +847,8 @@ struct LaunchTurn(#[allow(dead_code)] fs::File);
 impl LaunchTurn {
     const HOLD: Duration = Duration::from_secs(5);
 
-    fn take(data_dir: &Path) -> Option<Self> {
+    /// Waits for the turn; a stop meanwhile ends the helper.
+    fn take(data_dir: &Path, stop: &mut Stop) -> Option<Self> {
         let f = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -861,13 +857,18 @@ impl LaunchTurn {
             .open(data_dir.join("launch.lock"))
             .ok()?;
         use std::os::fd::AsRawFd;
+        let mut said = false;
         // SAFETY: flock(2) on a file this function owns
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            status("waiting for another account to start");
-            // SAFETY: as above, blocking
-            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        while unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK) {
                 return None;
             }
+            if !said {
+                status("waiting for another account to start");
+                said = true;
+            }
+            stop.end_if_asked();
+            std::thread::sleep(Duration::from_millis(250));
         }
         Some(LaunchTurn(f))
     }
@@ -878,6 +879,9 @@ pub fn play(req: &Request) {
     if cookie.is_empty() {
         fail("no cookie: paste the .ROBLOSECURITY value into Cookie");
     }
+    // a stop from Alyae ends the waits below, or the game once it runs; Alyae closing leaves
+    // the game running
+    let mut stop = Stop::listen();
     let Some(m) = find_mocktail() else {
         fail(
             "Mocktail is not installed (looked in ~/.local/lib/mocktail, /usr/lib/mocktail and PATH)",
@@ -900,11 +904,13 @@ pub fn play(req: &Request) {
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
     // a second copy earlier versions wrote, which Mocktail never read
     let _ = fs::remove_file(profile.join("data/mocktail/roblox.cookie"));
-    let mut turn = LaunchTurn::take(data_dir);
-    // one account started on its own does not wait for free RAM
+    // one account started on its own does not wait for free RAM. The turn comes after the
+    // memory wait, so an account waiting for memory does not hold up one started on its own
     if req.input("_alone") != "1" {
-        wait_for_memory();
+        wait_for_memory(&mut stop);
     }
+    let mut turn = LaunchTurn::take(data_dir, &mut stop);
+    stop.end_if_asked();
     status("starting");
     let window = window_plan(req.window(), role);
     prepare_profile(
@@ -1075,14 +1081,6 @@ pub fn play(req: &Request) {
         .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
     let pid = child.id() as i32;
     say(json!({ "status": "running" }));
-
-    // a stop from Alyae ends the game; Alyae closing leaves it running
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if wait_for_stop() {
-            let _ = tx.send(());
-        }
-    });
     let code = loop {
         if let Ok(Some(s)) = child.try_wait() {
             break s;
@@ -1090,7 +1088,7 @@ pub fn play(req: &Request) {
         if turn.is_some() && started.elapsed() >= LaunchTurn::HOLD {
             turn = None;
         }
-        if rx.try_recv().is_ok() {
+        if stop.asked() {
             status("stopping");
             // SAFETY: plain kill(2) on the game's own process group
             unsafe { libc::kill(-pid, libc::SIGTERM) };

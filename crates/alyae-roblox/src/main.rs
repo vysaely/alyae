@@ -516,8 +516,48 @@ fn main() {
     }
 }
 
+/// Alyae's Stop for one game, listened for from before a launch's waits until the game ends.
+pub struct Stop {
+    rx: std::sync::mpsc::Receiver<bool>,
+    /// Alyae closed (its end of stdin did): nobody reads this helper's answers any more
+    pub alyae_gone: bool,
+}
+
+impl Stop {
+    pub fn listen() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(wait_for_stop());
+        });
+        Stop {
+            rx,
+            alyae_gone: false,
+        }
+    }
+
+    /// Whether Alyae asked to stop since the last call.
+    pub fn asked(&mut self) -> bool {
+        match self.rx.try_recv() {
+            Ok(true) => true,
+            Ok(false) => {
+                self.alyae_gone = true;
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// For the waits before the game starts: a stop ends the helper there, nothing started.
+    pub fn end_if_asked(&mut self) {
+        if self.asked() {
+            status("stopped before starting");
+            std::process::exit(0);
+        }
+    }
+}
+
 /// Lines from Alyae after the request: true when it asked to stop (false when Alyae closed).
-pub fn wait_for_stop() -> bool {
+fn wait_for_stop() -> bool {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         match line {

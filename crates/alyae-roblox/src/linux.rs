@@ -528,8 +528,8 @@ fn settings_file(profile: &Path) -> PathBuf {
     profile.join("data/files/appData/GlobalBasicSettings_13.xml")
 }
 
-/// The Graphics button: sets the graphics level, camera sensitivity and volume in Roblox's own
-/// settings file. A value left at "keep" (or empty) stays as it is.
+/// The Settings button: sets the graphics level, camera sensitivity, volume and the rest of its
+/// form in Roblox's own settings file. A value left at "keep" (or empty) stays as it is.
 pub fn graphics(req: &Request) {
     let m = find_mocktail();
     if let Some(m) = &m {
@@ -663,7 +663,7 @@ fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
 }
 
 /// RAM that must be free (MemAvailable) before another client starts: many clients loading a
-/// big map at once froze a 32 GB PC (owner, 2026-11-17).
+/// big map at once froze a 32 GB PC.
 const FREE_TO_START_MB: u64 = 4096;
 
 /// MemAvailable from `/proc/meminfo` text, in MB.

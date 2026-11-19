@@ -652,16 +652,15 @@ impl App {
             );
         }
         // only files here (Settings): nothing to pace, every account at once. One account on
-        // its own does not wait behind a queue either (owner, 2026-11-17): it starts now, and
-        // leaves the queue if it was waiting there (the helper still limits games loading at
-        // once and wants free memory)
+        // its own does not wait behind a queue either: it starts now, and leaves the queue if
+        // it was waiting there (the helper still limits games loading at once and wants free
+        // memory)
         if action.local || ids.len() == 1 {
             if !action.local {
                 self.queue
                     .retain(|j| !(ids.contains(&j.account) && j.action == action.id));
             }
             // one account on its own: the helper starts it without waiting for free RAM
-            // (owner, 2026-11-18)
             let mut inputs = inputs;
             if !action.local {
                 inputs.insert("_alone".into(), "1".into());
@@ -677,7 +676,7 @@ impl App {
             return;
         }
         // one account at a time, a few seconds apart: many sign-ins or joins at once from one
-        // connection get it refused by the game's servers (owner, 2026-11-17)
+        // connection get it refused by the game's servers
         for id in ids {
             self.queue.push_back(Job {
                 game: game.clone(),

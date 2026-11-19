@@ -202,7 +202,7 @@ pub fn quality(n: u32) -> Vec<Prop> {
     ]
 }
 
-/// One input of the Graphics form: its key, the file entry it sets and how its text becomes the
+/// One input of the Settings form: its key, the file entry it sets and how its text becomes the
 /// value. "keep" (or empty) leaves the entry alone.
 struct Setting {
     key: &'static str,
@@ -314,7 +314,7 @@ const SETTINGS: &[Setting] = &[
     },
 ];
 
-/// The file entries the Graphics form asks for, and the FPS cap it sets (0: none), or the first
+/// The file entries the Settings form asks for, and the FPS cap it sets (0: none), or the first
 /// value that is not one Roblox takes.
 pub fn from_form(input: impl Fn(&str) -> String) -> Result<(Vec<Prop>, Option<u32>), String> {
     let keep = |v: &str| v.is_empty() || v == "keep";

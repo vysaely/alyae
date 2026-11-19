@@ -800,6 +800,11 @@ pub fn start(
                     account: id.clone(),
                     text: t.to_string(),
                 }
+            } else if let Some(t) = v.get("warn").and_then(|s| s.as_str()) {
+                Event::Note {
+                    text: t.to_string(),
+                    bad: true,
+                }
             } else {
                 continue;
             };

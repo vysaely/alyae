@@ -66,6 +66,21 @@ fn find_mocktail() -> Option<Mocktail> {
     })
 }
 
+/// What does not work with the installed Mocktail, from build.sh's mark in its folder
+/// (`marker`) and the build this helper expects (`ALYAE_MOCKTAIL_BUILD`, from the module's
+/// patches); None when it is that build.
+fn build_warning(marker: Option<&str>, expected: &str) -> Option<&'static str> {
+    match marker.map(str::trim) {
+        Some(m) if m == expected => None,
+        Some(_) => Some(
+            "Mocktail was built with older Alyae patches: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix may do nothing. Run modules/roblox-linux/mocktail/build.sh again",
+        ),
+        None => Some(
+            "This Mocktail is not Alyae's build: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix do nothing. Run modules/roblox-linux/mocktail/build.sh",
+        ),
+    }
+}
+
 fn mkdir(p: &Path) {
     let _ = fs::create_dir_all(p);
     let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o700));
@@ -970,6 +985,10 @@ pub fn play(req: &Request) {
             "Mocktail is not installed (looked in ~/.local/lib/mocktail, /usr/lib/mocktail and PATH)",
         );
     };
+    let marker = fs::read_to_string(m.lib.join("alyae-mocktail-patch")).ok();
+    if let Some(w) = build_warning(marker.as_deref(), env!("ALYAE_MOCKTAIL_BUILD")) {
+        say(json!({ "warn": w }));
+    }
     let data_dir = &req.data_dir;
     let role = req.role();
     let fps_limit = req
@@ -1546,6 +1565,19 @@ mod tests {
         fs::create_dir_all(payloads.join("3-none/assets")).unwrap();
         assert_eq!(lock_reference(&payloads, &cursors), Some(icon("2-new")));
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// The installed Mocktail is Alyae's current build only when build.sh's mark matches the
+    /// module's patches.
+    #[test]
+    fn mocktail_build_is_checked() {
+        let expected = env!("ALYAE_MOCKTAIL_BUILD");
+        assert_eq!(build_warning(Some(&format!("{expected}\n")), expected), None);
+        assert!(build_warning(Some("e636d75 0000000000000000\n"), expected).unwrap().contains("older"));
+        assert!(build_warning(None, expected).unwrap().contains("not Alyae's build"));
+        // build.sh's mark: the upstream commit and 16 hex digits
+        let (commit, hash) = expected.split_once(' ').unwrap();
+        assert_eq!((commit.len(), hash.len()), (40, 16));
     }
 
     /// A nudge file that cannot be written is a failure, not a game started before Anti-AFK.

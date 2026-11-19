@@ -8,8 +8,8 @@ helper = "alyae-roblox"
 resume = "resume"
 # the "Close all games" button: every Roblox, also ones Alyae did not start
 close_all = "close_all"
-# the "Nudge all" button: every running game moves the pointer a pixel and back once (anti-AFK now)
-nudge_all = "nudge_all"
+# Anti-AFK: every running game moves the pointer a pixel and back once (Alyae runs it every few minutes)
+anti_afk = "anti_afk"
 title_field = "username"
 # removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
 # AEAM stays; only Mocktail's saved sign-in in it goes)
@@ -61,13 +61,6 @@ label = "Role"
 kind = "choice"
 choices = ["alt", "main"]
 hint = "main: full FPS and quality; alt: small, muted, low FPS; empty: Roblox as it is"
-
-[[field]]
-key = "anti_afk"
-label = "Anti-AFK"
-kind = "choice"
-choices = ["off", "12", "15", "18"]
-hint = "minutes without input before a 1 px nudge (Roblox kicks after 20)"
 
 [[field]]
 key = "cursor"

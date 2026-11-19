@@ -2397,9 +2397,7 @@ impl App {
         }
     }
 
-    /// "Close all games", once confirmed: the queue stops, every game Alyae runs is asked to
-    /// stop, and the module's close-all action closes the rest (ones started elsewhere or lost
-    /// track of), on a thread of its own.
+    /// "Close all games", asking first.
     fn close_all_dialog(&mut self, ctx: &egui::Context) {
         if !self.confirm_close_all {
             return;
@@ -2426,27 +2424,42 @@ impl App {
         match done {
             Some(true) => {
                 self.confirm_close_all = false;
-                self.queue.clear();
-                self.queue_next = None;
-                for r in self.running.values_mut() {
-                    r.stop();
-                }
-                let dir = self.dir.clone();
-                let account = Account {
-                    id: "all".into(),
-                    game: m.id.clone(),
-                    ..Default::default()
-                };
-                std::thread::spawn(move || {
-                    if let Err(e) = module::run_and_wait(&m, &m.close_all, &account, &dir) {
-                        crate::log::line("", &format!("Close all games: {e}"));
-                    }
-                });
-                self.say("Closing all games", false);
+                self.close_all_games(m);
             }
             Some(false) => self.confirm_close_all = false,
             None => {}
         }
+    }
+
+    /// "Close all games", once confirmed: the queue stops, every game of `m` Alyae runs is asked
+    /// to stop (another game's keep playing), and the module's close-all action closes the rest
+    /// (ones started elsewhere or lost track of) on a thread of its own; what it said, or its
+    /// error, goes to the message bar.
+    fn close_all_games(&mut self, m: Module) {
+        self.queue.clear();
+        self.queue_next = None;
+        for (id, r) in self.running.iter_mut() {
+            if self.accounts.iter().any(|a| &a.id == id && a.game == m.id) {
+                r.stop();
+            }
+        }
+        let (dir, tx, ctx) = (self.dir.clone(), self.tx.clone(), self.ctx.clone());
+        let account = Account {
+            id: "all".into(),
+            game: m.id.clone(),
+            ..Default::default()
+        };
+        std::thread::spawn(move || {
+            let (text, bad) = match module::run_and_wait(&m, &m.close_all, &account, &dir) {
+                Ok(said) => (said.unwrap_or_else(|| "All games closed".into()), false),
+                Err(e) => (format!("Close all games: {e}"), true),
+            };
+            let _ = tx.send(Event::Note { text, bad });
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        });
+        self.say("Closing all games", false);
     }
 
     /// Runs `action`, or first opens its form when it asks for values or a confirmation.
@@ -4045,6 +4058,58 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(marker.exists(), "the confirmed action did not run");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// Close all games stops this game's accounts only, and shows what the close-all action
+    /// said (here: that the test module has no helper for it).
+    #[test]
+    #[cfg(unix)]
+    fn close_all_stops_this_game_only() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        for g in ["t", "u"] {
+            std::fs::create_dir_all(mods.join(g)).unwrap();
+            std::fs::write(
+                mods.join(format!("{g}/module.toml")),
+                format!(
+                    "id = \"{g}\"\nname = \"{g}\"\nclose_all = \"close_all\"\n\
+                     [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\ncommand = 'sleep 30'\n"
+                ),
+            )
+            .unwrap();
+        }
+        let (mut h, dir) = window_with("t", mods.clone());
+        let mut ids = Vec::new();
+        for g in ["t", "u"] {
+            let m = h.state().module(g).cloned().unwrap();
+            let a = h.state().new_account(&m);
+            assert!(h.state_mut().save(&a));
+            h.state_mut().game = Some(g.into());
+            h.state_mut().run_action("play", vec![a.id.clone()]);
+            ids.push(a.id);
+        }
+        let t = h.state().module("t").cloned().unwrap();
+        h.state_mut().close_all_games(t);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut ended = |id: &str| {
+            matches!(
+                h.state_mut().running.get_mut(id).unwrap().child.try_wait(),
+                Ok(Some(_))
+            )
+        };
+        assert!(ended(&ids[0]), "t's game still runs");
+        assert!(!ended(&ids[1]), "u's game was stopped");
+        for _ in 0..250 {
+            h.state_mut().poll();
+            if h.state().message.as_ref().is_some_and(|(t, _)| t != "Closing all games") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (text, bad) = h.state().message.clone().unwrap();
+        assert!(bad && text.starts_with("Close all games: t has no helper"), "{text}");
+        h.state_mut().running.get_mut(&ids[1]).unwrap().stop();
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }

@@ -687,11 +687,13 @@ pub fn run_and_wait(
 }
 
 /// Runs the module's watch once for `accounts`; its values arrive as one `Event::Watch`, then
-/// `Event::WatchEnded`.
+/// `Event::WatchEnded`. `now`: the user just picked these accounts, so the helper checks them
+/// fully at once instead of in their turn.
 pub fn watch(
     module: &Module,
     w: &Watch,
     accounts: &[&Account],
+    now: bool,
     data_dir: &Path,
     tx: Sender<Event>,
     wake: impl Fn() + Send + 'static,
@@ -701,7 +703,7 @@ pub fn watch(
         .iter()
         .map(|a| serde_json::json!({ "id": a.id, "account": w.account_json(module, a) }))
         .collect();
-    let request = serde_json::json!({ "accounts": list, "data_dir": dir });
+    let request = serde_json::json!({ "accounts": list, "now": now, "data_dir": dir });
     // stdin closes here: a watch answers once and ends
     let mut stdin = child.stdin.take().expect("piped stdin");
     stdin

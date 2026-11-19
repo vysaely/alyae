@@ -183,8 +183,19 @@ fn running_pid(program: &Path) -> Option<i32> {
     })
 }
 
-/// Every account's running Mocktail game, as process IDs.
-fn running_games() -> Vec<i32> {
+/// Alyae's copy of Mocktail for an account (`program_name`).
+fn alyae_game(name: &str) -> bool {
+    name.starts_with("mocktail_alyae_")
+}
+
+/// Any Mocktail game: Alyae's copies, AEAM's (`mocktail_acc_...`) and the plain program; not
+/// Mocktail's helper programs (mocktail_webview_helper, mocktail_cookie_helper, ...).
+fn any_game(name: &str) -> bool {
+    alyae_game(name) || name.starts_with("mocktail_acc_") || name == "mocktail"
+}
+
+/// The running games whose program name `pick` takes, as process IDs.
+fn running_games(pick: fn(&str) -> bool) -> Vec<i32> {
     let Ok(procs) = fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -195,7 +206,7 @@ fn running_games() -> Vec<i32> {
             let c = fs::read(p.path().join("cmdline")).ok()?;
             let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
             let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
-            name.to_str()?.starts_with("mocktail_alyae_").then_some(pid)
+            pick(name.to_str()?).then_some(pid)
         })
         .collect()
 }
@@ -205,7 +216,7 @@ fn running_games() -> Vec<i32> {
 /// its environment; a game started before that existed has none and is skipped.
 pub fn anti_afk() {
     let (mut nudged, mut old, mut failed) = (0, 0, Vec::new());
-    for pid in running_games() {
+    for pid in running_games(alyae_game) {
         let env = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
         let file = env
             .split(|b| *b == 0)
@@ -238,10 +249,10 @@ fn nudge_report(nudged: usize, old: usize, failed: &[String]) -> Result<String, 
     }
 }
 
-/// The "Close all games" button: every account's Mocktail game (each runs as its own
-/// `mocktail_alyae_...` program) is asked to end, and made to after 4 s.
+/// The "Close all games" button: every Mocktail game, also ones Alyae did not start (AEAM's,
+/// plain Mocktail), is asked to end, and made to after 4 s.
 pub fn close_all() {
-    let games = running_games;
+    let games = || running_games(any_game);
     let all = games();
     for pid in &all {
         // SAFETY: plain signal to a process ID
@@ -1473,6 +1484,26 @@ mod tests {
         after_game(&p, "old", false);
         assert!(!kept.exists() && !p.join("roblox.cookie").exists());
         let _ = fs::remove_dir_all(p);
+    }
+
+    /// Close all takes every Mocktail game and none of Mocktail's helpers; Anti-AFK only
+    /// Alyae's games, which name their nudge file.
+    #[test]
+    fn which_processes_are_games() {
+        for game in ["mocktail", "mocktail_acc_0082e9a91d9e", "mocktail_alyae_abc"] {
+            assert!(any_game(game), "{game}");
+        }
+        for other in [
+            "mocktail_webview_helper",
+            "mocktail_cookie_helper",
+            "mocktail_updater",
+            "mocktail_failure_dialog",
+            "mocktail.provision",
+            "alyae",
+        ] {
+            assert!(!any_game(other), "{other}");
+        }
+        assert!(alyae_game("mocktail_alyae_abc") && !alyae_game("mocktail_acc_1"));
     }
 
     /// A nudge file that cannot be written is a failure, not a game started before Anti-AFK.

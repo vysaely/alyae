@@ -85,6 +85,8 @@ pub struct App {
     bookmark_name: String,
     /// the watch column shows its text (else only the dot, the text on hover)
     watch_text: bool,
+    /// the account last picked whose watch value was checked at once
+    watch_picked: Option<String>,
     /// Anti-AFK: every running game is nudged this often, in minutes (0: off)
     anti_afk: u64,
     /// when Anti-AFK last nudged (or was turned on)
@@ -208,6 +210,7 @@ impl App {
             bookmark_name: String::new(),
             watch_text: true,
             anti_afk: 0,
+            watch_picked: None,
             anti_afk_last: Instant::now(),
             transfer: None,
             edit_open: false,
@@ -2613,6 +2616,28 @@ impl App {
         if !focused || minimized {
             return;
         }
+        // an account just picked is checked at once (after a run already going ends)
+        let picked = (self.selected.len() == 1)
+            .then(|| self.selected.first().cloned())
+            .flatten()
+            .filter(|id| self.watch_picked.as_ref() != Some(id));
+        if let Some(id) = picked {
+            if self.watching.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            } else if let Some(a) = self.accounts.iter().find(|a| a.id == id && a.game == game) {
+                let wake_ctx = self.ctx.clone();
+                match module::watch(&m, &w, &[a], true, &self.dir, self.tx.clone(), move || {
+                    if let Some(c) = &wake_ctx {
+                        c.request_repaint();
+                    }
+                }) {
+                    Ok(child) => self.watching = Some(child),
+                    Err(e) => self.say(format!("{}: {e}", w.column), true),
+                }
+                self.watch_picked = Some(id);
+                return;
+            }
+        }
         let due = match &self.last_watch {
             Some((g, t)) if g == game => t.elapsed() >= every,
             _ => {
@@ -2625,7 +2650,7 @@ impl App {
             let accounts: Vec<&Account> = self.accounts.iter().filter(|a| a.game == game).collect();
             if !accounts.is_empty() {
                 let wake_ctx = self.ctx.clone();
-                match module::watch(&m, &w, &accounts, &self.dir, self.tx.clone(), move || {
+                match module::watch(&m, &w, &accounts, false, &self.dir, self.tx.clone(), move || {
                     if let Some(c) = &wake_ctx {
                         c.request_repaint();
                     }

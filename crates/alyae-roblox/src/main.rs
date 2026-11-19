@@ -16,7 +16,7 @@ mod windows;
 
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub struct Request {
@@ -344,7 +344,8 @@ fn check(req: &Request) {
 /// and was sent with its cookie is asked again as itself (an account always sees its own status),
 /// about itself only, so no account's session is ever used to look up another (that would tell
 /// Roblox the accounts belong together). Those own checks are spread: each account at most once
-/// a minute (a quarter of them per 15 s run); one not due this run keeps the value Alyae has.
+/// a minute (a quarter of them per 15 s run, an account just picked at once); one not due this run
+/// shows its last own answer.
 fn presence(v: &Value) {
     let accounts = v["accounts"].as_array().cloned().unwrap_or_default();
     let field = |a: &Value, k: &str| a["account"][k].as_str().unwrap_or("").trim().to_string();
@@ -367,25 +368,45 @@ fn presence(v: &Value) {
         })
     };
     let turn = unix_secs() / 15 % 4;
+    // the accounts the user just picked: checked now, not in their turn
+    let now = v["now"].as_bool().unwrap_or(false);
+    // the last own answers, so a row not due this run shows that instead of the public Offline
+    let saved = v["data_dir"].as_str().map(|d| Path::new(d).join("presence-own.json"));
+    let mut own: Map<String, Value> = saved
+        .as_ref()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
     for (i, (user, id, cookie)) in all.iter().enumerate() {
-        let seen = public.iter().find(|(u, _)| u == user).map(|(_, t)| t.as_str());
-        let hidden = matches!(seen, None | Some("Offline" | "Invisible"));
+        let seen = public.iter().find(|(u, _)| u == user).map(|(_, t)| t.clone());
+        let hidden = matches!(seen.as_deref(), None | Some("Offline" | "Invisible"));
         if !hidden || cookie.is_empty() {
+            own.remove(id);
             if let Some(t) = seen {
                 map.insert(id.clone(), json!(t));
             }
             continue;
         }
-        if own_check_due(i, turn) {
+        if now || own_check_due(i, turn) {
             match api::presence(&[*user], cookie) {
                 Ok(list) => {
                     if let Some((_, t)) = list.into_iter().next() {
-                        map.insert(id.clone(), json!(t));
+                        own.insert(id.clone(), json!(t));
                     }
                 }
                 Err(e) => errors.push(e),
             }
         }
+        if let Some(t) = own.get(id).cloned().or_else(|| seen.map(Value::from)) {
+            map.insert(id.clone(), t);
+        }
+    }
+    // a full run (every account) forgets accounts that are gone; a pick run has only one
+    if !now {
+        own.retain(|id, _| all.iter().any(|(_, a, _)| a == id));
+    }
+    if let Some(f) = &saved {
+        let _ = std::fs::write(f, Value::Object(own).to_string());
     }
     if !map.is_empty() || errors.is_empty() {
         say(json!({ "watch": map }));

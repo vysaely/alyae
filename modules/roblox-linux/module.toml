@@ -82,7 +82,7 @@ key = "window"
 label = "Window"
 kind = "choice"
 choices = ["fullscreen", "windowed", "small"]
-hint = "small: an 800x600 window; empty: the role's (main: fullscreen, alt: small)"
+hint = "small: an 800x600 window; windowed: the size it was left at; empty: the role's (main: fullscreen, alt: small; no role: as it was left)"
 default_by = "role"
 defaults = { alt = "small" }
 

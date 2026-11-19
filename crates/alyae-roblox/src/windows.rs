@@ -8,7 +8,7 @@
 //! account's client starts, and taken back when it closes. Launches take turns, so the new client
 //! that appears belongs to the account that started it.
 
-use crate::{Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
+use crate::{Request, Role, api, fail, join_from, say, settings_xml, status, wait_for_stop};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -75,8 +75,8 @@ fn kill(pid: u32) {
 /// Who goes first when the PC is busy: a main runs at high priority; an alt at below normal
 /// (not lower: an alt starved of CPU could lose its connection), with its memory marked low
 /// priority so Windows moves an alt's memory to the page file before a main's. Many alts made
-/// a main stutter at normal priority (owner, 2026-11-17).
-fn set_priority(pid: u32, alt: bool) {
+/// a main stutter at normal priority. No role: Windows' own priority.
+fn set_priority(pid: u32, role: Role) {
     use windows_sys::Win32::System::Threading::{
         BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, MEMORY_PRIORITY_INFORMATION,
         MEMORY_PRIORITY_LOW, PROCESS_SET_INFORMATION, ProcessMemoryPriority, SetPriorityClass,
@@ -88,7 +88,7 @@ fn set_priority(pid: u32, alt: bool) {
         if h.is_null() {
             return;
         }
-        if alt {
+        if role == Role::Alt {
             SetPriorityClass(h, BELOW_NORMAL_PRIORITY_CLASS);
             let low = MEMORY_PRIORITY_INFORMATION {
                 MemoryPriority: MEMORY_PRIORITY_LOW,
@@ -99,7 +99,7 @@ fn set_priority(pid: u32, alt: bool) {
                 (&raw const low).cast(),
                 std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
             );
-        } else {
+        } else if role == Role::Main {
             SetPriorityClass(h, HIGH_PRIORITY_CLASS);
         }
         CloseHandle(h);
@@ -351,7 +351,7 @@ fn settings_before_launch(req: &Request, live: &Path) {
         let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
         props.push(settings_xml::prop("int", "FramerateCap", cap));
     }
-    if req.is_alt() {
+    if req.role() == Role::Alt {
         props.extend(settings_xml::quality(1));
         props.push(settings_xml::prop("float", "MasterVolume", 0));
     }
@@ -632,7 +632,7 @@ pub fn play(req: &Request) {
         std::thread::sleep(Duration::from_millis(500));
     };
     let _ = std::fs::write(pid_file(req), pid.to_string());
-    set_priority(pid, req.is_alt());
+    set_priority(pid, req.role());
     // the client reads its settings while it starts: a next launch that changes them waits for
     // that (`wait_for_settings_read`), one that does not starts at once
     let _ = std::fs::write(client_started_file(req), pid.to_string());
@@ -685,7 +685,7 @@ pub fn resume(req: &Request) {
             let _ = tx.send(());
         }
     });
-    set_priority(pid, req.is_alt());
+    set_priority(pid, req.role());
     status("running (found again)");
     watch_client(req, pid, &live, rx, req.get("memory") == "trim");
 }

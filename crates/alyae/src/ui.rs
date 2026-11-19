@@ -705,7 +705,6 @@ impl App {
         }
     }
 
-    /// Starts `job`'s action; Some(whether it runs a game) when it started.
     /// The Anti-AFK choice: off, or a nudge for every running game this often.
     fn anti_afk_choice(&mut self, ui: &mut egui::Ui) {
         let label = |m: u64| {
@@ -771,6 +770,7 @@ impl App {
         }
     }
 
+    /// Starts `job`'s action; Some(whether it runs a game) when it started.
     fn start_job(&mut self, job: &Job) -> Option<bool> {
         let m = self.module(&job.game).cloned()?;
         let action = m.actions.iter().find(|a| a.id == job.action).cloned()?;
@@ -3816,15 +3816,15 @@ fn set_value(a: &mut crate::store::Account, k: &str, v: &str, secret: bool) {
     }
 }
 
-/// A helper's error saying the game's servers refused for too many requests.
 /// A helper that gave up starting for lack of memory ("not enough free memory ...").
 fn is_out_of_memory(error: &str) -> bool {
     error.to_lowercase().contains("not enough free memory")
 }
 
+/// A helper's error saying the game's servers refused for too many requests.
 fn is_rate_limit(error: &str) -> bool {
     let e = error.to_lowercase();
-    e.contains("rate limit") || e.contains("too many requests") || e.contains("429")
+    e.contains("rate limit") || e.contains("too many requests")
 }
 
 #[cfg(test)]
@@ -3901,6 +3901,8 @@ mod tests {
             "Roblox is rate limiting: try again in a minute"
         ));
         assert!(!is_rate_limit("online status: Roblox answered 500"));
+        // a number that happens to hold 429 is no refusal (Roblox's 429 reads "rate limiting")
+        assert!(!is_rate_limit("Follow: 4290115 is not in a game this account can see"));
         let (mut h, dir) = window("roblox");
         let tx = h.state().tx.clone();
         for want in [60, 120, 240, 480, 600, 600] {

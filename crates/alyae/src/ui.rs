@@ -66,8 +66,9 @@ pub struct App {
     form: Option<(String, Vec<String>)>,
     /// an action for several accounts runs for one at a time: the ones still waiting
     queue: VecDeque<Job>,
-    /// the queued account whose action runs now: (account, action, the action runs a game)
-    queue_current: Option<(String, String, bool)>,
+    /// the queued account whose action runs now: (account, game, action, the action runs a
+    /// game)
+    queue_current: Option<(String, String, String, bool)>,
     /// the current queued action has ended (its Ended event came)
     queue_ended: bool,
     /// the next queued account starts no sooner than this
@@ -246,6 +247,7 @@ impl App {
                 if !problems.is_empty() {
                     app.say(problems.join("; "), true);
                 }
+                app.add_module_images();
                 app.resume_games();
             }
             Err(e) => app.fatal = Some(e),
@@ -255,6 +257,27 @@ impl App {
 
     fn module(&self, id: &str) -> Option<&Module> {
         self.modules.iter().find(|m| m.id == id)
+    }
+
+    /// Pictures a module ships for an "image" field (in the module's own folder named by the
+    /// field's `dir`) are copied into the game's folder of them when missing there, so they are
+    /// in the field's list.
+    fn add_module_images(&mut self) {
+        let mut problems = Vec::new();
+        for m in &self.modules {
+            for f in m.fields.iter().filter(|f| f.kind == "image" && !f.dir.is_empty()) {
+                let from = m.dir.join(&f.dir);
+                let to = self.dir.join("games").join(&m.id).join(&f.dir);
+                for name in images_in(&from).into_iter().filter(|n| !to.join(n).exists()) {
+                    if let Err(e) = copy_image(&from.join(&name), &to) {
+                        problems.push(format!("{name}: {e}"));
+                    }
+                }
+            }
+        }
+        if !problems.is_empty() {
+            self.say(format!("Pictures not added: {}", problems.join("; ")), true);
+        }
     }
 
     /// Whether `action` is the resume action of `account`'s game.
@@ -442,7 +465,7 @@ impl App {
                     let current = self
                         .queue_current
                         .as_ref()
-                        .is_some_and(|(a, _, _)| *a == account);
+                        .is_some_and(|(a, ..)| *a == account);
                     // the computer has no room for more: the accounts after would only wait in
                     // vain too, so the queue stops (the running ones keep running)
                     if current && is_out_of_memory(&text) && !self.queue.is_empty() {
@@ -576,7 +599,7 @@ impl App {
                     if self
                         .queue_current
                         .as_ref()
-                        .is_some_and(|(a, act, _)| *a == account && *act == action)
+                        .is_some_and(|(a, _, act, _)| *a == account && *act == action)
                     {
                         self.queue_ended = true;
                         if ok {
@@ -629,16 +652,15 @@ impl App {
             );
         }
         // only files here (Settings): nothing to pace, every account at once. One account on
-        // its own does not wait behind a queue either (owner, 2026-11-17): it starts now, and
-        // leaves the queue if it was waiting there (the helper still limits games loading at
-        // once and wants free memory)
+        // its own does not wait behind a queue either: it starts now, and leaves the queue if
+        // it was waiting there (the helper still limits games loading at once and wants free
+        // memory)
         if action.local || ids.len() == 1 {
             if !action.local {
                 self.queue
                     .retain(|j| !(ids.contains(&j.account) && j.action == action.id));
             }
             // one account on its own: the helper starts it without waiting for free RAM
-            // (owner, 2026-11-18)
             let mut inputs = inputs;
             if !action.local {
                 inputs.insert("_alone".into(), "1".into());
@@ -654,7 +676,7 @@ impl App {
             return;
         }
         // one account at a time, a few seconds apart: many sign-ins or joins at once from one
-        // connection get it refused by the game's servers (owner, 2026-11-17)
+        // connection get it refused by the game's servers
         for id in ids {
             self.queue.push_back(Job {
                 game: game.clone(),
@@ -670,7 +692,7 @@ impl App {
     /// the gap after it has passed.
     fn advance_queue(&mut self) {
         let now = std::time::Instant::now();
-        if let Some((id, action, runs)) = self.queue_current.clone() {
+        if let Some((id, game, action, runs)) = self.queue_current.clone() {
             // ended, or a game that is up and running ("running, loading" counts: the helper
             // limits how many load at once itself)
             let done = self.queue_ended
@@ -684,7 +706,7 @@ impl App {
             }
             self.queue_current = None;
             if !self.queue.is_empty() {
-                self.queue_next = Some(now + self.queue_gap(&action) + self.queue_backoff);
+                self.queue_next = Some(now + self.queue_gap(&game, &action) + self.queue_backoff);
             }
         }
         if let Some(at) = self.queue_next {
@@ -698,14 +720,13 @@ impl App {
         }
         while let Some(job) = self.queue.pop_front() {
             if let Some(runs) = self.start_job(&job) {
-                self.queue_current = Some((job.account, job.action, runs));
+                self.queue_current = Some((job.account, job.game, job.action, runs));
                 self.queue_ended = false;
                 return;
             }
         }
     }
 
-    /// Starts `job`'s action; Some(whether it runs a game) when it started.
     /// The Anti-AFK choice: off, or a nudge for every running game this often.
     fn anti_afk_choice(&mut self, ui: &mut egui::Ui) {
         let label = |m: u64| {
@@ -771,6 +792,7 @@ impl App {
         }
     }
 
+    /// Starts `job`'s action; Some(whether it runs a game) when it started.
     fn start_job(&mut self, job: &Job) -> Option<bool> {
         let m = self.module(&job.game).cloned()?;
         let action = m.actions.iter().find(|a| a.id == job.action).cloned()?;
@@ -822,11 +844,11 @@ impl App {
 
     /// The wait after one account of `action` before the next: the module's `gap`, else the
     /// usual one.
-    fn queue_gap(&self, action: &str) -> Duration {
+    /// The pause after `game`'s `action` before the next queued account starts (the queue
+    /// keeps going while another game is shown).
+    fn queue_gap(&self, game: &str, action: &str) -> Duration {
         let gap = self
-            .game
-            .as_deref()
-            .and_then(|g| self.module(g))
+            .module(game)
             .and_then(|m| m.actions.iter().find(|a| a.id == action))
             .map_or(0, |a| a.gap);
         if gap == 0 {
@@ -1633,8 +1655,7 @@ impl App {
             return String::new();
         }
         let role = match a.value("role") {
-            "main" => "H",
-            "alt" => "L",
+            r @ ("main" | "alt") => r,
             _ => "",
         };
         let fps = match m.value_of(a, "fps").parse::<u32>() {
@@ -2341,38 +2362,63 @@ impl App {
         match done {
             Some(true) => {
                 let ids = std::mem::take(&mut self.confirm_remove);
-                for id in &ids {
-                    // the module's files go first (quick); the row goes even when that fails
-                    let account = self.accounts.iter().find(|a| &a.id == id).cloned();
-                    if let Some(a) = account
-                        && let Some(m) = self.module(&a.game).filter(|m| !m.on_remove.is_empty())
-                        && let Err(e) = module::run_and_wait(m, &m.on_remove, &a, &self.dir)
-                    {
-                        self.say(format!("{}: files not deleted: {e}", self.title(&a)), true);
-                    }
-                    let res = self.store.as_ref().map(|s| s.delete(id));
-                    match res {
-                        Some(Ok(())) => {
-                            self.accounts.retain(|a| &a.id != id);
-                            self.selected.remove(id);
-                            if self.focus.as_ref() == Some(id) {
-                                self.focus = None;
-                                self.draft = None;
-                            }
-                        }
-                        Some(Err(e)) => self.say(format!("Not removed: {e}"), true),
-                        None => {}
-                    }
-                }
+                self.remove_accounts(&ids);
             }
             Some(false) => self.confirm_remove.clear(),
             None => {}
         }
     }
 
-    /// "Close all games", once confirmed: the queue stops, every game Alyae runs is asked to
-    /// stop, and the module's close-all action closes the rest (ones started elsewhere or lost
-    /// track of), on a thread of its own.
+    /// Removes the accounts `ids` once confirmed. One whose game runs stays (its game would keep
+    /// using the files). The module's files go on a thread after the row, as a big profile
+    /// folder takes a while; a failure there is a message.
+    fn remove_accounts(&mut self, ids: &[String]) {
+        for id in ids {
+            let Some(a) = self.accounts.iter().find(|a| &a.id == id).cloned() else {
+                continue;
+            };
+            if self.running.contains_key(id) {
+                self.say(
+                    format!("{}: not removed: close its game first", self.title(&a)),
+                    true,
+                );
+                continue;
+            }
+            match self.store.as_ref().map(|s| s.delete(id)) {
+                Some(Ok(())) => {
+                    self.accounts.retain(|a| &a.id != id);
+                    self.selected.remove(id);
+                    if self.focus.as_ref() == Some(id) {
+                        self.focus = None;
+                        self.draft = None;
+                    }
+                }
+                Some(Err(e)) => {
+                    self.say(format!("Not removed: {e}"), true);
+                    continue;
+                }
+                None => continue,
+            }
+            if let Some(m) = self.module(&a.game).filter(|m| !m.on_remove.is_empty()) {
+                let (m, dir, tx, title) =
+                    (m.clone(), self.dir.clone(), self.tx.clone(), self.title(&a));
+                let ctx = self.ctx.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = module::run_and_wait(&m, &m.on_remove, &a, &dir) {
+                        let _ = tx.send(Event::Note {
+                            text: format!("{title}: files not deleted: {e}"),
+                            bad: true,
+                        });
+                        if let Some(c) = ctx {
+                            c.request_repaint();
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// "Close all games", asking first.
     fn close_all_dialog(&mut self, ctx: &egui::Context) {
         if !self.confirm_close_all {
             return;
@@ -2399,27 +2445,42 @@ impl App {
         match done {
             Some(true) => {
                 self.confirm_close_all = false;
-                self.queue.clear();
-                self.queue_next = None;
-                for r in self.running.values_mut() {
-                    r.stop();
-                }
-                let dir = self.dir.clone();
-                let account = Account {
-                    id: "all".into(),
-                    game: m.id.clone(),
-                    ..Default::default()
-                };
-                std::thread::spawn(move || {
-                    if let Err(e) = module::run_and_wait(&m, &m.close_all, &account, &dir) {
-                        crate::log::line("", &format!("Close all games: {e}"));
-                    }
-                });
-                self.say("Closing all games", false);
+                self.close_all_games(m);
             }
             Some(false) => self.confirm_close_all = false,
             None => {}
         }
+    }
+
+    /// "Close all games", once confirmed: the queue stops, every game of `m` Alyae runs is asked
+    /// to stop (another game's keep playing), and the module's close-all action closes the rest
+    /// (ones started elsewhere or lost track of) on a thread of its own; what it said, or its
+    /// error, goes to the message bar.
+    fn close_all_games(&mut self, m: Module) {
+        self.queue.clear();
+        self.queue_next = None;
+        for (id, r) in self.running.iter_mut() {
+            if self.accounts.iter().any(|a| &a.id == id && a.game == m.id) {
+                r.stop();
+            }
+        }
+        let (dir, tx, ctx) = (self.dir.clone(), self.tx.clone(), self.ctx.clone());
+        let account = Account {
+            id: "all".into(),
+            game: m.id.clone(),
+            ..Default::default()
+        };
+        std::thread::spawn(move || {
+            let (text, bad) = match module::run_and_wait(&m, &m.close_all, &account, &dir) {
+                Ok(said) => (said.unwrap_or_else(|| "All games closed".into()), false),
+                Err(e) => (format!("Close all games: {e}"), true),
+            };
+            let _ = tx.send(Event::Note { text, bad });
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        });
+        self.say("Closing all games", false);
     }
 
     /// Runs `action`, or first opens its form when it asks for values or a confirmation.
@@ -3816,15 +3877,15 @@ fn set_value(a: &mut crate::store::Account, k: &str, v: &str, secret: bool) {
     }
 }
 
-/// A helper's error saying the game's servers refused for too many requests.
 /// A helper that gave up starting for lack of memory ("not enough free memory ...").
 fn is_out_of_memory(error: &str) -> bool {
     error.to_lowercase().contains("not enough free memory")
 }
 
+/// A helper's error saying the game's servers refused for too many requests.
 fn is_rate_limit(error: &str) -> bool {
     let e = error.to_lowercase();
-    e.contains("rate limit") || e.contains("too many requests") || e.contains("429")
+    e.contains("rate limit") || e.contains("too many requests")
 }
 
 #[cfg(test)]
@@ -3895,12 +3956,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods);
     }
 
+    /// The Mode column names the role as the Role field does.
+    #[test]
+    fn mode_names_the_role() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let mut a = h.state().new_account(&m);
+        set_value(&mut a, "role", "alt", false);
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
+        set_value(&mut a, "role", "main", false);
+        assert_eq!(h.state().mode(&m, &a), "main \u{2022} 330 FPS");
+        set_value(&mut a, "role", "", false);
+        assert_eq!(h.state().mode(&m, &a), "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn rate_limit_backs_off() {
         assert!(is_rate_limit(
             "Roblox is rate limiting: try again in a minute"
         ));
         assert!(!is_rate_limit("online status: Roblox answered 500"));
+        // a number that happens to hold 429 is no refusal (Roblox's 429 reads "rate limiting")
+        assert!(!is_rate_limit("Follow: 4290115 is not in a game this account can see"));
         let (mut h, dir) = window("roblox");
         let tx = h.state().tx.clone();
         for want in [60, 120, 240, 480, 600, 600] {
@@ -4005,6 +4083,102 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods);
     }
 
+    /// The cursor the Roblox Linux module ships is in the field's list from the start.
+    #[test]
+    #[cfg(unix)]
+    fn shipped_cursor_is_listed() {
+        let (_h, dir) = window("roblox");
+        let cursors = dir.join("games/roblox/cursors");
+        assert_eq!(images_in(&cursors), ["diamond_cross.png"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Close all games stops this game's accounts only, and shows what the close-all action
+    /// said (here: that the test module has no helper for it).
+    #[test]
+    #[cfg(unix)]
+    fn close_all_stops_this_game_only() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        for g in ["t", "u"] {
+            std::fs::create_dir_all(mods.join(g)).unwrap();
+            std::fs::write(
+                mods.join(format!("{g}/module.toml")),
+                format!(
+                    "id = \"{g}\"\nname = \"{g}\"\nclose_all = \"close_all\"\n\
+                     [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\ncommand = 'sleep 30'\n"
+                ),
+            )
+            .unwrap();
+        }
+        let (mut h, dir) = window_with("t", mods.clone());
+        let mut ids = Vec::new();
+        for g in ["t", "u"] {
+            let m = h.state().module(g).cloned().unwrap();
+            let a = h.state().new_account(&m);
+            assert!(h.state_mut().save(&a));
+            h.state_mut().game = Some(g.into());
+            h.state_mut().run_action("play", vec![a.id.clone()]);
+            ids.push(a.id);
+        }
+        let t = h.state().module("t").cloned().unwrap();
+        h.state_mut().close_all_games(t);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut ended = |id: &str| {
+            matches!(
+                h.state_mut().running.get_mut(id).unwrap().child.try_wait(),
+                Ok(Some(_))
+            )
+        };
+        assert!(ended(&ids[0]), "t's game still runs");
+        assert!(!ended(&ids[1]), "u's game was stopped");
+        for _ in 0..250 {
+            h.state_mut().poll();
+            if h.state().message.as_ref().is_some_and(|(t, _)| t != "Closing all games") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (text, bad) = h.state().message.clone().unwrap();
+        assert!(bad && text.starts_with("Close all games: t has no helper"), "{text}");
+        h.state_mut().running.get_mut(&ids[1]).unwrap().stop();
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// An account whose game runs is not removed; the others are.
+    #[test]
+    #[cfg(unix)]
+    fn running_account_is_not_removed() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        std::fs::write(
+            mods.join("t/module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\n[[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\ncommand = 'sleep 30'\n",
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let (mut playing, idle) = (h.state().new_account(&m), h.state().new_account(&m));
+        set_value(&mut playing, "login", "playing", false);
+        assert!(h.state_mut().save(&playing) && h.state_mut().save(&idle));
+        h.state_mut().run_action("play", vec![playing.id.clone()]);
+        assert!(h.state().running.contains_key(&playing.id));
+        h.state_mut()
+            .remove_accounts(&[playing.id.clone(), idle.id.clone()]);
+        let ids: Vec<&str> = h.state().accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, [playing.id.as_str()]);
+        assert_eq!(
+            h.state().message,
+            Some(("playing: not removed: close its game first".into(), true))
+        );
+        for r in h.state_mut().running.values_mut() {
+            r.stop();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
     /// An action for several accounts runs for one at a time, in order.
     #[test]
     #[cfg(unix)]
@@ -4054,22 +4228,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods);
     }
 
+    /// The gap after a queued action is its own game's, also while another game is shown.
+    #[test]
+    fn queue_gap_follows_the_job() {
+        let (mut h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let (a, next) = (h.state().new_account(&m), h.state().new_account(&m));
+        assert!(h.state_mut().save(&a) && h.state_mut().save(&next));
+        h.state_mut().queue_current = Some((a.id, "roblox".into(), "login".into(), false));
+        h.state_mut().queue_ended = true;
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "login".into(),
+            account: next.id,
+            inputs: Values::default(),
+        });
+        h.state_mut().game = Some("generic".into());
+        h.state_mut().advance_queue();
+        let wait = h.state().queue_next.unwrap() - std::time::Instant::now();
+        assert!(wait > Duration::from_secs(14), "waited {wait:?}, not Log in's 15 s");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// An action's own `gap` spaces its queue (Log in: 15 seconds); a throttled one makes the
     /// queue wait 2 minutes more, doubling to 10, and a run that works ends the extra wait.
     #[test]
     fn queue_gap_and_throttle_pause() {
         let (mut h, dir) = window("roblox");
         // the repository's Roblox modules: Log in 15 seconds apart, Refresh the usual gap
-        assert_eq!(h.state().queue_gap("login"), Duration::from_secs(15));
-        assert_eq!(h.state().queue_gap("check"), QUEUE_GAP);
+        assert_eq!(h.state().queue_gap("roblox", "login"), Duration::from_secs(15));
+        assert_eq!(h.state().queue_gap("roblox", "check"), QUEUE_GAP);
         // joins are not throttled like sign-ins: 2 seconds apart
-        assert_eq!(h.state().queue_gap("play"), Duration::from_secs(2));
-        assert_eq!(h.state().queue_gap("follow"), Duration::from_secs(2));
+        assert_eq!(h.state().queue_gap("roblox", "play"), Duration::from_secs(2));
+        assert_eq!(h.state().queue_gap("roblox", "follow"), Duration::from_secs(2));
         let m = h.state().module("roblox").cloned().unwrap();
         let a = h.state().new_account(&m);
         assert!(h.state_mut().save(&a));
         let tx = h.state().tx.clone();
-        h.state_mut().queue_current = Some((a.id.clone(), "login".into(), false));
+        h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "login".into(), false));
         // one more waiting, so the pause is announced rather than a plain error
         let waiting = h.state().new_account(&m);
         h.state_mut().queue.push_back(Job {
@@ -4110,7 +4306,7 @@ mod tests {
             account: "waiting".into(),
             inputs: Values::default(),
         });
-        h.state_mut().queue_current = Some((a.id.clone(), "play".into(), true));
+        h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "play".into(), true));
         tx.send(Event::Error {
             account: a.id.clone(),
             text: "not enough free memory for another Roblox: 3.1 GB free after 3 min, 6 GB needed"
@@ -4131,7 +4327,7 @@ mod tests {
         let (a, b) = (h.state().new_account(&m), h.state().new_account(&m));
         assert!(h.state_mut().save(&a) && h.state_mut().save(&b));
         // a queue busy with another account, a and b waiting in it
-        h.state_mut().queue_current = Some(("busy".into(), "play".into(), true));
+        h.state_mut().queue_current = Some(("busy".into(), "roblox".into(), "play".into(), true));
         for id in [&a.id, &b.id] {
             h.state_mut().queue.push_back(Job {
                 game: "generic".into(),

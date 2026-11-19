@@ -82,7 +82,7 @@ key = "window"
 label = "Window"
 kind = "choice"
 choices = ["fullscreen", "windowed", "small"]
-hint = "small: an 800x600 window; empty: the role's (main: fullscreen, alt: small)"
+hint = "small: an 800x600 window; windowed: the size it was left at; empty: the role's (main: fullscreen, alt: small; no role: as it was left)"
 default_by = "role"
 defaults = { alt = "small" }
 
@@ -132,9 +132,6 @@ gap = 15
 id = "browser"
 label = "Open in browser"
 
-# online status of every account, every 15 s while the window is shown and focused; the helper
-# gets only the user IDs and asks Roblox without a cookie, so no account vouches for the others
-# (adding secret = "cookie" makes each account ask about itself only, with its own cookie)
 # the Servers button: the public servers of every place of the game in Place ID (sub places too),
 # asked without a cookie, one place at a time as fast as Roblox allows (3 lists a minute) while
 # its window is open; a server's Join joins it in its own place
@@ -143,6 +140,9 @@ action = "servers"
 place = "place"
 server = "server"
 
+# online status of every account, every 15 s while the window is shown and focused; the helper
+# gets only the user IDs and asks Roblox without a cookie, so no account vouches for the others
+# (adding secret = "cookie" makes each account ask about itself only, with its own cookie)
 [watch]
 action = "presence"
 every = 15

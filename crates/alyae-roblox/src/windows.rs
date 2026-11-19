@@ -8,7 +8,7 @@
 //! account's client starts, and taken back when it closes. Launches take turns, so the new client
 //! that appears belongs to the account that started it.
 
-use crate::{Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
+use crate::{Request, Role, Stop, api, fail, join_from, say, settings_xml, status};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+    CreateMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
     PROCESS_TERMINATE, ReleaseMutex, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -75,8 +75,8 @@ fn kill(pid: u32) {
 /// Who goes first when the PC is busy: a main runs at high priority; an alt at below normal
 /// (not lower: an alt starved of CPU could lose its connection), with its memory marked low
 /// priority so Windows moves an alt's memory to the page file before a main's. Many alts made
-/// a main stutter at normal priority (owner, 2026-11-17).
-fn set_priority(pid: u32, alt: bool) {
+/// a main stutter at normal priority. No role: Windows' own priority.
+fn set_priority(pid: u32, role: Role) {
     use windows_sys::Win32::System::Threading::{
         BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, MEMORY_PRIORITY_INFORMATION,
         MEMORY_PRIORITY_LOW, PROCESS_SET_INFORMATION, ProcessMemoryPriority, SetPriorityClass,
@@ -88,7 +88,7 @@ fn set_priority(pid: u32, alt: bool) {
         if h.is_null() {
             return;
         }
-        if alt {
+        if role == Role::Alt {
             SetPriorityClass(h, BELOW_NORMAL_PRIORITY_CLASS);
             let low = MEMORY_PRIORITY_INFORMATION {
                 MemoryPriority: MEMORY_PRIORITY_LOW,
@@ -99,7 +99,7 @@ fn set_priority(pid: u32, alt: bool) {
                 (&raw const low).cast(),
                 std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
             );
-        } else {
+        } else if role == Role::Main {
             SetPriorityClass(h, HIGH_PRIORITY_CLASS);
         }
         CloseHandle(h);
@@ -132,7 +132,7 @@ const TRIM_EVERY: Duration = Duration::from_secs(120);
 
 /// RAM that must be free before another client starts while others still load (room for them
 /// to grow too): a client loading a big map takes gigabytes, and many loading at once froze a
-/// 32 GB PC (owner, 2026-11-17).
+/// 32 GB PC.
 const FREE_TO_START_MB: u64 = 6144;
 /// ... and when it would be the only one loading: one Gaia load is about 2.6 GB.
 const FREE_TO_START_ALONE_MB: u64 = 3584;
@@ -196,9 +196,10 @@ fn trim_now_file(req: &Request) -> PathBuf {
     req.data_dir.join("settings").join("trim_now")
 }
 
-/// Waits (in the launch turn, holding load slot `slot`) until there is room for one more
-/// client, at most `crate::MEMORY_WAIT`; asks the running alts to trim meanwhile.
-fn wait_for_memory(req: &Request, slot: usize) {
+/// Waits (holding load slot `slot`) until there is room for one more client, at most
+/// `crate::MEMORY_WAIT`; asks the running alts to trim meanwhile. A stop ends the wait and the
+/// helper.
+fn wait_for_memory(req: &Request, slot: usize, stop: &mut Stop) {
     let ask = trim_now_file(req);
     let need = || {
         if others_loading(slot) {
@@ -208,6 +209,7 @@ fn wait_for_memory(req: &Request, slot: usize) {
         }
     };
     crate::wait_for_memory(start_room_mb, need, || {
+        stop.end_if_asked();
         let _ = std::fs::write(&ask, "");
     });
 }
@@ -351,7 +353,7 @@ fn settings_before_launch(req: &Request, live: &Path) {
         let cap = if fps == 0 || fps >= 1000 { 10000 } else { fps };
         props.push(settings_xml::prop("int", "FramerateCap", cap));
     }
-    if req.is_alt() {
+    if req.role() == Role::Alt {
         props.extend(settings_xml::quality(1));
         props.push(settings_xml::prop("float", "MasterVolume", 0));
     }
@@ -379,7 +381,7 @@ fn settings_after_exit(req: &Request, live: &Path) {
     }
     // the last client gone: the person's own settings come back (in the launch turn, so a
     // client starting right now is not handed them)
-    let _turn = LaunchTurn::take();
+    let _turn = LaunchTurn::take(|| {});
     settings_xml::give_back_original(live, &original_settings(req), clients().is_empty());
 }
 
@@ -450,7 +452,8 @@ const LOAD_SLOTS: usize = 3;
 struct LoadSlot(HANDLE, usize);
 
 impl LoadSlot {
-    fn take() -> Self {
+    /// Waits for a free slot; a stop meanwhile ends the helper.
+    fn take(stop: &mut Stop) -> Self {
         use windows_sys::Win32::Foundation::{WAIT_ABANDONED_0, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::WaitForMultipleObjects;
         // SAFETY: named mutexes; a wait returns with exactly one of them owned
@@ -471,7 +474,10 @@ impl LoadSlot {
             let mut r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, 0);
             if r == windows_sys::Win32::Foundation::WAIT_TIMEOUT {
                 status(&format!("waiting: {LOAD_SLOTS} games are loading"));
-                r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, INFINITE);
+            }
+            while r == windows_sys::Win32::Foundation::WAIT_TIMEOUT {
+                stop.end_if_asked();
+                r = WaitForMultipleObjects(LOAD_SLOTS as u32, slots.as_ptr(), 0, 250);
             }
             let i = if r >= WAIT_ABANDONED_0 {
                 r - WAIT_ABANDONED_0
@@ -508,7 +514,8 @@ impl Drop for LoadSlot {
 struct LaunchTurn(HANDLE);
 
 impl LaunchTurn {
-    fn take() -> Self {
+    /// Waits for the turn, calling `waiting` every 250 ms meanwhile.
+    fn take(mut waiting: impl FnMut()) -> Self {
         // SAFETY: named mutex; the wait returns when this process owns it (or its owner died)
         unsafe {
             let h = CreateMutexW(
@@ -519,7 +526,9 @@ impl LaunchTurn {
             if h.is_null() {
                 fail("cannot create the launch lock");
             }
-            WaitForSingleObject(h, INFINITE);
+            while WaitForSingleObject(h, 250) == windows_sys::Win32::Foundation::WAIT_TIMEOUT {
+                waiting();
+            }
             LaunchTurn(h)
         }
     }
@@ -541,6 +550,8 @@ pub fn play(req: &Request) {
         fail("no cookie: paste the .ROBLOSECURITY value into Cookie");
     }
     let live = live_settings().unwrap_or_else(|| fail("LOCALAPPDATA is not set"));
+    // a stop from Alyae ends the waits below, or the game once it runs
+    let mut stop = Stop::listen();
     let j = join_from(req);
     // held for as long as this account's client runs: later clients find it taken and still start
     // SAFETY: named mutex creation; the handle closes when this process ends
@@ -549,9 +560,9 @@ pub fn play(req: &Request) {
         CreateMutexW(std::ptr::null(), 1, wide("ROBLOX_singletonEvent").as_ptr());
     }
     // up to LOAD_SLOTS clients load at once, each only with room for it; one starts at a time
-    // (the turn). Signing in comes after the waits, so the one-time ticket is fresh
-    let slot = LoadSlot::take();
-    let turn = LaunchTurn::take();
+    // (the turn, taken after the memory wait so an account waiting for memory does not hold up
+    // one started on its own). Signing in comes after the waits, so the one-time ticket is fresh
+    let slot = LoadSlot::take(&mut stop);
     // one account started on its own does not wait for free RAM; it still will not start
     // with the commit (RAM plus page file) all but used up, which would crash games
     if req.input("_alone") == "1" {
@@ -563,8 +574,10 @@ pub fn play(req: &Request) {
             ));
         }
     } else {
-        wait_for_memory(req, slot.1);
+        wait_for_memory(req, slot.1, &mut stop);
     }
+    let turn = LaunchTurn::take(|| stop.end_if_asked());
+    stop.end_if_asked();
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();
@@ -632,16 +645,10 @@ pub fn play(req: &Request) {
         std::thread::sleep(Duration::from_millis(500));
     };
     let _ = std::fs::write(pid_file(req), pid.to_string());
-    set_priority(pid, req.is_alt());
+    set_priority(pid, req.role());
     // the client reads its settings while it starts: a next launch that changes them waits for
     // that (`wait_for_settings_read`), one that does not starts at once
     let _ = std::fs::write(client_started_file(req), pid.to_string());
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if wait_for_stop() {
-            let _ = tx.send(());
-        }
-    });
     // the next client may start now; this one keeps its loading slot until it has loaded
     // (and, set to trim, been trimmed)
     drop(turn);
@@ -653,7 +660,7 @@ pub fn play(req: &Request) {
     }
     drop(slot);
     status("running");
-    watch_client(req, pid, &live, rx, trim);
+    watch_client(req, pid, &live, &mut stop, trim);
 }
 
 /// The "Close all games" button: every Roblox client closes, the ones Alyae lost track of too.
@@ -679,15 +686,10 @@ pub fn resume(req: &Request) {
         return;
     };
     let live = live_settings().unwrap_or_else(|| fail("LOCALAPPDATA is not set"));
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if wait_for_stop() {
-            let _ = tx.send(());
-        }
-    });
-    set_priority(pid, req.is_alt());
+    let mut stop = Stop::listen();
+    set_priority(pid, req.role());
     status("running (found again)");
-    watch_client(req, pid, &live, rx, req.get("memory") == "trim");
+    watch_client(req, pid, &live, &mut stop, req.get("memory") == "trim");
 }
 
 /// While the client runs: a stop from Alyae ends it; set to `trim`, its memory is trimmed every
@@ -697,7 +699,7 @@ fn watch_client(
     req: &Request,
     pid: u32,
     live: &Path,
-    stop: std::sync::mpsc::Receiver<()>,
+    stop: &mut Stop,
     trim: bool,
 ) {
     let ask = trim_now_file(req);
@@ -706,7 +708,7 @@ fn watch_client(
     let mut trimmed_at = SystemTime::now();
     let mut next_check = Instant::now();
     while alive(pid) {
-        if stop.try_recv().is_ok() {
+        if stop.asked() {
             kill(pid);
             break;
         }

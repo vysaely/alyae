@@ -27,6 +27,13 @@ for m in modules/*/; do
     case "$name" in *-windows) continue ;; esac
     mkdir -p "$SHARE/alyae/modules/$name"
     install -m644 "$m/module.toml" "$SHARE/alyae/modules/$name/module.toml"
+    # pictures the module ships for its picture fields (Roblox: a shift-lock cursor)
+    for pic in "$m"/*/*.png; do
+        [ -e "$pic" ] || continue
+        sub=$(basename "$(dirname "$pic")")
+        mkdir -p "$SHARE/alyae/modules/$name/$sub"
+        install -m644 "$pic" "$SHARE/alyae/modules/$name/$sub/"
+    done
 done
 mkdir -p "$SHARE/icons/hicolor/256x256/apps"
 install -m644 assets/alyae.png "$SHARE/icons/hicolor/256x256/apps/alyae.png"

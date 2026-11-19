@@ -4,7 +4,7 @@
 //! are left out.
 
 use crate::files::{clear, remove};
-use crate::{Join, Request, api, fail, join_from, say, settings_xml, status, wait_for_stop};
+use crate::{Join, Request, Role, Stop, api, fail, join_from, say, settings_xml, status};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
@@ -64,6 +64,21 @@ fn find_mocktail() -> Option<Mocktail> {
         lib,
         data: data_home.join("mocktail"),
     })
+}
+
+/// What does not work with the installed Mocktail, from build.sh's mark in its folder
+/// (`marker`) and the build this helper expects (`ALYAE_MOCKTAIL_BUILD`, from the module's
+/// patches); None when it is that build.
+fn build_warning(marker: Option<&str>, expected: &str) -> Option<&'static str> {
+    match marker.map(str::trim) {
+        Some(m) if m == expected => None,
+        Some(_) => Some(
+            "Mocktail was built with older Alyae patches: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix may do nothing. Run modules/roblox-linux/mocktail/build.sh again",
+        ),
+        None => Some(
+            "This Mocktail is not Alyae's build: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix do nothing. Run modules/roblox-linux/mocktail/build.sh",
+        ),
+    }
 }
 
 fn mkdir(p: &Path) {
@@ -183,8 +198,19 @@ fn running_pid(program: &Path) -> Option<i32> {
     })
 }
 
-/// Every account's running Mocktail game, as process IDs.
-fn running_games() -> Vec<i32> {
+/// Alyae's copy of Mocktail for an account (`program_name`).
+fn alyae_game(name: &str) -> bool {
+    name.starts_with("mocktail_alyae_")
+}
+
+/// Any Mocktail game: Alyae's copies, AEAM's (`mocktail_acc_...`) and the plain program; not
+/// Mocktail's helper programs (mocktail_webview_helper, mocktail_cookie_helper, ...).
+fn any_game(name: &str) -> bool {
+    alyae_game(name) || name.starts_with("mocktail_acc_") || name == "mocktail"
+}
+
+/// The running games whose program name `pick` takes, as process IDs.
+fn running_games(pick: fn(&str) -> bool) -> Vec<i32> {
     let Ok(procs) = fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -195,7 +221,7 @@ fn running_games() -> Vec<i32> {
             let c = fs::read(p.path().join("cmdline")).ok()?;
             let argv0 = c.split(|b| *b == 0).next().unwrap_or(&[]);
             let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
-            name.to_str()?.starts_with("mocktail_alyae_").then_some(pid)
+            pick(name.to_str()?).then_some(pid)
         })
         .collect()
 }
@@ -204,29 +230,44 @@ fn running_games() -> Vec<i32> {
 /// anti-AFK does), so Roblox counts the account as active. Each game names its nudge file in
 /// its environment; a game started before that existed has none and is skipped.
 pub fn anti_afk() {
-    let (mut nudged, mut old) = (0, 0);
-    for pid in running_games() {
+    let (mut nudged, mut old, mut failed) = (0, 0, Vec::new());
+    for pid in running_games(alyae_game) {
         let env = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
         let file = env
             .split(|b| *b == 0)
             .find_map(|kv| kv.strip_prefix(b"MOCKTAIL_NUDGE_FILE="))
             .map(|v| PathBuf::from(std::ffi::OsStr::from_bytes(v)));
         match file {
-            Some(f) if fs::write(&f, format!("{:?}", std::time::SystemTime::now())).is_ok() => nudged += 1,
-            _ => old += 1,
+            None => old += 1,
+            Some(f) => match fs::write(&f, format!("{:?}", std::time::SystemTime::now())) {
+                Ok(()) => nudged += 1,
+                Err(e) => failed.push(format!("{}: {e}", f.display())),
+            },
         }
     }
+    match nudge_report(nudged, old, &failed) {
+        Ok(text) => status(&text),
+        Err(text) => fail(&text),
+    }
+}
+
+/// What Anti-AFK says after a round; Err when a nudge file could not be written.
+fn nudge_report(nudged: usize, old: usize, failed: &[String]) -> Result<String, String> {
     let mut text = format!("{nudged} games nudged");
     if old > 0 {
         text += &format!(", {old} started before Anti-AFK existed (restart them)");
     }
-    status(&text);
+    if failed.is_empty() {
+        Ok(text)
+    } else {
+        Err(format!("{text}, {} not: {}", failed.len(), failed.join("; ")))
+    }
 }
 
-/// The "Close all games" button: every account's Mocktail game (each runs as its own
-/// `mocktail_alyae_...` program) is asked to end, and made to after 4 s.
+/// The "Close all games" button: every Mocktail game, also ones Alyae did not start (AEAM's,
+/// plain Mocktail), is asked to end, and made to after 4 s.
 pub fn close_all() {
-    let games = running_games;
+    let games = || running_games(any_game);
     let all = games();
     for pid in &all {
         // SAFETY: plain signal to a process ID
@@ -245,22 +286,23 @@ pub fn close_all() {
 
 /// The Resume action, when Alyae opens: if this account's game still runs from before (Alyae
 /// was closed, the game was left running), it counts as running again until it ends, and Stop
-/// ends it. No game: ends at once, saying nothing.
+/// ends it; at its end a renewed cookie is saved as after Join Server. No game: a renewed cookie
+/// a game left while Alyae was closed is saved; otherwise it ends at once, saying nothing.
 pub fn resume(req: &Request) {
-    let Some(m) = find_mocktail() else { return };
-    let Some(pid) = running_pid(&m.lib.join(program_name(req))) else {
+    let profile = profile_dir(req, &req.data_dir);
+    let cookie = req.cookie();
+    let pid = find_mocktail().and_then(|m| running_pid(&m.lib.join(program_name(req))));
+    let Some(pid) = pid else {
+        if profile.join(PICKUP).exists() {
+            after_game(&profile, &cookie, false);
+        }
         return;
     };
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if wait_for_stop() {
-            let _ = tx.send(());
-        }
-    });
+    let mut stop = Stop::listen();
     status("running (found again)");
     let alive = || Path::new(&format!("/proc/{pid}")).exists();
     while alive() {
-        if rx.try_recv().is_ok() {
+        if stop.asked() {
             status("stopping");
             // SAFETY: plain signal to a process ID
             unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -276,12 +318,45 @@ pub fn resume(req: &Request) {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    after_game(&profile, &cookie, stop.alyae_gone);
+}
+
+/// Left in a profile by a game that ended while Alyae was closed: its data/auth sign-in may hold
+/// a renewed cookie for the next start of Alyae to save.
+const PICKUP: &str = "renewed-cookie-pending";
+
+/// The cookie Mocktail kept in data/auth when it is one Roblox renewed (not `cookie`).
+fn renewed_cookie(profile: &Path, cookie: &str) -> Option<String> {
+    let text = fs::read_to_string(profile.join("data/auth/roblox.cookie")).ok()?;
+    let renewed = api::clean_cookie(&text);
+    (renewed != cookie && renewed.starts_with("_|WARNING")).then_some(renewed)
+}
+
+/// After a game ended: a cookie Roblox renewed meanwhile (Mocktail keeps the session in
+/// data/auth) goes to Alyae, and the plain-text sign-in files go. With Alyae closed nobody would
+/// read it: Mocktail's file stays, marked for the next start of Alyae (`resume`).
+fn after_game(profile: &Path, cookie: &str, alyae_gone: bool) {
+    let _ = fs::remove_file(profile.join("roblox.cookie"));
+    let (kept, pickup) = (profile.join("data/auth/roblox.cookie"), profile.join(PICKUP));
+    if alyae_gone {
+        if kept.exists() {
+            let _ = write_private(&pickup, "");
+        }
+        return;
+    }
+    if let Some(renewed) = renewed_cookie(profile, cookie) {
+        say(json!({ "set": { "cookie": renewed } }));
+    }
+    for f in [kept, pickup] {
+        let _ = fs::remove_file(f);
+    }
 }
 use std::os::unix::ffi::OsStrExt;
 
 /// Logical CPUs for alts: the upper ~35% of physical cores (with their SMT siblings), so a busy
-/// alt never shares a core with the main. (main, alt) sets; None when there is nothing to split.
-fn cpu_sets() -> Option<(Vec<usize>, Vec<usize>)> {
+/// alt never shares a core with the main. A main is not pinned: with no alt running it has every
+/// core, and the alts are fenced in anyway. None when there is nothing to split.
+fn alt_cpus() -> Option<Vec<usize>> {
     let n = std::thread::available_parallelism().map_or(1, |n| n.get());
     if n < 4 {
         return None;
@@ -306,12 +381,17 @@ fn cpu_sets() -> Option<(Vec<usize>, Vec<usize>)> {
         return None;
     }
     let alt_cores = ((cores.len() as f64 * 0.35) as usize).max(1);
-    let alt: Vec<usize> = cores[cores.len() - alt_cores..]
-        .iter()
-        .flat_map(|(_, v)| v.clone())
-        .collect();
-    let main: Vec<usize> = (0..n).filter(|c| !alt.contains(c)).collect();
-    Some((main, alt))
+    Some(
+        cores[cores.len() - alt_cores..]
+            .iter()
+            .flat_map(|(_, v)| v.clone())
+            .collect(),
+    )
+}
+
+/// The CPUs the game is held to: an alt's (`alt_cpus`); any other runs where the system puts it.
+fn affinity(alt: bool) -> Option<Vec<usize>> {
+    if alt { alt_cpus() } else { None }
 }
 
 fn set_affinity(cpus: &[usize]) {
@@ -341,31 +421,51 @@ fn uri(j: &Join) -> Option<String> {
     Some(u)
 }
 
+/// Roblox's own shift-lock icon, which Alyae's Mocktail build compares uploads with: the
+/// client's MouseLockedCursor.png from the newest payload (by folder time) that has one (not
+/// every version ships it), else a `.roblox_lock_reference.png` put in `cursors` by hand.
+fn lock_reference(payloads: &Path, cursors: &Path) -> Option<PathBuf> {
+    let newest = fs::read_dir(payloads)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|p| {
+            let icon = p.path().join("assets/content/textures/MouseLockedCursor.png");
+            let time = p.metadata().and_then(|m| m.modified()).ok()?;
+            icon.is_file().then_some((time, icon))
+        })
+        .max_by_key(|(time, _)| *time)
+        .map(|(_, icon)| icon);
+    newest.or_else(|| Some(cursors.join(".roblox_lock_reference.png")).filter(|f| f.is_file()))
+}
+
 /// Alyae's Mocktail build (shift-lock icon patch) draws the account's chosen picture from
 /// `<data>/cursors` in place of Roblox's shift-lock icon, which it finds by comparing uploads
-/// with `.roblox_lock_reference.png` there (Roblox's own icon, taken from its cache). Without
-/// either file, Roblox's icon stays.
-fn shiftlock_cursor(req: &Request) -> Vec<(String, String)> {
+/// with Roblox's own (`lock_reference`). Without either, Roblox's icon stays.
+fn shiftlock_cursor(req: &Request, m: &Mocktail) -> Vec<(String, String)> {
     let name = req.get("cursor");
     let dir = req.data_dir.join("cursors");
-    let (pic, reference) = (dir.join(name), dir.join(".roblox_lock_reference.png"));
+    let pic = dir.join(name);
     if name.is_empty() || name.contains('/') || !pic.is_file() {
         return Vec::new();
     }
-    if !reference.is_file() {
-        status("shift-lock cursor: .roblox_lock_reference.png is missing in the cursors folder");
+    let Some(reference) = lock_reference(&m.data.join("payloads"), &dir) else {
+        status(
+            "shift-lock cursor: no installed Roblox version has MouseLockedCursor.png; Roblox's icon stays",
+        );
         return Vec::new();
-    }
+    };
     vec![
         ("MOCKTAIL_SHIFTLOCK_CURSOR".into(), pic.display().to_string()),
         ("MOCKTAIL_SHIFTLOCK_ORIGINAL".into(), reference.display().to_string()),
     ]
 }
 
-/// FastFlags: the low-cost set for alts; for a main, only what AEAM's main ran with by default.
-fn fast_flags(main: bool) -> serde_json::Value {
-    let mut f = if main {
-        json!({
+/// FastFlags: the low-cost set for alts; for a main, only what AEAM's main ran with by default;
+/// with no role, only the two every account gets.
+fn fast_flags(role: Role) -> serde_json::Value {
+    let mut f = match role {
+        Role::Main => json!({
             "FStringRenderTextureBudgetByRam": "",
             "DFFlagTextureQualityOverrideEnabled": true,
             "DFIntTextureQualityOverride": 3,
@@ -374,23 +474,20 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "FFlagAutomaticDRS": false,
             "FFlagAutomaticDRSDisableHighDPIFramebufferHalving": true,
             "FFlagDebugGraphicsPreferOpenGL": true,
-            "DFFlagEnableRequestAsyncCompression": false,
             // the Windows client's loading values where the Android ones are smaller: clothing
             // jobs, orphan texture budget, content hot cache and bundles, sound budget estimate,
             // a disk cache (rbx-storage) above the 2.5 GB it fills, and animation tracks per
             // character (Roblox drops the 51st at 50, and with it a late or missing animation)
-            "DFIntTextureCompositorActiveJobs": 8,
+            "FIntTextureCompositorActiveJobs": 8,
             "FIntRenderTextureOrphanMinBudgetMB": 64,
             "DFIntWrapContentProviderHotCacheSize": 20000000,
             "FIntWrapContentProviderMaxBundleCount": 64,
             "DFFlagSoundCacheUseBudgetUtilizationEstimator": true,
-            "DFIntRbxStorageDBMaxCapacityMB": 8192,
             "DFIntRbxStorageCapacityHighMB": 8192,
             "DFIntRbxStorageCapacityLowMB": 8192,
             "DFIntReplicatorAnimationTrackLimitPerAnimator": 256,
-        })
-    } else {
-        json!({
+        }),
+        Role::Alt => json!({
             "FStringRenderTextureBudgetByRam": "",
             "DFFlagTextureQualityOverrideEnabled": true,
             "DFIntTextureQualityOverride": 1,
@@ -398,25 +495,29 @@ fn fast_flags(main: bool) -> serde_json::Value {
             "FFlagDebugDisableDRS": true,
             "FFlagAutomaticDRS": false,
             "FFlagAutomaticDRSDisableHighDPIFramebufferHalving": true,
-            "DFFlagSkipHighResolutiontextureMipsOnLowMemoryDevices2": true,
-            "DFFlagEnableRequestAsyncCompression": false,
-        })
+        }),
+        Role::AsIs => json!({}),
     };
     // Roblox keeps decoded animation clips on Windows but not in the Android build Mocktail runs
     f["FFlagAnimationClipMemCacheEnabled"] = json!(true);
-    f["FFlagDebugDisableCrashReporting"] = json!(true);
     f["FStringRobloxAnalyticsURL"] = json!("");
     f
 }
 
-/// Before each launch: Roblox's frame cap follows the account's; alts are kept at graphics
-/// level 1 and muted. A main's graphics level, sensitivity and volume are left to Roblox's menu
-/// and the Graphics button.
-fn engine_settings(profile: &Path, main: bool, fps_cap: u32) {
-    let mut props = vec![settings_xml::prop("int", "FramerateCap", fps_cap)];
-    if !main {
+/// Before each launch: Roblox's frame cap follows the account's FPS cap, if it has one; alts
+/// are kept at graphics level 1 and muted. Any other graphics level, sensitivity and volume are
+/// left to Roblox's menu and the Settings button.
+fn engine_settings(profile: &Path, role: Role, fps_cap: Option<u32>) {
+    let mut props: Vec<_> = fps_cap
+        .map(|f| settings_xml::prop("int", "FramerateCap", f))
+        .into_iter()
+        .collect();
+    if role == Role::Alt {
         props.extend(settings_xml::quality(1));
         props.push(settings_xml::prop("float", "MasterVolume", 0));
+    }
+    if props.is_empty() {
+        return;
     }
     if let Err(e) = settings_xml::apply(&settings_file(profile), &props) {
         fail(&format!("cannot write Roblox's settings: {e}"));
@@ -427,8 +528,8 @@ fn settings_file(profile: &Path) -> PathBuf {
     profile.join("data/files/appData/GlobalBasicSettings_13.xml")
 }
 
-/// The Graphics button: sets the graphics level, camera sensitivity and volume in Roblox's own
-/// settings file. A value left at "keep" (or empty) stays as it is.
+/// The Settings button: sets the graphics level, camera sensitivity, volume and the rest of its
+/// form in Roblox's own settings file. A value left at "keep" (or empty) stays as it is.
 pub fn graphics(req: &Request) {
     let m = find_mocktail();
     if let Some(m) = &m {
@@ -562,7 +663,7 @@ fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
 }
 
 /// RAM that must be free (MemAvailable) before another client starts: many clients loading a
-/// big map at once froze a 32 GB PC (owner, 2026-11-17).
+/// big map at once froze a 32 GB PC.
 const FREE_TO_START_MB: u64 = 4096;
 
 /// MemAvailable from `/proc/meminfo` text, in MB.
@@ -574,98 +675,195 @@ fn mem_available_mb(meminfo: &str) -> Option<u64> {
         .map(|kb| kb / 1024)
 }
 
-/// Waits (in the launch turn) until there is room for one more client, at most
-/// `crate::MEMORY_WAIT`.
-fn wait_for_memory() {
+/// Waits until there is room for one more client, at most `crate::MEMORY_WAIT`; a stop ends the
+/// wait and the helper.
+fn wait_for_memory(stop: &mut Stop) {
     let free = || {
         fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|t| mem_available_mb(&t))
             .unwrap_or(u64::MAX)
     };
-    crate::wait_for_memory(free, || FREE_TO_START_MB, || {});
+    crate::wait_for_memory(free, || FREE_TO_START_MB, || stop.end_if_asked());
 }
 
-/// The account's Window as Mocktail's: fullscreen or not, and the window's size. Empty: a main
-/// fullscreen, an alt small.
-fn window_size(mode: &str, main: bool) -> (bool, u32, u32) {
-    let small = (false, settings_xml::SMALL.0, settings_xml::SMALL.1);
-    match mode {
-        "small" => small,
-        "windowed" => (false, 1920, 1080),
-        "fullscreen" => (true, 1920, 1080),
-        _ if main => (true, 1920, 1080),
-        _ => small,
+/// What a launch does to Mocktail's window.
+#[derive(Debug, PartialEq)]
+enum Window {
+    /// as Mocktail left it
+    AsIs,
+    /// not fullscreen, at the size Mocktail kept (its own 1280x720 the first time). Mocktail
+    /// sizes in logical desktop units: the display's pixel size (from /sys/class/drm) is wrong
+    /// under scaling, and which display the window opens on is not known
+    Windowed,
+    /// fullscreen or not, at this size
+    Sized { fullscreen: bool, w: u32, h: u32 },
+}
+
+/// The account's Window as Mocktail's. Empty: a main fullscreen, an alt small, no role as
+/// Mocktail left it.
+fn window_plan(mode: &str, role: Role) -> Window {
+    let (w, h) = settings_xml::SMALL;
+    match (mode, role) {
+        ("small", _) | ("", Role::Alt) => Window::Sized {
+            fullscreen: false,
+            w,
+            h,
+        },
+        ("windowed", _) => Window::Windowed,
+        ("fullscreen", _) | ("", Role::Main) => Window::Sized {
+            fullscreen: true,
+            w: 1920,
+            h: 1080,
+        },
+        _ => Window::AsIs,
     }
+}
+
+/// Mocktail's saved window state with fullscreen off and the rest (size, place, maximized)
+/// kept; None when there is no state object to keep.
+fn windowed_state(saved: &str) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(saved).ok()?;
+    v.as_object_mut()?.insert("fullscreen".into(), json!(false));
+    Some(v.to_string())
+}
+
+/// Mocktail's config.yaml: what every account runs with, and what its role, FPS cap and Window
+/// ask for. A key left out is Mocktail's own.
+fn mocktail_config(role: Role, fps_limit: Option<u32>, window: &Window) -> String {
+    let mut c = String::from("version: 1\ndevice: pc-windows-11\ngraphics:\n  backend: opengl\n");
+    if let Some(f) = fps_limit {
+        c += &format!("  frame_rate_limit: {f}\n  vsync: off\n");
+    }
+    c += "performance:\n  multithreaded_rendering: true\n";
+    match role {
+        Role::Main => c += "  physics_worker_mode: throughput\n  gamemode: auto\n",
+        Role::Alt => c += "  physics_worker_mode: auto\n  gamemode: off\n",
+        Role::AsIs => {}
+    }
+    c += "window:\n";
+    if let Window::Sized { w, h, .. } = window {
+        c += &format!("  width: {w}\n  height: {h}\n");
+    }
+    c + "  high_dpi: false\nupdates:\n  automatic: false\n"
+}
+
+/// The environment a launch sets from the account's role, FPS cap and Window: no role with
+/// those fields empty sets none of it but the two fast flags every account gets.
+fn role_env(role: Role, fps_limit: Option<u32>, window: &Window) -> Vec<(String, String)> {
+    let mut env: Vec<(&str, String)> = Vec::new();
+    if let Window::Sized { w, h, .. } = window {
+        env.push(("MOCKTAIL_WIN_WIDTH", w.to_string()));
+        env.push(("MOCKTAIL_WIN_HEIGHT", h.to_string()));
+    }
+    if let Some(f) = fps_limit {
+        env.extend([
+            ("vblank_mode", "0".into()),
+            ("MOCKTAIL_FRAME_RATE_LIMIT", f.to_string()),
+            ("MOCKTAIL_VSYNC", "off".into()),
+            ("SDL_VIDEO_WAYLAND_ALLOW_TEARING", "1".into()),
+        ]);
+    }
+    match role {
+        Role::Main => env.extend([
+            ("MOCKTAIL_GRAPHICS_QUALITY", "manual".into()),
+            ("MOCKTAIL_PHYSICS_WORKER_MODE", "throughput".into()),
+            ("MOCKTAIL_F11_FULLSCREEN", "1".into()),
+            ("MOCKTAIL_FULLSCREEN_READINESS", "1".into()),
+            // Alyae's Mocktail build (patch 10): a main loses Mocktail's phone-sized memory
+            // caps, so textures, meshes, sounds and animations stay loaded instead of being
+            // evicted and fetched again; alts keep them
+            ("MOCKTAIL_LOW_MEMORY_PROFILE", "0".into()),
+        ]),
+        Role::Alt => env.extend([
+            ("MOCKTAIL_GRAPHICS_QUALITY", "1".into()),
+            ("MOCKTAIL_PHYSICS_WORKER_MODE", "auto".into()),
+            ("MOCKTAIL_F11_FULLSCREEN", "0".into()),
+            ("MOCKTAIL_FULLSCREEN_READINESS", "0".into()),
+            ("SDL_AUDIODRIVER", "dummy".into()),
+            ("PULSE_SERVER", "/dev/null".into()),
+            ("ALSA_CARD", "Dummy".into()),
+            ("MOCKTAIL_ENGINE_PUMP_REST", "sleep".into()),
+        ]),
+        Role::AsIs => {}
+    }
+    let flags = fast_flags(role).to_string();
+    env.push(("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON", flags.clone()));
+    env.push(("MOCKTAIL_FAST_FLAGS_JSON", flags));
+    env.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 fn prepare_profile(
     m: &Mocktail,
     data_dir: &Path,
     profile: &Path,
-    main: bool,
-    fps_limit: u32,
-    (fullscreen, w, h): (bool, u32, u32),
+    role: Role,
+    fps_limit: Option<u32>,
+    window: &Window,
 ) {
-    for sub in [
-        "data/mocktail",
-        "config/mocktail",
-        "cache/mocktail",
-        "state/mocktail",
-    ] {
+    for sub in ["data/mocktail", "cache/mocktail"] {
         mkdir(&profile.join(sub));
     }
     // the Roblox client (payloads) is shared; the chosen version is copied
-    let payloads = m.data.join("payloads");
-    link_dir(&payloads, &profile.join("data/mocktail/payloads"));
-    link_dir(&payloads, &profile.join("data/payloads"));
+    link_dir(&m.data.join("payloads"), &profile.join("data/payloads"));
     if let Ok(cur) = fs::read(m.data.join("current.json")) {
         let _ = fs::write(profile.join("data/current.json"), &cur);
-        let _ = fs::write(profile.join("data/mocktail/current.json"), &cur);
     }
-    // downloaded assets: alts share one cache (fewer downloads, no CDN rate limits); a main keeps
-    // its own, as Roblox deletes files its own index evicts
-    let shared_assets = data_dir.join("shared_rbx_storage");
-    mkdir(&shared_assets);
+    // Mocktail adds the flags in <config root>/fflags.json to the ones Alyae passes: one left by
+    // AEAM would keep its old flags
+    match fs::remove_file(profile.join("config/fflags.json")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            fail(&format!("cannot remove AEAM's fflags.json: {e}"))
+        }
+        _ => {}
+    }
+    // downloaded assets: every profile keeps its own (Mocktail makes the folder), as Roblox
+    // deletes files its own index evicts, also ones another account's index still lists. A
+    // link to the folder alts once shared goes; only the link: the shared files stay until
+    // the last alt using it has let go, then the empty folder goes
     for dest in [
         profile.join("data/mocktail/rbx-storage"),
         profile.join("data/rbx-storage"),
     ] {
-        let is_link = fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink());
-        if main && is_link {
+        if fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink()) {
             let _ = fs::remove_file(&dest);
         }
-        if main {
-            mkdir(&dest);
-        } else if fs::symlink_metadata(&dest).is_err() {
-            link_dir(&shared_assets, &dest);
-        }
     }
+    let _ = fs::remove_dir(data_dir.join("shared_rbx_storage"));
     let shaders = data_dir.join("shared_mesa_shader_cache");
     mkdir(&shaders);
     link_dir(&shaders, &profile.join("cache/mesa_shader_cache"));
 
-    let config = format!(
-        "version: 1\ndevice: pc-windows-11\ngraphics:\n  backend: opengl\n  frame_rate_limit: {fps_limit}\n  vsync: off\n\
-         performance:\n  multithreaded_rendering: true\n  physics_worker_mode: {}\n  gamemode: {}\n\
-         window:\n  width: {w}\n  height: {h}\n  high_dpi: false\nupdates:\n  automatic: false\n",
-        if main { "throughput" } else { "auto" },
-        if main { "auto" } else { "off" },
-    );
-    let window = json!({
-        "fullscreen": fullscreen, "maximized": false, "schema_version": 1,
-        "windowed": { "has_position": false, "height": h, "width": w },
-    })
-    .to_string();
-    for (file, text) in [
-        (profile.join("config/mocktail/config.yaml"), &config),
-        (profile.join("config/config.yaml"), &config),
-        (profile.join("state/window-state.json"), &window),
-        (profile.join("state/mocktail/window-state.json"), &window),
-    ] {
-        if let Err(e) = write_private(&file, text) {
+    let put = |file: &Path, text: &str| {
+        if let Err(e) = write_private(file, text) {
             fail(&format!("cannot write {}: {e}", file.display()));
         }
+    };
+    put(
+        &profile.join("config/config.yaml"),
+        &mocktail_config(role, fps_limit, window),
+    );
+    let state = profile.join("state/window-state.json");
+    match window {
+        Window::AsIs => {}
+        Window::Windowed => match fs::read_to_string(&state)
+            .ok()
+            .and_then(|t| windowed_state(&t))
+        {
+            Some(t) => put(&state, &t),
+            // nothing to keep: Mocktail opens windowed at its own size
+            None => {
+                let _ = fs::remove_file(&state);
+            }
+        },
+        Window::Sized { fullscreen, w, h } => put(
+            &state,
+            &json!({
+                "fullscreen": fullscreen, "maximized": false, "schema_version": 1,
+                "windowed": { "has_position": false, "height": h, "width": w },
+            })
+            .to_string(),
+        ),
     }
     // written ahead so concurrent first starts do not race on it inside Mocktail
     let platform = r#"{"profile_revision":"device-v1-pc-windows-11-t0-m1-k1","schema_version":1}"#;
@@ -681,21 +879,17 @@ fn prepare_profile(
     }
 }
 
-fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> Vec<PathBuf> {
+/// The sign-in file Mocktail reads (MOCKTAIL_COOKIE_FILE).
+fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> PathBuf {
     let mut line = format!(".ROBLOSECURITY={cookie}\n");
     if let Some(t) = tracker {
         line += &format!("RBXEventTrackerV2={t}\n");
     }
-    let paths = vec![
-        profile.join("roblox.cookie"),
-        profile.join("data/mocktail/roblox.cookie"),
-    ];
-    for p in &paths {
-        if let Err(e) = write_private(p, &line) {
-            fail(&format!("cannot write the sign-in file: {e}"));
-        }
+    let path = profile.join("roblox.cookie");
+    if let Err(e) = write_private(&path, &line) {
+        fail(&format!("cannot write the sign-in file: {e}"));
     }
-    paths
+    path
 }
 
 fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
@@ -751,7 +945,8 @@ struct LaunchTurn(#[allow(dead_code)] fs::File);
 impl LaunchTurn {
     const HOLD: Duration = Duration::from_secs(5);
 
-    fn take(data_dir: &Path) -> Option<Self> {
+    /// Waits for the turn; a stop meanwhile ends the helper.
+    fn take(data_dir: &Path, stop: &mut Stop) -> Option<Self> {
         let f = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -760,13 +955,18 @@ impl LaunchTurn {
             .open(data_dir.join("launch.lock"))
             .ok()?;
         use std::os::fd::AsRawFd;
+        let mut said = false;
         // SAFETY: flock(2) on a file this function owns
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            status("waiting for another account to start");
-            // SAFETY: as above, blocking
-            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        while unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK) {
                 return None;
             }
+            if !said {
+                status("waiting for another account to start");
+                said = true;
+            }
+            stop.end_if_asked();
+            std::thread::sleep(Duration::from_millis(250));
         }
         Some(LaunchTurn(f))
     }
@@ -777,15 +977,23 @@ pub fn play(req: &Request) {
     if cookie.is_empty() {
         fail("no cookie: paste the .ROBLOSECURITY value into Cookie");
     }
+    // a stop from Alyae ends the waits below, or the game once it runs; Alyae closing leaves
+    // the game running
+    let mut stop = Stop::listen();
     let Some(m) = find_mocktail() else {
         fail(
             "Mocktail is not installed (looked in ~/.local/lib/mocktail, /usr/lib/mocktail and PATH)",
         );
     };
+    let marker = fs::read_to_string(m.lib.join("alyae-mocktail-patch")).ok();
+    if let Some(w) = build_warning(marker.as_deref(), env!("ALYAE_MOCKTAIL_BUILD")) {
+        say(json!({ "warn": w }));
+    }
     let data_dir = &req.data_dir;
-    let main = !req.is_alt();
-    let fps = req.fps().unwrap_or(0);
-    let fps_limit = if fps == 0 || fps >= 1000 { 10000 } else { fps };
+    let role = req.role();
+    let fps_limit = req
+        .fps()
+        .map(|f| if f == 0 || f >= 1000 { 10000 } else { f });
     let program = account_program(&m, req, data_dir);
     if already_running(&program) {
         fail("this account is already running");
@@ -794,24 +1002,30 @@ pub fn play(req: &Request) {
     let profile = profile_dir(req, data_dir);
     mkdir(&profile);
     // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
-    // replace it, and at the end it would pass for a renewed cookie
+    // replace it, and at the end it would pass for a renewed cookie. (One left for pickup was
+    // saved when Alyae opened, by `resume`.)
     let _ = fs::remove_file(profile.join("data/auth/roblox.cookie"));
-    let mut turn = LaunchTurn::take(data_dir);
-    // one account started on its own does not wait for free RAM
+    let _ = fs::remove_file(profile.join(PICKUP));
+    // a second copy earlier versions wrote, which Mocktail never read
+    let _ = fs::remove_file(profile.join("data/mocktail/roblox.cookie"));
+    // one account started on its own does not wait for free RAM. The turn comes after the
+    // memory wait, so an account waiting for memory does not hold up one started on its own
     if req.input("_alone") != "1" {
-        wait_for_memory();
+        wait_for_memory(&mut stop);
     }
+    let mut turn = LaunchTurn::take(data_dir, &mut stop);
+    stop.end_if_asked();
     status("starting");
-    let window = window_size(req.window(), main);
+    let window = window_plan(req.window(), role);
     prepare_profile(
         &m,
         data_dir,
         &profile,
-        main,
-        if fps_limit == 10000 { 1000 } else { fps_limit },
-        window,
+        role,
+        fps_limit.map(|f| if f == 10000 { 1000 } else { f }),
+        &window,
     );
-    engine_settings(&profile, main, fps_limit);
+    engine_settings(&profile, role, fps_limit);
     let tracker_file = profile.join("browser_tracker");
     let tracker = fs::read_to_string(&tracker_file)
         .ok()
@@ -822,10 +1036,8 @@ pub fn play(req: &Request) {
             let _ = write_private(&tracker_file, &format!("{t}\n"));
             Some(t)
         });
-    let cookie_files = write_cookie(&profile, &cookie, tracker.as_deref());
     let run = runtime_dir(req, &profile);
 
-    let (w, h) = (window.1.to_string(), window.2.to_string());
     let mut args: Vec<String> = vec!["--windowed".into(), "--graphics".into(), "opengl".into()];
     if let Some(u) = uri(&join) {
         args.push("--launch-uri".into());
@@ -853,55 +1065,11 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_TOUCH_MODE".into(), "0".into()),
         ("MOCKTAIL_MOUSE_MODE".into(), "1".into()),
         ("MOCKTAIL_KEYBOARD_MODE".into(), "1".into()),
-        ("MOCKTAIL_WIN_WIDTH".into(), w),
-        ("MOCKTAIL_WIN_HEIGHT".into(), h),
         ("MOCKTAIL_WIN_HIGH_DPI".into(), "0".into()),
-        (
-            "MOCKTAIL_GRAPHICS_QUALITY".into(),
-            if main { "manual".into() } else { "1".into() },
-        ),
-        ("vblank_mode".into(), "0".into()),
-        ("MOCKTAIL_FRAME_RATE_LIMIT".into(), fps_limit.to_string()),
-        ("MOCKTAIL_VSYNC".into(), "off".into()),
-        ("SDL_VIDEO_WAYLAND_ALLOW_TEARING".into(), "1".into()),
-        ("MOCKTAIL_SWAPCHAIN_IMAGES".into(), "3".into()),
         ("MOCKTAIL_MULTITHREADED_RENDERING".into(), "1".into()),
-        (
-            "MOCKTAIL_PHYSICS_WORKER_MODE".into(),
-            if main {
-                "throughput".into()
-            } else {
-                "auto".into()
-            },
-        ),
-        (
-            "MOCKTAIL_F11_FULLSCREEN".into(),
-            if main { "1".into() } else { "0".into() },
-        ),
-        (
-            "MOCKTAIL_FULLSCREEN_READINESS".into(),
-            if main { "1".into() } else { "0".into() },
-        ),
     ];
-    let flags = fast_flags(main).to_string();
-    env.push((
-        "MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON".into(),
-        flags.clone(),
-    ));
-    env.push(("MOCKTAIL_FAST_FLAGS_JSON".into(), flags));
-    env.extend(shiftlock_cursor(req));
-    // Alyae's Mocktail build (patch 10): a main loses Mocktail's phone-sized memory caps, so
-    // textures, meshes, sounds and animations stay loaded instead of being evicted and fetched
-    // again; alts keep them
-    if main {
-        env.push(("MOCKTAIL_LOW_MEMORY_PROFILE".into(), "0".into()));
-    }
-    if !main {
-        env.push(("SDL_AUDIODRIVER".into(), "dummy".into()));
-        env.push(("PULSE_SERVER".into(), "/dev/null".into()));
-        env.push(("ALSA_CARD".into(), "Dummy".into()));
-        env.push(("MOCKTAIL_ENGINE_PUMP_REST".into(), "sleep".into()));
-    }
+    env.extend(role_env(role, fps_limit, &window));
+    env.extend(shiftlock_cursor(req, &m));
     let meta = m.data.join("metadata");
     if meta.is_dir() {
         for (k, f) in [
@@ -934,8 +1102,9 @@ pub fn play(req: &Request) {
     }
     env.push(("LD_LIBRARY_PATH".into(), ld.join(":")));
 
-    let sets = cpu_sets();
-    let mut cmd = if !main && on_path("systemd-run") {
+    let alt = role == Role::Alt;
+    let affinity = affinity(alt);
+    let mut cmd = if alt && on_path("systemd-run") {
         // alts in a low-weight scope: the desktop and the main come first
         let mut c = Command::new("systemd-run");
         c.args([
@@ -946,7 +1115,7 @@ pub fn play(req: &Request) {
             "-pCPUWeight=1",
             "-pIOWeight=1",
         ]);
-        if let Some((_, alt)) = &sets {
+        if let Some(alt) = &affinity {
             c.arg(format!(
                 "-pAllowedCPUs={}",
                 alt.iter()
@@ -986,7 +1155,6 @@ pub fn play(req: &Request) {
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone().unwrap_or_else(|e| fail(&e.to_string())))
         .stderr(log);
-    let affinity = sets.map(|(m, a)| if main { m } else { a });
     // SAFETY: only async-signal-safe calls between fork and exec
     unsafe {
         cmd.pre_exec(move || {
@@ -994,39 +1162,31 @@ pub fn play(req: &Request) {
             if let Some(cpus) = &affinity {
                 set_affinity(cpus);
             }
-            if !main {
-                // no realtime or raised priority for alts, and a low share of the CPU
+            if alt {
+                // an alt gives way to a main when the PC is busy (raising a main needs root;
+                // lowering the alts does the same for it): nice 5, inherited by everything the
+                // game starts. Not lower: an alt starved of CPU can lose its connection. No
+                // realtime or raised priority for it afterwards either
+                libc::nice(5);
                 let zero = libc::rlimit {
                     rlim_cur: 0,
                     rlim_max: 0,
                 };
                 libc::setrlimit(libc::RLIMIT_RTPRIO, &zero);
                 libc::setrlimit(libc::RLIMIT_NICE, &zero);
-                libc::nice(15);
             }
             Ok(())
         });
     }
+    // written last, so a launch that fails before the game starts leaves no copy of the cookie
+    let cookie_file = write_cookie(&profile, &cookie, tracker.as_deref());
     let started = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .unwrap_or_else(|e| fail(&format!("cannot start Mocktail: {e}")));
-    let pid = child.id() as i32;
-    // an alt gives way to a main when the PC is busy (raising a main needs root; lowering the
-    // alts does the same for it): nice 5 for the whole game
-    if !main {
-        // SAFETY: setpriority(2) on the process group the game leads
-        unsafe { libc::setpriority(libc::PRIO_PGRP, pid as libc::id_t, 5) };
-    }
-    say(json!({ "status": "running" }));
-
-    // a stop from Alyae ends the game; Alyae closing leaves it running
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if wait_for_stop() {
-            let _ = tx.send(());
-        }
+    let mut child = cmd.spawn().unwrap_or_else(|e| {
+        let _ = fs::remove_file(&cookie_file);
+        fail(&format!("cannot start Mocktail: {e}"))
     });
+    let pid = child.id() as i32;
+    say(json!({ "status": "running" }));
     let code = loop {
         if let Ok(Some(s)) = child.try_wait() {
             break s;
@@ -1034,7 +1194,7 @@ pub fn play(req: &Request) {
         if turn.is_some() && started.elapsed() >= LaunchTurn::HOLD {
             turn = None;
         }
-        if rx.try_recv().is_ok() {
+        if stop.asked() {
             status("stopping");
             // SAFETY: plain kill(2) on the game's own process group
             unsafe { libc::kill(-pid, libc::SIGTERM) };
@@ -1047,17 +1207,7 @@ pub fn play(req: &Request) {
         }
         std::thread::sleep(Duration::from_millis(250));
     };
-    // Mocktail keeps the session in data/auth; Roblox may have renewed the cookie meanwhile
-    let kept = profile.join("data/auth/roblox.cookie");
-    if let Ok(text) = fs::read_to_string(&kept) {
-        let renewed = api::clean_cookie(&text);
-        if !renewed.is_empty() && renewed != cookie && renewed.starts_with("_|WARNING") {
-            say(json!({ "set": { "cookie": renewed } }));
-        }
-    }
-    for f in cookie_files.iter().chain([&kept]) {
-        let _ = fs::remove_file(f);
-    }
+    after_game(&profile, &cookie, stop.alyae_gone);
     if !code.success() && started.elapsed() < Duration::from_secs(20) {
         let why = tail(&log_path, log_start);
         fail(&if why.is_empty() {
@@ -1208,27 +1358,263 @@ mod tests {
         assert_eq!(mem_available_mb("MemTotal: 1 kB\n"), None);
     }
 
-    /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt small).
+    /// The account's Window picks Mocktail's; empty keeps the role's (main fullscreen, alt
+    /// small, no role as Mocktail left it). Windowed leaves the size to Mocktail.
     #[test]
     fn window_by_choice_or_role() {
-        assert_eq!(window_size("", true), (true, 1920, 1080));
-        assert_eq!(window_size("", false), (false, 800, 600));
-        assert_eq!(window_size("small", true), (false, 800, 600));
-        assert_eq!(window_size("windowed", false), (false, 1920, 1080));
-        assert_eq!(window_size("fullscreen", false), (true, 1920, 1080));
+        let (small, full) = (
+            Window::Sized {
+                fullscreen: false,
+                w: 800,
+                h: 600,
+            },
+            Window::Sized {
+                fullscreen: true,
+                w: 1920,
+                h: 1080,
+            },
+        );
+        assert_eq!(window_plan("", Role::Main), full);
+        assert_eq!(window_plan("", Role::Alt), small);
+        assert_eq!(window_plan("", Role::AsIs), Window::AsIs);
+        assert_eq!(window_plan("small", Role::Main), small);
+        assert_eq!(window_plan("windowed", Role::Alt), Window::Windowed);
+        assert_eq!(window_plan("fullscreen", Role::AsIs), full);
+    }
+
+    /// Windowed turns fullscreen off and keeps the size and place Mocktail saved.
+    #[test]
+    fn windowed_keeps_the_saved_size() {
+        let saved = r#"{"fullscreen":true,"maximized":false,"schema_version":1,
+            "windowed":{"has_position":true,"x":10,"y":20,"width":1500,"height":900},
+            "configured":{"width":1280,"height":720}}"#;
+        let v: serde_json::Value = serde_json::from_str(&windowed_state(saved).unwrap()).unwrap();
+        assert_eq!(v["fullscreen"], false);
+        assert_eq!(v["windowed"]["width"], 1500);
+        assert_eq!(v["configured"]["height"], 720);
+        assert_eq!(windowed_state("not json"), None);
+        assert_eq!(windowed_state("[1]"), None);
+        // no size of Alyae's in the config either
+        assert!(!mocktail_config(Role::Main, None, &Window::Windowed).contains("width"));
+    }
+
+    /// No role and no FPS cap or Window: nothing of the roles' is forced on the game.
+    #[test]
+    fn no_role_leaves_roblox_as_it_is() {
+        let env = role_env(Role::AsIs, None, &Window::AsIs);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
+                "MOCKTAIL_FAST_FLAGS_JSON"
+            ]
+        );
+        let flags = fast_flags(Role::AsIs);
+        assert!(flags.get("DFIntTextureQualityOverride").is_none());
+        assert!(flags.get("FFlagDebugDisableDRS").is_none());
+        let config = mocktail_config(Role::AsIs, None, &Window::AsIs);
+        for forced in ["frame_rate_limit", "vsync", "physics_worker_mode", "gamemode", "width"] {
+            assert!(!config.contains(forced), "{forced} in {config}");
+        }
+        // what the account's own fields ask for still applies
+        let env = role_env(Role::AsIs, Some(60), &Window::AsIs);
+        assert!(env.contains(&("MOCKTAIL_FRAME_RATE_LIMIT".into(), "60".into())));
+        // a main and an alt keep theirs
+        let main = role_env(Role::Main, Some(330), &window_plan("", Role::Main));
+        assert!(main.contains(&("MOCKTAIL_LOW_MEMORY_PROFILE".into(), "0".into())));
+        assert!(main.contains(&("MOCKTAIL_WIN_WIDTH".into(), "1920".into())));
+        let alt = role_env(Role::Alt, Some(1), &window_plan("", Role::Alt));
+        assert!(alt.contains(&("MOCKTAIL_GRAPHICS_QUALITY".into(), "1".into())));
+    }
+
+    /// No role and no FPS cap: Roblox's settings file is left alone.
+    #[test]
+    fn no_role_leaves_roblox_settings() {
+        let dir = std::env::temp_dir().join(format!("alyae-asis-{}", std::process::id()));
+        engine_settings(&dir, Role::AsIs, None);
+        assert!(!settings_file(&dir).exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A launch writes only the files Mocktail reads under the roots Alyae gives it, and
+    /// takes away an fflags.json AEAM left.
+    #[test]
+    fn profile_has_only_what_mocktail_reads() {
+        let root = std::env::temp_dir().join(format!("alyae-prep-{}", std::process::id()));
+        let (data, p) = (root.join("alyae"), root.join("profile"));
+        let m = Mocktail {
+            bin: root.join("lib/mocktail"),
+            lib: root.join("lib"),
+            data: root.join("share"),
+        };
+        fs::create_dir_all(m.data.join("payloads")).unwrap();
+        fs::write(m.data.join("current.json"), "{}").unwrap();
+        fs::create_dir_all(p.join("config")).unwrap();
+        fs::write(p.join("config/fflags.json"), r#"{"FFlagOld":true}"#).unwrap();
+        prepare_profile(&m, &data, &p, Role::Main, Some(60), &window_plan("small", Role::Main));
+        for made in [
+            "config/config.yaml",
+            "state/window-state.json",
+            "data/current.json",
+            "data/payloads",
+        ] {
+            assert!(fs::symlink_metadata(p.join(made)).is_ok(), "{made} missing");
+        }
+        for unread in [
+            "config/fflags.json",
+            "config/mocktail/config.yaml",
+            "state/mocktail/window-state.json",
+            "data/mocktail/current.json",
+            "data/mocktail/payloads",
+        ] {
+            assert!(fs::symlink_metadata(p.join(unread)).is_err(), "{unread} written");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// An alt's link to the once-shared asset cache goes, the files behind it stay, and the
+    /// shared folder goes once empty.
+    #[test]
+    fn alts_keep_their_own_assets() {
+        let root = std::env::temp_dir().join(format!("alyae-assets-{}", std::process::id()));
+        let (data, p) = (root.join("alyae"), root.join("profile"));
+        let m = Mocktail {
+            bin: root.join("lib/mocktail"),
+            lib: root.join("lib"),
+            data: root.join("share"),
+        };
+        let shared = data.join("shared_rbx_storage");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("asset"), "a").unwrap();
+        fs::create_dir_all(p.join("data")).unwrap();
+        symlink(&shared, p.join("data/rbx-storage")).unwrap();
+        prepare_profile(&m, &data, &p, Role::Alt, Some(1), &Window::AsIs);
+        assert!(fs::symlink_metadata(p.join("data/rbx-storage")).is_err());
+        assert_eq!(fs::read_to_string(shared.join("asset")).unwrap(), "a");
+        fs::remove_file(shared.join("asset")).unwrap();
+        prepare_profile(&m, &data, &p, Role::Alt, Some(1), &Window::AsIs);
+        assert!(!shared.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// After a game: with Alyae there the renewed cookie is read and every sign-in file goes;
+    /// with Alyae closed Mocktail's stays, marked, for the next start of Alyae.
+    #[test]
+    fn renewed_cookie_waits_for_alyae() {
+        let p = std::env::temp_dir().join(format!("alyae-renew-{}", std::process::id()));
+        let kept = p.join("data/auth/roblox.cookie");
+        fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        let write = || {
+            fs::write(p.join("roblox.cookie"), ".ROBLOSECURITY=old\n").unwrap();
+            fs::write(&kept, ".ROBLOSECURITY=_|WARNING:new\n").unwrap();
+        };
+        write();
+        after_game(&p, "old", true);
+        assert!(!p.join("roblox.cookie").exists());
+        assert!(kept.exists() && p.join(PICKUP).exists());
+        assert_eq!(renewed_cookie(&p, "old").as_deref(), Some("_|WARNING:new"));
+        assert_eq!(renewed_cookie(&p, "_|WARNING:new"), None);
+        // the next start of Alyae (resume, no game) saves it and cleans up
+        after_game(&p, "old", false);
+        assert!(!kept.exists() && !p.join(PICKUP).exists());
+        write();
+        after_game(&p, "old", false);
+        assert!(!kept.exists() && !p.join("roblox.cookie").exists());
+        let _ = fs::remove_dir_all(p);
+    }
+
+    /// Close all takes every Mocktail game and none of Mocktail's helpers; Anti-AFK only
+    /// Alyae's games, which name their nudge file.
+    #[test]
+    fn which_processes_are_games() {
+        for game in ["mocktail", "mocktail_acc_0082e9a91d9e", "mocktail_alyae_abc"] {
+            assert!(any_game(game), "{game}");
+        }
+        for other in [
+            "mocktail_webview_helper",
+            "mocktail_cookie_helper",
+            "mocktail_updater",
+            "mocktail_failure_dialog",
+            "mocktail.provision",
+            "alyae",
+        ] {
+            assert!(!any_game(other), "{other}");
+        }
+        assert!(alyae_game("mocktail_alyae_abc") && !alyae_game("mocktail_acc_1"));
+    }
+
+    /// The shift-lock reference comes from the newest payload that has it, else from the file
+    /// put in the cursors folder by hand.
+    #[test]
+    fn shiftlock_reference() {
+        let root = std::env::temp_dir().join(format!("alyae-lock-{}", std::process::id()));
+        let (payloads, cursors) = (root.join("payloads"), root.join("cursors"));
+        fs::create_dir_all(&cursors).unwrap();
+        assert_eq!(lock_reference(&payloads, &cursors), None);
+        let hand = cursors.join(".roblox_lock_reference.png");
+        fs::write(&hand, "png").unwrap();
+        assert_eq!(lock_reference(&payloads, &cursors), Some(hand));
+        let icon = |v: &str| payloads.join(v).join("assets/content/textures/MouseLockedCursor.png");
+        for v in ["1-old", "2-new"] {
+            fs::create_dir_all(icon(v).parent().unwrap()).unwrap();
+            fs::write(icon(v), v).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // a newer payload without the icon does not count
+        fs::create_dir_all(payloads.join("3-none/assets")).unwrap();
+        assert_eq!(lock_reference(&payloads, &cursors), Some(icon("2-new")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The installed Mocktail is Alyae's current build only when build.sh's mark matches the
+    /// module's patches.
+    #[test]
+    fn mocktail_build_is_checked() {
+        let expected = env!("ALYAE_MOCKTAIL_BUILD");
+        assert_eq!(build_warning(Some(&format!("{expected}\n")), expected), None);
+        assert!(build_warning(Some("e636d75 0000000000000000\n"), expected).unwrap().contains("older"));
+        assert!(build_warning(None, expected).unwrap().contains("not Alyae's build"));
+        // build.sh's mark: the upstream commit and 16 hex digits
+        let (commit, hash) = expected.split_once(' ').unwrap();
+        assert_eq!((commit.len(), hash.len()), (40, 16));
+    }
+
+    /// A nudge file that cannot be written is a failure, not a game started before Anti-AFK.
+    #[test]
+    fn failed_nudge_is_a_failure() {
+        assert_eq!(nudge_report(2, 0, &[]), Ok("2 games nudged".into()));
+        assert_eq!(
+            nudge_report(1, 1, &[]),
+            Ok("1 games nudged, 1 started before Anti-AFK existed (restart them)".into())
+        );
+        assert_eq!(
+            nudge_report(1, 0, &["/p/nudge: denied".into()]),
+            Err("1 games nudged, 1 not: /p/nudge: denied".into())
+        );
+    }
+
+    /// Only alts are held to CPUs; a main keeps every core.
+    #[test]
+    fn only_alts_are_pinned() {
+        assert_eq!(affinity(false), None);
+        if let Some(cpus) = affinity(true) {
+            let n = std::thread::available_parallelism().unwrap().get();
+            assert!(!cpus.is_empty() && cpus.len() < n);
+        }
     }
 
     #[test]
     fn frame_cap_kept_in_step() {
         let dir = std::env::temp_dir().join(format!("alyae-rbx-{}", std::process::id()));
-        engine_settings(&dir, false, 6);
+        engine_settings(&dir, Role::Alt, Some(6));
         let f = dir.join("data/files/appData/GlobalBasicSettings_13.xml");
         assert!(
             fs::read_to_string(&f)
                 .unwrap()
                 .contains("<int name=\"FramerateCap\">6</int>")
         );
-        engine_settings(&dir, false, 30);
+        engine_settings(&dir, Role::Alt, Some(30));
         let t = fs::read_to_string(&f).unwrap();
         assert!(t.contains("<int name=\"FramerateCap\">30</int>") && !t.contains(">6<"));
         let _ = fs::remove_dir_all(dir);

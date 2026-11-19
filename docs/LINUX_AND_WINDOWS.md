@@ -1,8 +1,9 @@
 # Roblox on Linux and on Windows: what each has
 
-Compared 2026-11-16 from the code, after merging the Windows session's work (it was built on
-Windows from a copy of main and never pushed) (`crates/alyae-roblox/src/linux.rs`, `windows.rs`,
-`modules/roblox-*/module.toml`). Windows is still untested on a real PC.
+Compared 2026-11-16 from the code (rows updated 2026-11-19), after merging the Windows
+session's work (it was built on Windows from a copy of main and never pushed)
+(`crates/alyae-roblox/src/linux.rs`, `windows.rs`, `modules/roblox-*/module.toml`). Windows is
+still untested on a real PC.
 
 | | Linux (Mocktail) | Windows (official client) |
 |---|---|---|
@@ -12,14 +13,14 @@ Windows from a copy of main and never pushed) (`crates/alyae-roblox/src/linux.rs
 | Roblox settings per account | the profile's own `GlobalBasicSettings_13.xml` | own copy swapped in before start, taken back at exit |
 | FPS cap, alt quality 1 and muted | yes | yes |
 | FastFlags (texture budget, no DRS) | yes | no (Roblox ignores them on Windows now) |
-| Alts at low CPU priority, own CPUs, memory cap | yes (systemd scope, affinity, nice) | no |
-| Anti-AFK | yes (Mocktail patch 08) | no |
-| Reset files | yes | no |
+| Alts at low CPU priority, own CPUs, memory cap | yes (systemd scope, own CPUs, nice 5; a main is not pinned) | below-normal priority and low memory priority (a main: high priority), memory trimmed with Memory "trim"; no own CPUs |
+| Anti-AFK | yes (Mocktail patches 08 and 11) | no |
+| Reset files | yes, per account | yes, for all accounts at once (they share Roblox's caches), with every Roblox closed |
 | Removing an account deletes its files | yes (`on_remove = "forget"`) | nothing to delete (shared client) |
-| Renewed cookie saved after play | yes | no (Alyae does not read the official client's stored sign-in) |
+| Renewed cookie saved after play | yes, also when Alyae was closed while the game ran | no (Alyae does not read the official client's stored sign-in) |
 | Add account: browser sign-in (click), Import cookies and Add manually (right-click) | yes | yes |
 | Open in browser (roblox.com signed in as the account) | yes | yes |
-| Follow joins by user (reserved servers, sub-places) | by place and server (Mocktail takes a URI) | yes (RequestFollowUser) |
+| Follow joins by user (reserved servers, sub-places) | yes (`userId` in the launch URI) | yes (RequestFollowUser) |
 | Online watch backs off while Roblox rate limits | yes | yes |
 | Colours from the desktop | Infynitae's theme; **now** any desktop's light/dark and accent through the portal (borrowed) | registry light/dark and accent |
 
@@ -43,6 +44,5 @@ Windows from a copy of main and never pushed) (`crates/alyae-roblox/src/linux.rs
 
 ## Linux has, Windows could get later
 
-Anti-AFK (needs input injection: `SendInput` to the account's window), Reset files (clear
-`%LOCALAPPDATA%\Roblox` caches, but they are shared between accounts), alt CPU priority
-(`SetPriorityClass` + job object memory cap), renewed cookie capture.
+Anti-AFK (needs input injection: `SendInput` to the account's window), alts on their own CPUs
+(a job object), renewed cookie capture.

@@ -1,7 +1,8 @@
 //! Alyae's Roblox helper. Alyae runs `alyae-roblox <action>` and writes one JSON line: the account
 //! (`account`: its fields and secrets), the button's `inputs` and a `data_dir` for this game.
-//! Answers are JSON lines: `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`. While a game
-//! runs the helper waits for it; a `stop` line on stdin closes the game.
+//! Answers are JSON lines: `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`, `{"warn":"..."}`
+//! (a line for Alyae's message bar). While a game runs the helper waits for it; a `stop` line
+//! on stdin closes the game.
 
 mod api;
 mod files;
@@ -39,9 +40,12 @@ impl Request {
             .unwrap_or("")
             .trim()
     }
-    /// An alt runs small, muted and slow; a main or an account with no role runs as Roblox would.
-    pub fn is_alt(&self) -> bool {
-        self.get("role") == "alt"
+    pub fn role(&self) -> Role {
+        match self.get("role") {
+            "main" => Role::Main,
+            "alt" => Role::Alt,
+            _ => Role::AsIs,
+        }
     }
     /// The account's Window: "fullscreen", "windowed", "small" (its default by role comes filled
     /// in from the module), or empty: Roblox's own.
@@ -56,6 +60,18 @@ impl Request {
     pub fn cookie(&self) -> String {
         api::clean_cookie(self.get("cookie"))
     }
+}
+
+/// The account's Role field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Role {
+    /// full FPS and quality, first in line for the CPU
+    Main,
+    /// small, muted and slow, last in line
+    Alt,
+    /// no role: Roblox runs as it is; only what the account's own fields (FPS cap, Window)
+    /// ask for changes
+    AsIs,
 }
 
 pub fn say(v: Value) {
@@ -501,8 +517,48 @@ fn main() {
     }
 }
 
+/// Alyae's Stop for one game, listened for from before a launch's waits until the game ends.
+pub struct Stop {
+    rx: std::sync::mpsc::Receiver<bool>,
+    /// Alyae closed (its end of stdin did): nobody reads this helper's answers any more
+    pub alyae_gone: bool,
+}
+
+impl Stop {
+    pub fn listen() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(wait_for_stop());
+        });
+        Stop {
+            rx,
+            alyae_gone: false,
+        }
+    }
+
+    /// Whether Alyae asked to stop since the last call.
+    pub fn asked(&mut self) -> bool {
+        match self.rx.try_recv() {
+            Ok(true) => true,
+            Ok(false) => {
+                self.alyae_gone = true;
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// For the waits before the game starts: a stop ends the helper there, nothing started.
+    pub fn end_if_asked(&mut self) {
+        if self.asked() {
+            status("stopped before starting");
+            std::process::exit(0);
+        }
+    }
+}
+
 /// Lines from Alyae after the request: true when it asked to stop (false when Alyae closed).
-pub fn wait_for_stop() -> bool {
+fn wait_for_stop() -> bool {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         match line {

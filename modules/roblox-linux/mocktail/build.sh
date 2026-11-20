@@ -18,6 +18,8 @@
 #   11 nudge-now               MOCKTAIL_NUDGE_FILE: writing that file asks for one nudge now (Anti-AFK)
 #   12 captcha-device-and-close the challenge window sends the game's device ID and closes 2 s
 #                              after success, so Roblox reads the result and retries the join
+#   13 fps-file                MOCKTAIL_FPS_FILE: a number written there (1-1000, 0 = 1000) becomes
+#                              the running game's frame-rate limit, read once a second
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

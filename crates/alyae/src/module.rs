@@ -61,6 +61,9 @@ pub struct Action {
     pub primary: bool,
     #[serde(default, rename = "input")]
     pub inputs: Vec<Input>,
+    /// boxes of other buttons this one gets too, by key (Follow on Linux: Place ID)
+    #[serde(default)]
+    pub also: Vec<String>,
     /// asked before the action runs (it changes the accounts)
     #[serde(default)]
     pub confirm: String,

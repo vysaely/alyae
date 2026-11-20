@@ -20,7 +20,7 @@ still untested on a real PC.
 | Renewed cookie saved after play | yes, also when Alyae was closed while the game ran | no (Alyae does not read the official client's stored sign-in) |
 | Add account: browser sign-in (click), Import cookies and Add manually (right-click) | yes | yes |
 | Open in browser (roblox.com signed in as the account) | yes | yes |
-| Follow joins by user (reserved servers, sub-places) | yes (`userId` in the launch URI) | yes (RequestFollowUser) |
+| Follow joins by user (reserved servers, sub-places) | yes (`userId` in the launch URI, with the place presence shows, else Place ID) | yes (RequestFollowUser, the user alone) |
 | Online watch backs off while Roblox rate limits | yes | yes |
 | Colours from the desktop | Infynitae's theme; **now** any desktop's light/dark and accent through the portal (borrowed) | registry light/dark and accent |
 

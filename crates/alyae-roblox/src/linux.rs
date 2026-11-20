@@ -424,7 +424,7 @@ fn set_affinity(cpus: &[usize]) {
 /// The link Mocktail joins with: a place, and a server in it (job ID, or a private server's link
 /// code). A follow carries the user instead of their server, so Roblox joins them its own way
 /// (join type 1, as the friend Join button): a sub place's or a game-made server refuses a join by
-/// job ID ("restricted"). Mocktail still wants a place, so the followed user's goes along.
+/// job ID ("restricted"). Mocktail still wants a place: the one `follow_plan` found goes along.
 fn uri(j: &Join) -> Option<String> {
     let mut u = format!("roblox://experiences/start?placeId={}", j.place?);
     if let Some(user) = j.follow {

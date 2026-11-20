@@ -110,11 +110,14 @@ key = "server"
 label = "Job ID"
 hint = "job ID or private server link"
 
+# joins the user's server through the place their presence shows (Mocktail wants a place beside
+# the user); when their privacy hides it, through Place ID
 [[action]]
 id = "follow"
 label = "Follow"
 runs = true
 gap = 2
+also = ["place"]
 
 [[action.input]]
 key = "follow"

@@ -496,8 +496,17 @@ pub fn presence(user_ids: &[u64], cookie: &str) -> Result<Vec<(u64, String)>, St
     Ok(out)
 }
 
-/// Where `user` is playing, as the account with `cookie` may see it: (place ID, server ID).
-pub fn whereabouts(user: u64, cookie: &str) -> Result<Option<(u64, String)>, String> {
+/// What presence shows of where a user plays, as one account sees it; None: hidden (offline,
+/// or their privacy).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Whereabouts {
+    pub place: Option<u64>,
+    /// the start place of their game
+    pub root: Option<u64>,
+}
+
+/// Where `user` is playing, as the account with `cookie` may see it.
+pub fn whereabouts(user: u64, cookie: &str) -> Result<Whereabouts, String> {
     let mut r = call(
         "https://presence.roblox.com/v1/presence/users",
         &Session::plain(cookie),
@@ -507,13 +516,16 @@ pub fn whereabouts(user: u64, cookie: &str) -> Result<Option<(u64, String)>, Str
         return Err(answer(r.status().as_u16(), "online status"));
     }
     let v: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
-    let p = &v["userPresences"][0];
-    Ok(match (p["placeId"].as_u64(), p["gameId"].as_str()) {
-        (Some(place), Some(server)) if place > 0 && !server.is_empty() => {
-            Some((place, server.to_string()))
-        }
-        _ => None,
-    })
+    Ok(whereabouts_in(&v["userPresences"][0]))
+}
+
+/// The places of one `userPresences` entry; Roblox sends null (or 0) for what it hides.
+fn whereabouts_in(p: &Value) -> Whereabouts {
+    let id = |k: &str| p[k].as_u64().filter(|&n| n > 0);
+    Whereabouts {
+        place: id("placeId"),
+        root: id("rootPlaceId"),
+    }
 }
 
 /// A new device identity (`RBXEventTrackerV2` value), as the Roblox app makes on its first start.
@@ -565,6 +577,22 @@ pub fn auth_ticket(cookie: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_places_are_none() {
+        let p = json!({ "userPresenceType": 2, "placeId": 10, "rootPlaceId": 20, "gameId": "g" });
+        assert_eq!(
+            whereabouts_in(&p),
+            Whereabouts {
+                place: Some(10),
+                root: Some(20)
+            }
+        );
+        let p = json!({ "userPresenceType": 2, "placeId": null, "rootPlaceId": 20 });
+        assert_eq!(whereabouts_in(&p).place, None);
+        let p = json!({ "userPresenceType": 0, "placeId": 0, "rootPlaceId": null });
+        assert_eq!(whereabouts_in(&p), Whereabouts::default());
+    }
 
     /// What a call puts on the wire, read by a one-request server on this computer: Chrome's
     /// User-Agent and client hints, and the call's own Accept kept.

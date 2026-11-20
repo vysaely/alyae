@@ -719,17 +719,8 @@ impl App {
         let Some(action) = m.actions.iter().find(|a| a.id == action_id).cloned() else {
             return;
         };
-        // only this button's own boxes: a Follow target must not ride along with Join Server
         let all = self.inputs.get(&game).cloned().unwrap_or_default();
-        let inputs: Values = action
-            .inputs
-            .iter()
-            .filter_map(|i| {
-                all.get(&i.key)
-                    .filter(|v| !v.trim().is_empty())
-                    .map(|v| (i.key.clone(), v.clone()))
-            })
-            .collect();
+        let inputs = action_inputs(&action, &all);
         if let Some(s) = &self.store {
             s.set_setting(
                 &format!("inputs.{game}"),
@@ -3674,6 +3665,22 @@ enum MenuChoice {
     Set(String, String),
 }
 
+/// The boxes a button runs with: its own and the ones it names in `also`, those filled in. A
+/// Follow target must not ride along with Join Server.
+fn action_inputs(action: &module::Action, all: &Values) -> Values {
+    action
+        .inputs
+        .iter()
+        .map(|i| &i.key)
+        .chain(&action.also)
+        .filter_map(|k| {
+            all.get(k)
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| (k.clone(), v.clone()))
+        })
+        .collect()
+}
+
 fn plural(n: usize) -> String {
     if n == 1 {
         "1 account".into()
@@ -4104,6 +4111,29 @@ mod tests {
         assert!(h.state().adding.is_empty());
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// Follow on Linux gets the Place ID box too (for a user whose game is hidden); Join Server
+    /// never gets the Follow box.
+    #[test]
+    fn follow_gets_place_id() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let all: Values = [("place", "1818"), ("server", ""), ("follow", "Bob")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into();
+        let action = |id: &str| m.actions.iter().find(|a| a.id == id).unwrap();
+        let want: Values = [("place", "1818")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into();
+        assert_eq!(action_inputs(action("play"), &all), want);
+        let follow = action_inputs(action("follow"), &all);
+        assert_eq!(follow.get("follow").map(String::as_str), Some("Bob"));
+        assert_eq!(
+            follow.get("place").map(String::as_str),
+            cfg!(target_os = "linux").then_some("1818")
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The Mode column names the role as the Role field does.

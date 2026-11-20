@@ -1,18 +1,21 @@
 diff --git a/src/runtime/performance_policy.cc b/src/runtime/performance_policy.cc
-index 56f35b5..827b990 100644
+index 56f35b5..8af7d54 100644
 --- a/src/runtime/performance_policy.cc
 +++ b/src/runtime/performance_policy.cc
-@@ -315,8 +315,47 @@ bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
+@@ -315,8 +315,65 @@ bool MergePerformanceClientSettingsOverrides(const PerformancePolicy& policy,
          {"FIntDefaultAudioDecodeBufferSizeMs", "50"},
          {"FIntMaxAudibleSoundChannels", "32"},
      }};
 -    if (!apply_settings(rendering_settings)) {
 -      return false;
-+    // Alyae: MOCKTAIL_LOW_MEMORY_PROFILE=0 leaves out the phone-sized memory caps (texture,
-+    // mesh, avatar, sound and disk-cache budgets, single loader threads, simplified avatars), so
-+    // Roblox sizes them as on a desktop and stops evicting and reloading assets. The thread,
-+    // scheduler and GC entries stay. Alts keep the caps to save memory.
-+    static constexpr std::array<std::string_view, 24> kLowMemoryCaps = {{
++    // Alyae: MOCKTAIL_LOW_MEMORY_PROFILE=0 (Alyae's mains) leaves out the phone settings, so
++    // Roblox's desktop defaults apply: the memory caps (texture, mesh, avatar, sound and
++    // disk-cache budgets, single loader threads, simplified avatars), so assets stop being
++    // evicted and reloaded; the texture mip bias (textures one or two mips lower); the Luau GC
++    // caps and step settings; the temp arena, terrain slice and terrain texture settings; mesh
++    // compression and the LOD optimizer switch, which spend CPU to save memory; the streaming GC
++    // time limit. The thread and scheduler entries stay. Alts keep all of it to save memory.
++    static constexpr std::array<std::string_view, 39> kLowMemoryCaps = {{
 +        "FFlagRenderEnableLowEndLOD",
 +        "FIntAssetProviderThreads",
 +        "FFlagAdaptiveMeshCacheSizeForAndroid",
@@ -37,6 +40,21 @@ index 56f35b5..827b990 100644
 +        "FIntAudioMetadataCacheSizeKB",
 +        "FIntDefaultAudioDecodeBufferSizeMs",
 +        "FIntMaxAudibleSoundChannels",
++        "FIntRenderTextureMipBias",
++        "FIntLuaGcMaxKb",
++        "FIntLuauGcStepMul",
++        "FIntLuauGcGoalCore",
++        "FIntLuauGcStartupWorkingSetMb",
++        "FIntLuauGcStepMultiplier",
++        "FIntLuauGcGoalRatio",
++        "FFlagLuauStartupGcSuppression",
++        "FIntTaskSchedulerMaxTempArenaSizeBytes",
++        "FIntTerrainArraySliceSize",
++        "FFlagDebugTerrainVTCompressedTextures",
++        "FFlagMeshCompression",
++        "FFlagPhysicsMeshCompression",
++        "FFlagMeshLodApplyGeomMeshOptimizer",
++        "FIntNetworkStreamingGCMaxMicroSecondLimit",
 +    }};
 +    const char* low_memory = std::getenv("MOCKTAIL_LOW_MEMORY_PROFILE");
 +    const bool keep_caps = low_memory == nullptr || std::string_view(low_memory) != "0";
@@ -53,7 +71,7 @@ index 56f35b5..827b990 100644
    }
    *merged_json = overrides.dump();
 diff --git a/tests/performance_policy_test.cc b/tests/performance_policy_test.cc
-index 95d2910..3c4dd1a 100644
+index 95d2910..baab139 100644
 --- a/tests/performance_policy_test.cc
 +++ b/tests/performance_policy_test.cc
 @@ -2,6 +2,8 @@
@@ -65,13 +83,30 @@ index 95d2910..3c4dd1a 100644
  #define JSON_NOEXCEPTION 1
  #include <nlohmann/json.hpp>
  #include <string>
-@@ -117,6 +119,33 @@ TEST(PerformancePolicyTest, SizesFullMultithreadingFromPhysicalCoreCount) {
+@@ -117,6 +119,56 @@ TEST(PerformancePolicyTest, SizesFullMultithreadingFromPhysicalCoreCount) {
    EXPECT_FALSE(parsed.contains("FFlagTaskSchedulerLimitTargetFpsTo2402"));
  }
  
-+// Alyae: MOCKTAIL_LOW_MEMORY_PROFILE=0 drops the memory caps and keeps the threading entries;
-+// unset keeps today's caps.
++// Alyae: MOCKTAIL_LOW_MEMORY_PROFILE=0 (a main) drops the phone settings and keeps the threading
++// entries; unset (an alt) keeps them all.
 +TEST(PerformancePolicyTest, LowMemoryProfileCanBeTurnedOff) {
++  constexpr const char* kDesktopDefaults[] = {
++      "FIntRenderTextureMipBias",
++      "FIntLuaGcMaxKb",
++      "FIntLuauGcStepMul",
++      "FIntLuauGcGoalCore",
++      "FIntLuauGcStartupWorkingSetMb",
++      "FIntLuauGcStepMultiplier",
++      "FIntLuauGcGoalRatio",
++      "FFlagLuauStartupGcSuppression",
++      "FIntTaskSchedulerMaxTempArenaSizeBytes",
++      "FIntTerrainArraySliceSize",
++      "FFlagDebugTerrainVTCompressedTextures",
++      "FFlagMeshCompression",
++      "FFlagPhysicsMeshCompression",
++      "FFlagMeshLodApplyGeomMeshOptimizer",
++      "FIntNetworkStreamingGCMaxMicroSecondLimit",
++  };
 +  std::string merged;
 +  std::string error;
 +  ASSERT_EQ(unsetenv("MOCKTAIL_LOW_MEMORY_PROFILE"), 0);
@@ -80,6 +115,10 @@ index 95d2910..3c4dd1a 100644
 +  nlohmann::json parsed = nlohmann::json::parse(merged, nullptr, false, true);
 +  EXPECT_EQ(parsed.at("FIntRenderTextureTotalBudgetMB"), "128");
 +  EXPECT_EQ(parsed.at("FFlagEnableSLIMAvatars"), "True");
++  EXPECT_EQ(parsed.at("FIntRenderTextureMipBias"), "1");
++  for (const char* name : kDesktopDefaults) {
++    EXPECT_TRUE(parsed.contains(name)) << name;
++  }
 +
 +  ASSERT_EQ(setenv("MOCKTAIL_LOW_MEMORY_PROFILE", "0", 1), 0);
 +  ASSERT_TRUE(MergePerformanceClientSettingsOverrides({true, 14}, "{}", &merged, &error))
@@ -93,7 +132,9 @@ index 95d2910..3c4dd1a 100644
 +  EXPECT_FALSE(parsed.contains("FIntAssetProviderAssetCacheReadThreadCount"));
 +  EXPECT_EQ(parsed.at("FIntSmoothClusterTaskQueueMaxParallelTasks"), "14");
 +  EXPECT_EQ(parsed.at("FFlagCurlUsePools"), "True");
-+  EXPECT_EQ(parsed.at("FIntRenderTextureMipBias"), "1");
++  for (const char* name : kDesktopDefaults) {
++    EXPECT_FALSE(parsed.contains(name)) << name;
++  }
 +}
 +
  TEST(PerformancePolicyTest, AcceptsIdenticalExplicitModeValues) {

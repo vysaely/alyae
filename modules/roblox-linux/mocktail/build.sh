@@ -13,7 +13,8 @@
 #   07 browser-tracker-cookie  the account's device ID reaches Roblox with its sign-in
 #   08 anti-afk                MOCKTAIL_ANTI_AFK_SECONDS: a 1 px nudge after that long without input
 #   09 pointer-release         the right-button camera drag ends where it started, not at the window edge
-#   10 low-memory-profile      MOCKTAIL_LOW_MEMORY_PROFILE=0: no phone-sized memory caps (Alyae's mains)
+#   10 low-memory-profile      MOCKTAIL_LOW_MEMORY_PROFILE=0 (Alyae's mains): no phone settings (memory
+#                              caps, mip bias, Luau GC caps, mesh compression); Roblox's defaults
 #   11 nudge-now               MOCKTAIL_NUDGE_FILE: writing that file asks for one nudge now (Anti-AFK)
 #   12 captcha-device-and-close the challenge window sends the game's device ID and closes 2 s
 #                              after success, so Roblox reads the result and retries the join

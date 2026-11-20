@@ -158,7 +158,11 @@ fn run(script: &Path, flag: &str, stop: &mut Stop) {
         .stdout(Stdio::piped())
         .process_group(0)
         .spawn()
-        .unwrap_or_else(|e| fail(&format!("cannot run {}: {e}", script.display())));
+        .unwrap_or_else(|e| {
+            fail(&format!(
+                "cannot start nice, ionice and bash for build.sh: {e}"
+            ))
+        });
     let out = child.stdout.take().expect("piped stdout");
     let (tx, rx) = channel();
     std::thread::spawn(move || {

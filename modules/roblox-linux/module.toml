@@ -10,6 +10,9 @@ resume = "resume"
 close_all = "close_all"
 # Anti-AFK: every running game moves the pointer a pixel and back once (Alyae runs it every few minutes)
 anti_afk = "anti_afk"
+# the FPS choice of a running account: a new frame-rate limit for its game until it closes (the
+# account's FPS cap stays what the next start uses)
+live_fps = "live_fps"
 title_field = "username"
 # removing an account deletes its profile folder and its copy of Mocktail
 on_remove = "forget"

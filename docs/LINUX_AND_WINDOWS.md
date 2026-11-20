@@ -15,6 +15,7 @@ still untested on a real PC.
 | FastFlags (texture budget, no DRS) | yes | no (Roblox ignores them on Windows now) |
 | Alts at low CPU priority, own CPUs, memory cap | yes (systemd scope, own CPUs, nice 5; a main is not pinned) | below-normal priority and low memory priority (a main: high priority), memory trimmed with Memory "trim"; no own CPUs |
 | Anti-AFK | yes (Mocktail patches 08 and 11) | no |
+| FPS of a running game (Account menu, FPS) | yes (Mocktail patch 13, `MOCKTAIL_FPS_FILE`) | no |
 | Reset files | yes, per account | yes, for all accounts at once (they share Roblox's caches), with every Roblox closed |
 | Removing an account deletes its files | yes (`on_remove = "forget"`) | nothing to delete (shared client) |
 | Renewed cookie saved after play | yes, also when Alyae was closed while the game ran | no (Alyae does not read the official client's stored sign-in) |

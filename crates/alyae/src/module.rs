@@ -347,6 +347,10 @@ pub struct Module {
     /// being idle: Anti-AFK runs it every few minutes
     #[serde(default)]
     pub anti_afk: String,
+    /// a helper action that gives one running game a new frame-rate limit (input `fps`: 1 to
+    /// 1000, 0 for no cap) without changing the account's FPS cap: the FPS choice
+    #[serde(default)]
+    pub live_fps: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,
@@ -565,6 +569,8 @@ pub enum Event {
     /// what the module's build says it is doing (bad: it failed)
     Build { text: String, bad: bool },
     BuildEnded,
+    /// the account's running game took a new frame-rate limit (0: no cap)
+    LiveFps { account: String, fps: u32 },
 }
 
 pub struct Running {
@@ -690,16 +696,17 @@ fn request_json(
 }
 
 /// Runs the helper's `action` for `account` and waits for it to end, for short actions (the
-/// module's `on_remove`, `close_all`, `anti_afk`): Ok holds its last status line, if it said
-/// one; its errors are joined into the Err.
+/// module's `on_remove`, `close_all`, `anti_afk`, `live_fps`): Ok holds its last status line, if
+/// it said one; its errors are joined into the Err.
 pub fn run_and_wait(
     module: &Module,
     action: &str,
     account: &Account,
+    inputs: &crate::store::Values,
     data_dir: &Path,
 ) -> Result<Option<String>, String> {
     let (mut child, dir, helper) = spawn_helper(module, action, action, data_dir)?;
-    let request = request_json(module, account, &Default::default(), &dir);
+    let request = request_json(module, account, inputs, &dir);
     // stdin closes after the request: the helper sees no more lines
     let mut stdin = child.stdin.take().expect("piped stdin");
     let sent = stdin.write_all(format!("{request}\n").as_bytes());

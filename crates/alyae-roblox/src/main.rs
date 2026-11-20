@@ -597,6 +597,8 @@ fn main() {
         "close_all" => linux::close_all(),
         #[cfg(target_os = "linux")]
         "anti_afk" => linux::anti_afk(),
+        #[cfg(target_os = "linux")]
+        "live_fps" => linux::live_fps(&req),
         #[cfg(windows)]
         "close_all" => windows::close_all(),
         #[cfg(target_os = "linux")]

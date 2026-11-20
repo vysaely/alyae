@@ -246,12 +246,7 @@ fn running_games(pick: fn(&str) -> bool) -> Vec<i32> {
 pub fn anti_afk() {
     let (mut nudged, mut old, mut failed) = (0, 0, Vec::new());
     for pid in running_games(alyae_game) {
-        let env = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-        let file = env
-            .split(|b| *b == 0)
-            .find_map(|kv| kv.strip_prefix(b"MOCKTAIL_NUDGE_FILE="))
-            .map(|v| PathBuf::from(std::ffi::OsStr::from_bytes(v)));
-        match file {
+        match env_of(pid, "MOCKTAIL_NUDGE_FILE") {
             None => old += 1,
             Some(f) => match fs::write(&f, format!("{:?}", std::time::SystemTime::now())) {
                 Ok(()) => nudged += 1,
@@ -262,6 +257,51 @@ pub fn anti_afk() {
     match nudge_report(nudged, old, &failed) {
         Ok(text) => status(&text),
         Err(text) => fail(&text),
+    }
+}
+
+/// The value of `key` in the environment the game `pid` started with.
+fn env_of(pid: i32, key: &str) -> Option<PathBuf> {
+    let env = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let want = format!("{key}=");
+    env.split(|b| *b == 0)
+        .find_map(|kv| kv.strip_prefix(want.as_bytes()))
+        .map(|v| PathBuf::from(std::ffi::OsStr::from_bytes(v)))
+}
+
+/// The FPS choice of a running account: its game takes the frame-rate limit in `fps` (1-1000,
+/// "0" for no cap) within a second, from the file it reads (Alyae's Mocktail build, patch 13:
+/// MOCKTAIL_FPS_FILE). The account's FPS cap is left alone: the next start uses it again.
+pub fn live_fps(req: &Request) {
+    let fps = live_fps_value(req.input("fps")).unwrap_or_else(|e| fail(&e));
+    let pid = [program_name(req), old_program_name(req)]
+        .iter()
+        .find_map(|n| running_pid(Path::new(n)))
+        .unwrap_or_else(|| fail("this account's game is not running"));
+    let Some(file) = env_of(pid, "MOCKTAIL_FPS_FILE") else {
+        fail("this game started before live FPS existed: restart it");
+    };
+    // Mocktail changes a limit it set at start only
+    if env_of(pid, "MOCKTAIL_FRAME_RATE_LIMIT").is_none() {
+        fail(
+            "this game started without an FPS cap (no mode, FPS cap empty): set one and restart it",
+        );
+    }
+    if let Err(e) = fs::write(&file, format!("{fps}\n")) {
+        fail(&format!("cannot write {}: {e}", file.display()));
+    }
+    status(&if fps == 0 {
+        "FPS: no cap until the game closes".to_string()
+    } else {
+        format!("FPS: {fps} until the game closes")
+    });
+}
+
+/// The FPS choice's value: 1 to 1000, or 0 for no cap (what MOCKTAIL_FPS_FILE takes).
+fn live_fps_value(v: &str) -> Result<u32, String> {
+    match v.parse::<u32>() {
+        Ok(n @ 0..=1000) => Ok(n),
+        _ => Err(format!("FPS: '{v}' (1 to 1000, 0 for no cap)")),
     }
 }
 
@@ -420,6 +460,9 @@ fn set_affinity(cpus: &[usize]) {
         libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
     }
 }
+
+/// The file in a profile a running game reads its frame-rate limit from (MOCKTAIL_FPS_FILE).
+const FPS_FILE: &str = "fps";
 
 /// The link Mocktail joins with: a place, and a server in it (job ID, or a private server's link
 /// code). A follow carries the user instead of their server, so Roblox joins them its own way
@@ -968,6 +1011,8 @@ pub fn play(req: &Request) {
     let _ = fs::remove_file(profile.join(PICKUP));
     // a second copy earlier versions wrote, which Mocktail never read
     let _ = fs::remove_file(profile.join("data/mocktail/roblox.cookie"));
+    // the last run's live FPS: this start takes the account's FPS cap
+    let _ = fs::remove_file(profile.join(FPS_FILE));
     // one account started on its own does not wait for free RAM. The turn comes after the
     // memory wait, so an account waiting for memory does not hold up one started on its own
     if req.input("_alone") != "1" {
@@ -1033,6 +1078,9 @@ pub fn play(req: &Request) {
         ("MOCKTAIL_COOKIE_FILE".into(), p("roblox.cookie")),
         // Alyae's Mocktail build (patch 11): writing this file asks the game for one nudge now
         ("MOCKTAIL_NUDGE_FILE".into(), p("nudge")),
+        // Alyae's Mocktail build (patch 13): a frame-rate limit written here replaces the
+        // running game's (the FPS choice)
+        ("MOCKTAIL_FPS_FILE".into(), p(FPS_FILE)),
         ("MOCKTAIL_DISABLE_FAILURE_DIALOG".into(), "1".into()),
         ("MOCKTAIL_GRAPHICS_BACKEND".into(), "opengl".into()),
         // a Windows PC with mouse and keyboard: Roblox shows its PC layout and settings
@@ -1199,6 +1247,16 @@ pub fn play(req: &Request) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_fps_values() {
+        assert_eq!(live_fps_value("30"), Ok(30));
+        assert_eq!(live_fps_value("0"), Ok(0));
+        assert_eq!(live_fps_value("1000"), Ok(1000));
+        for bad in ["", "1001", "-1", "max", "60fps"] {
+            assert!(live_fps_value(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn launch_uris() {

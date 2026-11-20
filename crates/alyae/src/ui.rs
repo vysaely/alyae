@@ -91,6 +91,9 @@ pub struct App {
     anti_afk: u64,
     /// when Anti-AFK last nudged (or was turned on)
     anti_afk_last: Instant,
+    /// the frame-rate limit the FPS choice gave a running game (0: no cap), by account; shown
+    /// while it runs, forgotten when the account's game starts again
+    live_fps: HashMap<String, u32>,
     /// the accounts-file dialog, when open
     transfer: Option<Transfer>,
     /// the Edit Account window (every field of the chosen account) is open
@@ -219,6 +222,7 @@ impl App {
             anti_afk: 0,
             watch_picked: None,
             anti_afk_last: Instant::now(),
+            live_fps: HashMap::new(),
             transfer: None,
             edit_open: false,
             side_for: None,
@@ -539,6 +543,10 @@ impl App {
                             true,
                         ),
                     }
+                }
+                Event::LiveFps { account, fps } => {
+                    crate::log::line(&self.name_of(&account), &format!("live FPS {fps}"));
+                    self.live_fps.insert(account, fps);
                 }
                 Event::Error { account, text } => {
                     let name = self
@@ -883,7 +891,9 @@ impl App {
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 // only a failure is worth a message; a nudge every few minutes is not
-                if let Err(e) = module::run_and_wait(&m, &m.anti_afk, &account, &dir) {
+                if let Err(e) =
+                    module::run_and_wait(&m, &m.anti_afk, &account, &Values::new(), &dir)
+                {
                     let _ = tx.send(Event::Note {
                         text: format!("Anti-AFK: {e}"),
                         bad: true,
@@ -923,6 +933,7 @@ impl App {
                 match r {
                     Some(r) if action.runs => {
                         self.running.insert(id.clone(), r);
+                        self.live_fps.remove(&id);
                     }
                     Some(r) => self.tasks.push((id.clone(), r)),
                     None => {}
@@ -1808,11 +1819,17 @@ impl App {
             r @ ("main" | "alt") => r,
             _ => "",
         };
-        let fps = match m.value_of(a, "fps").parse::<u32>() {
-            Ok(0) => "no cap".to_string(),
-            Ok(n) if n >= 1000 => "no cap".to_string(),
-            Ok(n) => format!("{n} FPS"),
-            Err(_) => String::new(),
+        let label = |n: u32| {
+            if n == 0 || n >= 1000 {
+                "no cap".to_string()
+            } else {
+                format!("{n} FPS")
+            }
+        };
+        // while the game runs with a limit from the FPS choice: that one
+        let fps = match self.live_fps.get(&a.id) {
+            Some(&n) if self.running.contains_key(&a.id) => format!("{} now", label(n)),
+            _ => m.value_of(a, "fps").parse().map(label).unwrap_or_default(),
         };
         [role, fps.as_str()]
             .into_iter()
@@ -2108,10 +2125,20 @@ impl App {
         let n = ids.len();
         let count = |label: &str| counted(label, n);
         let mut choice = None;
-        if ids.iter().any(|id| self.running.contains_key(id))
-            && ui.button(count("Close game")).clicked()
-        {
+        let running = ids.iter().any(|id| self.running.contains_key(id));
+        if running && ui.button(count("Close game")).clicked() {
             choice = Some(MenuChoice::Stop);
+        }
+        if running && !m.live_fps.is_empty() {
+            ui.menu_button("FPS", |ui| {
+                for (label, fps) in LIVE_FPS {
+                    if ui.button(label).clicked() {
+                        choice = Some(MenuChoice::LiveFps(fps));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("until the game closes; the FPS cap stays for the next start");
         }
         for a in m.actions.iter().filter(|a| !a.on_deck() && !a.in_more()) {
             if ui.button(count(&a.label)).clicked() {
@@ -2258,6 +2285,7 @@ impl App {
                 self.focus_on(&id);
                 self.edit_open = true;
             }
+            MenuChoice::LiveFps(fps) => self.set_live_fps(m, &ids, fps),
             MenuChoice::Group(g) => {
                 self.edit_all(&ids, |a| a.group = g.clone());
                 self.say(
@@ -2284,6 +2312,36 @@ impl App {
                     }
                 });
             }
+        }
+    }
+
+    /// The FPS choice: each chosen running game gets `fps` (0: no cap) from the module's
+    /// `live_fps` helper; the Mode column shows it once the helper says it was handed over.
+    fn set_live_fps(&mut self, m: &Module, ids: &[String], fps: u32) {
+        let inputs: Values = [("fps".to_string(), fps.to_string())].into();
+        for a in self
+            .accounts
+            .iter()
+            .filter(|a| ids.contains(&a.id) && self.running.contains_key(&a.id))
+        {
+            let (m, a, dir, tx) = (m.clone(), a.clone(), self.dir.clone(), self.tx.clone());
+            let (inputs, ctx, name) = (inputs.clone(), self.ctx.clone(), self.title(&a));
+            std::thread::spawn(move || {
+                let ev = match module::run_and_wait(&m, &m.live_fps, &a, &inputs, &dir) {
+                    Ok(_) => Event::LiveFps {
+                        account: a.id.clone(),
+                        fps,
+                    },
+                    Err(e) => Event::Note {
+                        text: format!("{name}: {e}"),
+                        bad: true,
+                    },
+                };
+                let _ = tx.send(ev);
+                if let Some(c) = ctx {
+                    c.request_repaint();
+                }
+            });
         }
     }
 
@@ -2573,7 +2631,8 @@ impl App {
                     (m.clone(), self.dir.clone(), self.tx.clone(), self.title(&a));
                 let ctx = self.ctx.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = module::run_and_wait(&m, &m.on_remove, &a, &dir) {
+                    if let Err(e) = module::run_and_wait(&m, &m.on_remove, &a, &Values::new(), &dir)
+                    {
                         let _ = tx.send(Event::Note {
                             text: format!("{title}: files not deleted: {e}"),
                             bad: true,
@@ -2640,10 +2699,11 @@ impl App {
             ..Default::default()
         };
         std::thread::spawn(move || {
-            let (text, bad) = match module::run_and_wait(&m, &m.close_all, &account, &dir) {
-                Ok(said) => (said.unwrap_or_else(|| "All games closed".into()), false),
-                Err(e) => (format!("Close all games: {e}"), true),
-            };
+            let (text, bad) =
+                match module::run_and_wait(&m, &m.close_all, &account, &Values::new(), &dir) {
+                    Ok(said) => (said.unwrap_or_else(|| "All games closed".into()), false),
+                    Err(e) => (format!("Close all games: {e}"), true),
+                };
             let _ = tx.send(Event::Note { text, bad });
             if let Some(c) = ctx {
                 c.request_repaint();
@@ -3640,6 +3700,8 @@ enum MenuChoice {
     Remove,
     /// Edit account, for this one
     Edit(String),
+    /// the FPS choice: a new frame-rate limit for the running games (0: no cap)
+    LiveFps(u32),
     Group(String),
     Set(String, String),
 }
@@ -3693,6 +3755,17 @@ fn action_inputs(action: &module::Action, all: &Values) -> Values {
         })
         .collect()
 }
+
+/// The FPS choice of a running account: (label, frame-rate limit; 0: no cap).
+const LIVE_FPS: [(&str, u32); 7] = [
+    ("1", 1),
+    ("15", 15),
+    ("30", 30),
+    ("60", 60),
+    ("144", 144),
+    ("240", 240),
+    ("Max", 0),
+];
 
 /// A label for `n` accounts: "Log out (3)"; one account: the label alone.
 fn counted(label: &str, n: usize) -> String {
@@ -4472,6 +4545,69 @@ esac
         h.state_mut().check_builds(true);
         assert!(h.state().building.is_some(), "a pending install did not start at open");
         wait_ended(&mut h);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// The FPS choice is offered for a running game only; the Mode column shows the limit it
+    /// gave while the game runs, the account's FPS cap again once it starts anew.
+    #[test]
+    #[cfg(unix)]
+    fn live_fps_shows_while_running() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        std::fs::write(
+            mods.join("t/module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\nlive_fps = \"live_fps\"\n\
+             [[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
+             [[field]]\nkey = \"role\"\nlabel = \"Role\"\nkind = \"choice\"\nchoices = [\"alt\", \"main\"]\n\
+             [[field]]\nkey = \"fps\"\nlabel = \"FPS cap\"\ndefault_by = \"role\"\ndefaults = { alt = \"1\" }\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\ncommand = 'sleep 30'\n",
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut a = h.state_mut().new_account(&m).unwrap();
+        set_value(&mut a, "login", "bob", false);
+        set_value(&mut a, "role", "alt", false);
+        assert!(h.state_mut().save(&a));
+        h.run();
+        h.get_by_label("bob").click();
+        h.run();
+        h.get_by_label("Account").click();
+        h.run();
+        assert!(h.query_by_label("FPS").is_none(), "no game runs");
+        // closes the menu
+        h.get_by_label("Account").click();
+        h.run();
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        h.run();
+        h.get_by_label("Account").click();
+        h.run();
+        assert!(h.query_by_label("FPS").is_some());
+        let tx = h.state().tx.clone();
+        tx.send(Event::LiveFps {
+            account: a.id.clone(),
+            fps: 30,
+        })
+        .unwrap();
+        h.run();
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 30 FPS now");
+        // the saved FPS cap is not touched
+        let saved = h.state().accounts.iter().find(|x| x.id == a.id).unwrap();
+        assert_eq!(m.value_of(saved, "fps"), "1");
+        // the game ended: its own cap again
+        let mut r = h.state_mut().running.remove(&a.id).unwrap();
+        r.stop();
+        let _ = r.child.wait();
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
+        // a new start forgets the last run's limit
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        assert!(h.state().running.contains_key(&a.id));
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
+        for r in h.state_mut().running.values_mut() {
+            r.stop();
+        }
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }

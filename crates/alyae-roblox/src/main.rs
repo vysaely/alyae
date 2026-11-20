@@ -511,6 +511,12 @@ fn main() {
         servers(&v);
         return;
     }
+    #[cfg(target_os = "linux")]
+    match action.as_str() {
+        "mocktail_check" => return linux::mocktail_build::check(),
+        "mocktail_build" => return linux::mocktail_build::build(&v),
+        _ => {}
+    }
     let obj = |k: &str| {
         v.get(k)
             .and_then(Value::as_object)

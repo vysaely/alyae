@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+pub mod mocktail_build;
+
 struct Mocktail {
     /// the real program
     bin: PathBuf,
@@ -71,10 +73,10 @@ fn build_warning(marker: Option<&str>, expected: &str) -> Option<&'static str> {
     match marker.map(str::trim) {
         Some(m) if m == expected => None,
         Some(_) => Some(
-            "Mocktail was built with older Alyae patches: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix may do nothing. Run modules/roblox-linux/mocktail/build.sh again",
+            "Mocktail was built with older Alyae patches: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix may do nothing",
         ),
         None => Some(
-            "This Mocktail is not Alyae's build: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix do nothing. Run modules/roblox-linux/mocktail/build.sh",
+            "This Mocktail is not Alyae's build: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix do nothing",
         ),
     }
 }
@@ -961,10 +963,6 @@ pub fn play(req: &Request) {
             "Mocktail is not installed (looked in ~/.local/lib/mocktail, /usr/lib/mocktail and PATH)",
         );
     };
-    let marker = fs::read_to_string(m.lib.join("alyae-mocktail-patch")).ok();
-    if let Some(w) = build_warning(marker.as_deref(), env!("ALYAE_MOCKTAIL_BUILD")) {
-        say(json!({ "warn": w }));
-    }
     let data_dir = &req.data_dir;
     let role = req.role();
     let fps_limit = req

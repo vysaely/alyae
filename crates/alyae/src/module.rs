@@ -56,7 +56,7 @@ pub struct Action {
     /// the account counts as running while the action runs
     #[serde(default)]
     pub runs: bool,
-    /// shown as the big button (AEAM's Join Server)
+    /// shown as the big button (Join Server)
     #[serde(default)]
     pub primary: bool,
     #[serde(default, rename = "input")]

@@ -116,7 +116,7 @@ index e57e4de..04509af 100644
 +  return ((at[1] >> 3) & 7) | ((rex & 4) << 1);
 +}
 +
-+// AEAM: a 240 clamp of the flag value. "mov r32, 240" then "cmp" of that
++// Alyae: a 240 clamp of the flag value. "mov r32, 240" then "cmp" of that
 +// register with another (optional REX), then a cmov; the other register was
 +// loaded from the flag within 160 bytes before. Roblox 2.742 moved one clamp
 +// to r12d with the load ~80 bytes earlier ("mov eax, 240; cmp r12d, eax;

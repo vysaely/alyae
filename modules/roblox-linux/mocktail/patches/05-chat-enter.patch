@@ -27,7 +27,7 @@ index d9846c3..4a99478 100644
                    .dispatched());
  
 -  ASSERT_EQ(probe_.calls.size(), 5u);
-+  // AEAM: the submitting Enter also reaches the game as a key press.
++  // Alyae: the submitting Enter also reaches the game as a key press.
 +  ASSERT_EQ(probe_.calls.size(), 6u);
    EXPECT_EQ(probe_.calls[0].name, "sync-text");
    EXPECT_EQ(probe_.calls[0].text, u"🙂é");

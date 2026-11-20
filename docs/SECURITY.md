@@ -36,7 +36,7 @@ call either directly).
 ## Left as they are (know them)
 
 - **Anyone with both `vault.key` and the database has every secret.** That is the price of
-  starting without a password (same as AEAM). On a shared or work PC, or a USB stick, the
+  starting without a password. On a shared or work PC, or a USB stick, the
   folder is the key. A master password (Argon2id, asked at start) is the fix if wanted.
 - **Copied secrets stay in the clipboard**, and Windows' clipboard history (Win+V) and cloud
   clipboard keep them. Turn clipboard history off at work, or copy 2FA codes only.

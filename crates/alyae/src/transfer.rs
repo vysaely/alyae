@@ -158,8 +158,6 @@ pub fn read(text: &str, password: &str) -> Result<Vec<Account>, String> {
 pub struct Imported {
     pub added: usize,
     pub skipped: usize,
-    /// accounts whose secrets could not all be opened (AEAM's), with how many
-    pub unreadable: Vec<(String, usize)>,
     /// names of added accounts that carry a command to run (a "launch" field): a file from
     /// someone else could hide anything there, so the window names them
     pub with_command: Vec<String>,
@@ -180,10 +178,7 @@ pub fn import(store: &Store, have: &[Account], accounts: Vec<Account>) -> Result
     store.transaction(|| {
         let mut r = Imported::default();
         let mut seen: Vec<Account> = have.to_vec();
-        for mut a in accounts {
-            // a folder of this PC's, chosen by Alyae: one from a file could name any folder,
-            // which Join would write into and Reset files would empty
-            a.fields.remove("profile");
+        for a in accounts {
             if a.id.is_empty() || a.game.is_empty() || already(&seen, &a) {
                 r.skipped += 1;
                 continue;
@@ -199,8 +194,7 @@ pub fn import(store: &Store, have: &[Account], accounts: Vec<Account>) -> Result
     })
 }
 
-/// Another manager's accounts, by name: Roblox Account Manager's AccountData.json (or its backup)
-/// or AEAM's manager.db.
+/// Another manager's accounts, by name: Roblox Account Manager's AccountData.json (or its backup).
 pub fn foreign(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|f| f.to_str())
@@ -208,10 +202,7 @@ pub fn foreign(path: &std::path::Path) -> bool {
         .is_some_and(|f| {
             matches!(
                 f.as_str(),
-                "accountdata.json"
-                    | "accountdata.json.backup"
-                    | "accountdata.json.bak"
-                    | "manager.db"
+                "accountdata.json" | "accountdata.json.backup" | "accountdata.json.bak"
             )
         })
 }
@@ -312,8 +303,6 @@ mod tests {
         let mut same_user = acc("x1", "roblox", "Same user");
         same_user.fields.insert("user_id".into(), "77".into());
         let mut cmd = acc("g1", "generic", "With command");
-        cmd.fields
-            .insert("profile".into(), "/home/someone/.mozilla".into());
         cmd.fields.insert("launch".into(), "calc.exe".into());
         let file = vec![same_user, cmd, acc("n1", "roblox", "New")];
         let have = store.list().unwrap().0;
@@ -323,12 +312,6 @@ mod tests {
         let have = store.list().unwrap().0;
         let again = import(&store, &have, file).unwrap();
         assert_eq!((again.added, again.skipped), (0, 3));
-        let g1 = have.iter().find(|a| a.id == "g1").unwrap();
-        assert_eq!(
-            g1.value("profile"),
-            "",
-            "an imported profile folder was kept"
-        );
         // secrets come back sealed under this PC's own key
         let n1 = have.iter().find(|a| a.id == "n1").unwrap();
         assert_eq!(n1.value("password"), "pw-n1");

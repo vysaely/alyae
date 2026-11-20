@@ -75,9 +75,23 @@ pub struct Action {
     /// runs for every chosen account at once instead of one at a time in the queue
     #[serde(default)]
     pub local: bool,
+    /// `menu = "more"`: in the More menu, with the rare and risky buttons; otherwise in the
+    /// Account menu (a button on the right, Join Server or one with its own box, is in neither)
+    #[serde(default)]
+    pub menu: String,
 }
 
 impl Action {
+    /// A button of its own on the right: the big one, or one with its own box (Follow).
+    pub fn on_deck(&self) -> bool {
+        self.primary || (self.inputs.len() == 1 && !self.needs_form())
+    }
+
+    /// In the More menu (else in the Account menu, when not on the right).
+    pub fn in_more(&self) -> bool {
+        self.menu == "more"
+    }
+
     /// Asks for its values (or a confirmation) in a small form before running; one plain input
     /// is a box beside the button instead.
     pub fn needs_form(&self) -> bool {
@@ -970,6 +984,45 @@ defaults = { main = "330", alt = "6" }
         assert_eq!(account_json(&m, &a)["fps"], "6");
         a.fields.insert("fps".into(), "60".into());
         assert_eq!(m.value_of(&a, "fps"), "60");
+    }
+
+    /// The Roblox buttons by menu: on the right (Join Server, Follow), the Account menu (the
+    /// everyday ones), the More menu (rare, or changing the account on Roblox's side).
+    #[test]
+    fn roblox_buttons_by_menu() {
+        for file in ["roblox-linux", "roblox-windows"] {
+            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules")).join(file);
+            let m =
+                Module::parse(&std::fs::read_to_string(dir.join("module.toml")).unwrap(), &dir)
+                    .unwrap();
+            let labels = |f: &dyn Fn(&Action) -> bool| -> Vec<&str> {
+                m.actions
+                    .iter()
+                    .filter(|a| f(a))
+                    .map(|a| a.label.as_str())
+                    .collect()
+            };
+            assert_eq!(labels(&|a| a.on_deck()), ["Join Server", "Follow"], "{file}");
+            assert_eq!(
+                labels(&|a| !a.on_deck() && !a.in_more()),
+                ["Refresh", "Log in", "Open in browser", "Settings", "Friends"],
+                "{file}"
+            );
+            let mut more = labels(&|a| !a.on_deck() && a.in_more());
+            more.sort_unstable();
+            assert_eq!(
+                more,
+                [
+                    "Change password",
+                    "Log out",
+                    "Reset files",
+                    "Sign out everywhere",
+                    "Unblock everyone",
+                    "Who can join"
+                ],
+                "{file}"
+            );
+        }
     }
 
     /// On Windows a value ending in a backslash keeps its closing quote.

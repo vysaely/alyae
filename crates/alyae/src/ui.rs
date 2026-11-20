@@ -2067,6 +2067,8 @@ impl App {
 
     // --- right-click menu ----------------------------------------------------------------------
 
+    /// The right-click menu: the buttons on the right (Join Server, Follow), then the Account
+    /// menu's entries, and More.
     fn account_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -2074,26 +2076,54 @@ impl App {
         ids: &[String],
     ) -> Option<MenuChoice> {
         let n = ids.len();
-        let count = |label: &str| {
-            if n > 1 {
-                format!("{label} ({n})")
-            } else {
-                label.to_string()
-            }
-        };
-        let mut choice = None;
         if n > 1 {
             ui.label(RichText::new(format!("{n} accounts")).weak());
         }
-        for a in &m.actions {
-            if ui.button(count(&a.label)).clicked() {
+        let mut choice = None;
+        for a in m.actions.iter().filter(|a| a.on_deck()) {
+            if ui.button(counted(&a.label, n)).clicked() {
                 choice = Some(MenuChoice::Run(a.id.clone()));
             }
         }
+        ui.separator();
+        choice = self.account_items(ui, m, ids).or(choice);
+        ui.separator();
+        ui.menu_button("More", |ui| {
+            choice = self.more_items(ui, m, ids).or(choice.take());
+        });
+        if choice.is_some() {
+            ui.close();
+        }
+        choice
+    }
+
+    /// The Account menu: Close game, the everyday buttons (Refresh, Log in, Open in browser,
+    /// Settings, Friends), Edit account, then Mode, Move to group and Copy.
+    fn account_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        m: &Module,
+        ids: &[String],
+    ) -> Option<MenuChoice> {
+        let n = ids.len();
+        let count = |label: &str| counted(label, n);
+        let mut choice = None;
         if ids.iter().any(|id| self.running.contains_key(id))
             && ui.button(count("Close game")).clicked()
         {
             choice = Some(MenuChoice::Stop);
+        }
+        for a in m.actions.iter().filter(|a| !a.on_deck() && !a.in_more()) {
+            if ui.button(count(&a.label)).clicked() {
+                choice = Some(MenuChoice::Run(a.id.clone()));
+            }
+        }
+        if ui
+            .add_enabled(n == 1, egui::Button::new("Edit account"))
+            .on_hover_text("every field: cookie, password, 2FA, mode, FPS")
+            .clicked()
+        {
+            choice = Some(MenuChoice::Edit(ids[0].clone()));
         }
         ui.separator();
         if let Some(role) = m.field("role").filter(|f| !f.choices.is_empty()) {
@@ -2182,15 +2212,25 @@ impl App {
                 }
             }
         });
+        choice
+    }
+
+    /// The More menu: the rare buttons and the ones that change the account on the game's side
+    /// (`menu = "more"`; each asks first when its module says so), and Remove.
+    fn more_items(&mut self, ui: &mut egui::Ui, m: &Module, ids: &[String]) -> Option<MenuChoice> {
+        let n = ids.len();
+        let mut choice = None;
+        for a in m.actions.iter().filter(|a| !a.on_deck() && a.in_more()) {
+            if ui.button(counted(&a.label, n)).clicked() {
+                choice = Some(MenuChoice::Run(a.id.clone()));
+            }
+        }
         ui.separator();
         if ui
-            .button(RichText::new(count("Remove")).color(ui.visuals().error_fg_color))
+            .button(RichText::new(counted("Remove", n)).color(ui.visuals().error_fg_color))
             .clicked()
         {
             choice = Some(MenuChoice::Remove);
-        }
-        if choice.is_some() {
-            ui.close();
         }
         choice
     }
@@ -2214,6 +2254,10 @@ impl App {
                 }
             }
             MenuChoice::Remove => self.confirm_remove = ids,
+            MenuChoice::Edit(id) => {
+                self.focus_on(&id);
+                self.edit_open = true;
+            }
             MenuChoice::Group(g) => {
                 self.edit_all(&ids, |a| a.group = g.clone());
                 self.say(
@@ -3063,8 +3107,8 @@ impl App {
     }
     // --- right: launch and the chosen account -----------------------------------------------
 
-    /// The right side: the join boxes and Join Server, Follow, Alias, Description,
-    /// and the four buttons under it.
+    /// The right side: the join boxes and Join Server, Follow, Alias, Description, Set
+    /// Description, and the Account and More menus under it.
     fn deck(&mut self, ui: &mut egui::Ui, m: &Module) {
         let ids: Vec<String> = self
             .selected
@@ -3219,40 +3263,34 @@ impl App {
             });
         });
         let mut choice = None;
-        let mut set_notes = false;
-        let mut edit = false;
         // a menu button of the grid: a half-width button with an arrow at its end
-        let menu = |ui: &mut egui::Ui, label: &str| {
-            let r = ui.add_sized([second, h], egui::Button::new(label));
+        let menu = |ui: &mut egui::Ui, label: &str, w: f32| {
+            let r = ui.add_sized([w, h], egui::Button::new(label));
             caret_at(ui, &r, r.rect.right() - 14.0);
             r
         };
+        let set_notes = ui
+            .add_enabled_ui(one, |ui| {
+                ui.add_sized([full, h], egui::Button::new(count("Set Description")))
+            })
+            .inner
+            .clicked();
+        // Account: the everyday things; More: the rare and risky ones
         ui.horizontal(|ui| {
-            set_notes = ui
-                .add_enabled_ui(one, |ui| {
-                    ui.add_sized([half, h], egui::Button::new(count("Set Description")))
-                })
-                .inner
-                .clicked();
             ui.add_enabled_ui(!ids.is_empty(), |ui| {
-                let r = menu(ui, "Account Utilities");
+                let r = menu(ui, "Account", half);
                 egui::Popup::menu(&r).show(|ui| {
-                    choice = self.actions_menu(ui, m, &ids, false);
+                    choice = self.account_items(ui, m, &ids);
+                    if choice.is_some() {
+                        ui.close();
+                    }
                 });
-            });
-        });
-        ui.horizontal(|ui| {
-            edit = ui
-                .add_enabled_ui(ids.len() == 1, |ui| {
-                    ui.add_sized([half, h], egui::Button::new("Edit Account"))
-                })
-                .inner
-                .on_hover_text("every field: cookie, password, 2FA, mode, FPS")
-                .clicked();
-            ui.add_enabled_ui(!ids.is_empty(), |ui| {
-                let r = menu(ui, "Account Control");
+                let r = menu(ui, "More", second);
                 egui::Popup::menu(&r).show(|ui| {
-                    choice = choice.take().or(self.actions_menu(ui, m, &ids, true));
+                    choice = choice.take().or(self.more_items(ui, m, &ids));
+                    if choice.is_some() {
+                        ui.close();
+                    }
                 });
             });
         });
@@ -3261,90 +3299,9 @@ impl App {
             self.edit_all(&ids, |a| a.notes = v.clone());
             self.say(format!("Description set for {}", plural(ids.len())), false);
         }
-        if edit {
-            self.edit_open = true;
-        }
         if let Some(c) = choice {
             self.apply_menu(m, ids, c);
         }
-    }
-
-    /// Account Utilities (`control` false): the game's everyday buttons, Mode, groups, Copy.
-    /// Account Control (`control` true): Stop, the buttons that change the account on the
-    /// game's side (each asks first), Remove.
-    fn actions_menu(
-        &mut self,
-        ui: &mut egui::Ui,
-        m: &Module,
-        ids: &[String],
-        control: bool,
-    ) -> Option<MenuChoice> {
-        let n = ids.len();
-        let count = |label: &str| {
-            if n > 1 {
-                format!("{label} ({n})")
-            } else {
-                label.to_string()
-            }
-        };
-        let mut choice = None;
-        // the buttons already on the right (Join Server, Follow) and the left (Open Browser) stay off
-        let on_deck = |a: &module::Action| {
-            a.primary || a.id == "browser" || (a.inputs.len() == 1 && !a.needs_form())
-        };
-        for a in m
-            .actions
-            .iter()
-            .filter(|a| !on_deck(a) && a.confirm.is_empty() != control)
-        {
-            if ui.button(count(&a.label)).clicked() {
-                choice = Some(MenuChoice::Run(a.id.clone()));
-            }
-        }
-        if control {
-            if ids.iter().any(|id| self.running.contains_key(id))
-                && ui.button(count("Close game")).clicked()
-            {
-                choice = Some(MenuChoice::Stop);
-            }
-            ui.separator();
-            if ui
-                .button(RichText::new(count("Remove")).color(ui.visuals().error_fg_color))
-                .clicked()
-            {
-                choice = Some(MenuChoice::Remove);
-            }
-        } else {
-            ui.separator();
-            if let Some(role) = m.field("role").filter(|f| !f.choices.is_empty()) {
-                ui.menu_button("Mode", |ui| {
-                    for c in &role.choices {
-                        let label = match c.as_str() {
-                            "main" => "High (main)".to_string(),
-                            "alt" => "Low (alt)".to_string(),
-                            o => o.to_string(),
-                        };
-                        if ui.button(label).clicked() {
-                            choice = Some(MenuChoice::Set(role.key.clone(), c.clone()));
-                        }
-                    }
-                });
-            }
-            ui.menu_button("Move to group", |ui| {
-                for g in self.groups(&m.id) {
-                    if ui.button(&g).clicked() {
-                        choice = Some(MenuChoice::Group(g));
-                    }
-                }
-                if ui.button(RichText::new(NO_GROUP).weak()).clicked() {
-                    choice = Some(MenuChoice::Group(String::new()));
-                }
-            });
-        }
-        if choice.is_some() {
-            ui.close();
-        }
-        choice
     }
 
     /// Edit Account: every field of the chosen account in a window of its own (a new account
@@ -3661,6 +3618,8 @@ enum MenuChoice {
     Stop,
     Copy(String),
     Remove,
+    /// Edit account, for this one
+    Edit(String),
     Group(String),
     Set(String, String),
 }
@@ -3679,6 +3638,15 @@ fn action_inputs(action: &module::Action, all: &Values) -> Values {
                 .map(|v| (k.clone(), v.clone()))
         })
         .collect()
+}
+
+/// A label for `n` accounts: "Log out (3)"; one account: the label alone.
+fn counted(label: &str, n: usize) -> String {
+    if n > 1 {
+        format!("{label} ({n})")
+    } else {
+        label.to_string()
+    }
 }
 
 fn plural(n: usize) -> String {
@@ -4744,7 +4712,7 @@ esac
     }
 
     /// The right side: Set Alias and Set Description write to the chosen account, Edit
-    /// Account opens every field in its own window.
+    /// account in the Account menu opens every field in its own window.
     #[test]
     fn set_alias_description_and_edit() {
         let (mut h, dir) = window("generic");
@@ -4769,12 +4737,55 @@ esac
             (saved[0].name.as_str(), saved[0].notes.as_str()),
             ("Main", "farm alt")
         );
-        h.get_by_label("Edit Account").click();
+        h.get_by_label("Account").click();
+        h.run();
+        h.get_by_label("Edit account").click();
         h.run();
         assert!(h.state().edit_open);
         h.get_by_label("Close").click();
         h.run();
         assert!(!h.state().edit_open);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// More holds the rare and risky buttons and Remove; Log out still asks first.
+    #[test]
+    fn more_menu_holds_the_risky_ones() {
+        let (mut h, dir) = window("roblox");
+        let mut a = Account {
+            id: "r1".into(),
+            game: "roblox".into(),
+            ..Default::default()
+        };
+        set_value(&mut a, "username", "Bob", false);
+        h.state_mut().save(&a);
+        h.run();
+        h.get_by_label("Bob").click();
+        h.run();
+        assert_eq!(h.get_all_by_label("Remove").count(), 1);
+        h.get_by_label("More").click();
+        h.run();
+        // the bar's Remove and the menu's
+        assert_eq!(h.get_all_by_label("Remove").count(), 2);
+        assert!(h.query_by_label("Who can join").is_some());
+        assert!(h.query_by_label("Refresh").is_none(), "Refresh is in Account");
+        h.get_by_label("Log out").click();
+        h.run();
+        assert_eq!(
+            h.state().form,
+            Some(("logout".to_string(), vec!["r1".to_string()]))
+        );
+        // the right-click menu: the buttons on the right, the Account menu's, and More
+        h.state_mut().form = None;
+        h.run();
+        h.get_by_label("Bob").click_secondary();
+        h.run();
+        // the deck's Follow and the menu's
+        assert_eq!(h.get_all_by_label("Follow").count(), 2);
+        assert!(h.query_by_label("Edit account").is_some());
+        h.get_all_by_label("More").last().unwrap().hover();
+        h.run();
+        assert!(h.query_by_label("Sign out everywhere").is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

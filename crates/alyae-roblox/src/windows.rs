@@ -294,11 +294,20 @@ fn live_settings() -> Option<PathBuf> {
     )
 }
 
+/// The account's file `settings/<numeral>.<ext>`, and the name it had before accounts had
+/// numbers (`<id>.<ext>`).
+fn own_file(req: &Request, ext: &str) -> (PathBuf, PathBuf) {
+    let dir = req.data_dir.join("settings");
+    (
+        dir.join(format!("{}.{ext}", req.id)),
+        dir.join(format!("{}.{ext}", req.folder())),
+    )
+}
+
 /// This account's own copy of the settings file.
 fn own_settings(req: &Request) -> PathBuf {
-    req.data_dir
-        .join("settings")
-        .join(format!("{}.xml", req.id))
+    let (old, new) = own_file(req, "xml");
+    crate::files::current(&old, &new)
 }
 
 /// The person's own settings file, kept while Alyae's accounts use the shared one.
@@ -387,9 +396,8 @@ fn settings_after_exit(req: &Request, live: &Path) {
 
 /// Where the account's running client is noted (its process ID), for Settings to see.
 fn pid_file(req: &Request) -> PathBuf {
-    req.data_dir
-        .join("settings")
-        .join(format!("{}.pid", req.id))
+    let (old, new) = own_file(req, "pid");
+    crate::files::current(&old, &new)
 }
 
 fn running(req: &Request) -> bool {
@@ -578,6 +586,15 @@ pub fn play(req: &Request) {
     }
     let turn = LaunchTurn::take(|| stop.end_if_asked());
     stop.end_if_asked();
+    // files named by the account id (before accounts had numbers) get its numeral, in the turn
+    // and only while its client does not run
+    let was_running = running(req);
+    for ext in ["xml", "pid"] {
+        let (old, new) = own_file(req, ext);
+        if let Err(e) = crate::files::rename_old(&old, &new, was_running) {
+            fail(&e);
+        }
+    }
     status("signing in");
     let ticket = api::auth_ticket(&cookie).unwrap_or_else(|e| fail(&e));
     let tracker = api::new_browser_tracker();

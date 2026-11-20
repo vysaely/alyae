@@ -73,10 +73,10 @@ fn build_warning(marker: Option<&str>, expected: &str) -> Option<&'static str> {
     match marker.map(str::trim) {
         Some(m) if m == expected => None,
         Some(_) => Some(
-            "Mocktail was built with older Alyae patches: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix may do nothing",
+            "Mocktail was built with older Alyae patches: shift-lock cursor, Anti-AFK, the main's low-memory profile the cursor fix and the FPS choice may do nothing",
         ),
         None => Some(
-            "This Mocktail is not Alyae's build: shift-lock cursor, Anti-AFK, the main's low-memory profile and the cursor fix do nothing",
+            "This Mocktail is not Alyae's build: shift-lock cursor, Anti-AFK, the main's low-memory profile the cursor fix and the FPS choice do nothing",
         ),
     }
 }

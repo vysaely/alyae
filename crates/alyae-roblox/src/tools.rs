@@ -1,4 +1,4 @@
-//! The account tools (AEAM's batch tools): sign out everywhere, log out, change password, unblock
+//! The account tools: sign out everywhere, log out, change password, unblock
 //! everyone, friend requests and friends, who can join. Each runs for one account; Alyae runs it
 //! for every chosen account, and `index` (the account's place in that list) spaces them out so
 //! Roblox does not see a burst.
@@ -13,22 +13,11 @@ fn session(req: &Request) -> Session {
         fail("no cookie: sign this account in first");
     }
     // the device ID Mocktail uses for this account, else a new one for this run
-    let tracker = std::fs::read_to_string(
-        req.data_dir
-            .join("profiles")
-            .join(&req.id)
-            .join("browser_tracker"),
-    )
-    .ok()
-    .or_else(|| {
-        let p = req.get("profile");
-        (!p.is_empty()).then(|| {
-            std::fs::read_to_string(std::path::Path::new(p).join("browser_tracker")).ok()
-        })?
-    })
-    .map(|t| t.trim().to_string())
-    .filter(|t| api::browser_id(t).is_some())
-    .or_else(api::new_browser_tracker);
+    let tracker = std::fs::read_to_string(req.profile().join("browser_tracker"))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| api::browser_id(t).is_some())
+        .or_else(api::new_browser_tracker);
     Session {
         cookie,
         tracker,

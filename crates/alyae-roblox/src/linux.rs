@@ -1,9 +1,7 @@
 //! Roblox on Linux through Mocktail: one profile folder per account, a per-account copy of the
 //! Mocktail program (its single-instance lock follows the program's path), a main or alt role.
-//! The settings mirror what AEAM ran with; AEAM-only extras (chat overlay, anti-AFK, self-heal)
-//! are left out.
 
-use crate::files::{clear, remove};
+use crate::files::{clear, remove, rename_old};
 use crate::{Join, Request, Role, Stop, api, fail, join_from, say, settings_xml, status};
 use serde_json::json;
 use std::fs;
@@ -122,12 +120,25 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The file name of the account's own copy of the Mocktail program.
+/// The file name of the account's own copy of the Mocktail program: `mocktail_XII`.
 fn program_name(req: &Request) -> String {
+    format!("mocktail_{}", req.folder())
+}
+
+/// The name the copy had before accounts had numbers (from the account id); a game started
+/// then still runs under it.
+fn old_program_name(req: &Request) -> String {
     format!(
         "mocktail_alyae_{}",
         req.id.chars().take(12).collect::<String>()
     )
+}
+
+/// Whether the account's game runs, under either name of its program.
+fn game_running(req: &Request) -> bool {
+    [program_name(req), old_program_name(req)]
+        .iter()
+        .any(|n| already_running(Path::new(n)))
 }
 
 /// The account's own copy of the Mocktail program (a hard link where it can be one): Mocktail
@@ -148,10 +159,7 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
             for e in entries.flatten() {
                 let n = e.file_name();
                 let s = n.to_string_lossy();
-                if (s.contains(".so") || s.starts_with("mocktail_"))
-                    && !s.starts_with("mocktail_acc_")
-                    && !s.starts_with("mocktail_alyae_")
-                {
+                if (s.contains(".so") || s.starts_with("mocktail_")) && !alyae_game(&s) {
                     let dest = dir.join(&n);
                     if fs::symlink_metadata(&dest).is_err() {
                         let _ = symlink(e.path(), dest);
@@ -198,15 +206,19 @@ fn running_pid(program: &Path) -> Option<i32> {
     })
 }
 
-/// Alyae's copy of Mocktail for an account (`program_name`).
+/// Alyae's copy of Mocktail for an account: `mocktail_<numeral>` (`program_name`), or the
+/// `mocktail_alyae_<id>` it was before (`old_program_name`).
 fn alyae_game(name: &str) -> bool {
     name.starts_with("mocktail_alyae_")
+        || name
+            .strip_prefix("mocktail_")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| "IVXLCDM".contains(c)))
 }
 
-/// Any Mocktail game: Alyae's copies, AEAM's (`mocktail_acc_...`) and the plain program; not
-/// Mocktail's helper programs (mocktail_webview_helper, mocktail_cookie_helper, ...).
+/// Any Mocktail game: Alyae's copies and the plain program; not Mocktail's helper programs
+/// (mocktail_webview_helper, mocktail_cookie_helper, ...).
 fn any_game(name: &str) -> bool {
-    alyae_game(name) || name.starts_with("mocktail_acc_") || name == "mocktail"
+    alyae_game(name) || name == "mocktail"
 }
 
 /// The running games whose program name `pick` takes, as process IDs.
@@ -264,8 +276,8 @@ fn nudge_report(nudged: usize, old: usize, failed: &[String]) -> Result<String, 
     }
 }
 
-/// The "Close all games" button: every Mocktail game, also ones Alyae did not start (AEAM's,
-/// plain Mocktail), is asked to end, and made to after 4 s.
+/// The "Close all games" button: every Mocktail game, also ones Alyae did not start (plain
+/// Mocktail), is asked to end, and made to after 4 s.
 pub fn close_all() {
     let games = || running_games(any_game);
     let all = games();
@@ -289,9 +301,11 @@ pub fn close_all() {
 /// ends it; at its end a renewed cookie is saved as after Join Server. No game: a renewed cookie
 /// a game left while Alyae was closed is saved; otherwise it ends at once, saying nothing.
 pub fn resume(req: &Request) {
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     let cookie = req.cookie();
-    let pid = find_mocktail().and_then(|m| running_pid(&m.lib.join(program_name(req))));
+    let pid = [program_name(req), old_program_name(req)]
+        .iter()
+        .find_map(|n| running_pid(Path::new(n)));
     let Some(pid) = pid else {
         if profile.join(PICKUP).exists() {
             after_game(&profile, &cookie, false);
@@ -461,8 +475,8 @@ fn shiftlock_cursor(req: &Request, m: &Mocktail) -> Vec<(String, String)> {
     ]
 }
 
-/// FastFlags: the low-cost set for alts; for a main, only what AEAM's main ran with by default;
-/// with no role, only the two every account gets.
+/// FastFlags: the low-cost set for alts; for a main, higher texture quality and the Windows
+/// client's loading values; with no role, only the two every account gets.
 fn fast_flags(role: Role) -> serde_json::Value {
     let mut f = match role {
         Role::Main => json!({
@@ -531,12 +545,8 @@ fn settings_file(profile: &Path) -> PathBuf {
 /// The Settings button: sets the graphics level, camera sensitivity, volume and the rest of its
 /// form in Roblox's own settings file. A value left at "keep" (or empty) stays as it is.
 pub fn graphics(req: &Request) {
-    let m = find_mocktail();
-    if let Some(m) = &m {
-        let program = m.lib.join(program_name(req));
-        if already_running(&program) {
-            fail("close this account's Roblox first: it rewrites its settings when it closes");
-        }
+    if game_running(req) {
+        fail("close this account's Roblox first: it rewrites its settings when it closes");
     }
     let (props, fps) =
         settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
@@ -556,7 +566,7 @@ pub fn graphics(req: &Request) {
         status("window set (used from the next start)");
         return;
     }
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     match settings_xml::apply(&settings_file(&profile), &props) {
         Ok(()) => status(&format!("{} settings set", props.len())),
         Err(e) => fail(&format!("cannot write Roblox's settings: {e}")),
@@ -583,13 +593,10 @@ fn reset_profile(profile: &Path) -> u64 {
 
 /// The Reset files button.
 pub fn reset(req: &Request) {
-    if let Some(m) = find_mocktail() {
-        let program = m.lib.join(program_name(req));
-        if already_running(&program) {
-            fail("close this account's Roblox first");
-        }
+    if game_running(req) {
+        fail("close this account's Roblox first");
     }
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     if !profile.is_dir() {
         fail("this account has no files yet");
     }
@@ -598,19 +605,17 @@ pub fn reset(req: &Request) {
 }
 
 /// The resolved profile folder when it is one of Alyae's own (inside `data_dir/profiles`, links
-/// resolved, so a link pointing out of it does not count); None for AEAM's folders and the like.
+/// resolved, so a link pointing out of it does not count); None for any other folder.
 fn owned_profile(profile: &Path, data_dir: &Path) -> Option<PathBuf> {
     let root = fs::canonicalize(data_dir.join("profiles")).ok()?;
     let p = fs::canonicalize(profile).ok()?;
     (p != root && p.starts_with(&root)).then_some(p)
 }
 
-/// Run before the account is removed from Alyae: its copy of the Mocktail program goes, and its
-/// profile folder when Alyae made it; a folder shared with AEAM stays, only Mocktail's saved
-/// sign-in in it goes.
+/// Run before the account is removed from Alyae: its copy of the Mocktail program goes (under
+/// either name), and its profile folder when it is inside Alyae's profiles folder.
 pub fn forget(req: &Request) {
-    let name = program_name(req);
-    if already_running(Path::new(&name)) {
+    if game_running(req) {
         fail("close this account's Roblox first");
     }
     let mut problems = Vec::new();
@@ -623,43 +628,22 @@ pub fn forget(req: &Request) {
     let mut dirs = vec![req.data_dir.join("bin")];
     dirs.extend(find_mocktail().map(|m| m.lib));
     for d in dirs {
-        let program = d.join(&name);
-        gone(&program.with_extension("provision"));
-        gone(&program);
+        for name in [program_name(req), old_program_name(req)] {
+            let program = d.join(name);
+            gone(&program.with_extension("provision"));
+            gone(&program);
+        }
     }
-    let profile = profile_dir(req, &req.data_dir);
-    match owned_profile(&profile, &req.data_dir) {
-        Some(p) => {
-            if let Err(e) = fs::remove_dir_all(&p) {
-                problems.push(format!("{}: {e}", p.display()));
-            }
-        }
-        // a folder shared with AEAM: only the plain-text sign-ins a killed run can leave
-        None if profile.is_dir() => {
-            for f in [
-                "data/auth/roblox.cookie",
-                "roblox.cookie",
-                "data/mocktail/roblox.cookie",
-            ] {
-                gone(&profile.join(f));
-            }
-        }
-        None => {}
+    let profile = req.profile();
+    if let Some(p) = owned_profile(&profile, &req.data_dir)
+        && let Err(e) = fs::remove_dir_all(&p)
+    {
+        problems.push(format!("{}: {e}", p.display()));
     }
     if !problems.is_empty() {
         fail(&format!("cannot delete {}", problems.join("; ")));
     }
     status("files deleted");
-}
-
-/// The account's folder: Alyae's own, or AEAM's when the account came from there (its in-game
-/// settings and caches stay).
-fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
-    let p = req.get("profile");
-    if !p.is_empty() && Path::new(p).is_dir() {
-        return PathBuf::from(p);
-    }
-    data_dir.join("profiles").join(&req.id)
 }
 
 /// RAM that must be free (MemAvailable) before another client starts: many clients loading a
@@ -809,14 +793,6 @@ fn prepare_profile(
     if let Ok(cur) = fs::read(m.data.join("current.json")) {
         let _ = fs::write(profile.join("data/current.json"), &cur);
     }
-    // Mocktail adds the flags in <config root>/fflags.json to the ones Alyae passes: one left by
-    // AEAM would keep its old flags
-    match fs::remove_file(profile.join("config/fflags.json")) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            fail(&format!("cannot remove AEAM's fflags.json: {e}"))
-        }
-        _ => {}
-    }
     // downloaded assets: every profile keeps its own (Mocktail makes the folder), as Roblox
     // deletes files its own index evicts, also ones another account's index still lists. A
     // link to the folder alts once shared goes; only the link: the shared files stay until
@@ -895,7 +871,7 @@ fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> PathBuf 
 fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
     let host = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let dir = match &host {
-        Some(h) if h.is_dir() => h.join("alyae").join(&req.id),
+        Some(h) if h.is_dir() => h.join("alyae").join(req.folder()),
         _ => profile.join("run"),
     };
     mkdir(&dir);
@@ -999,7 +975,7 @@ pub fn play(req: &Request) {
         fail("this account is already running");
     }
     let join = join_from(req);
-    let profile = profile_dir(req, data_dir);
+    let profile = req.profile();
     mkdir(&profile);
     // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
     // replace it, and at the end it would pass for a renewed cookie. (One left for pickup was
@@ -1015,6 +991,21 @@ pub fn play(req: &Request) {
     }
     let mut turn = LaunchTurn::take(data_dir, &mut stop);
     stop.end_if_asked();
+    // a folder named by the account id (before accounts had numbers) gets its numeral, in the
+    // turn and only while no game of the account's uses it; the old copy of Mocktail goes
+    let profiles = data_dir.join("profiles");
+    let old_running = already_running(Path::new(&old_program_name(req)));
+    if let Err(e) = rename_old(
+        &profiles.join(&req.id),
+        &profiles.join(req.folder()),
+        old_running,
+    ) {
+        fail(&e);
+    }
+    let profile = req.profile();
+    if !old_running {
+        let _ = fs::remove_file(program.with_file_name(old_program_name(req)));
+    }
     status("starting");
     let window = window_plan(req.window(), role);
     prepare_profile(
@@ -1326,23 +1317,23 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// Only folders inside Alyae's own profiles folder are Alyae's to delete; AEAM's and links
-    /// pointing out are not.
+    /// Only folders inside Alyae's own profiles folder are Alyae's to delete; folders elsewhere
+    /// and links pointing out are not.
     #[test]
     fn owned_profiles_only() {
         let root = std::env::temp_dir().join(format!("alyae-forget-{}", std::process::id()));
-        let (data, aeam) = (root.join("data"), root.join("aeam/profile"));
+        let (data, elsewhere) = (root.join("data"), root.join("elsewhere/profile"));
         let own = data.join("profiles/abc");
         fs::create_dir_all(&own).unwrap();
-        fs::create_dir_all(&aeam).unwrap();
-        symlink(&aeam, data.join("profiles/link")).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        symlink(&elsewhere, data.join("profiles/link")).unwrap();
         assert_eq!(
             owned_profile(&own, &data),
             Some(fs::canonicalize(&own).unwrap())
         );
         // the same folder named through a detour still counts
         assert!(owned_profile(&data.join("profiles/../profiles/abc"), &data).is_some());
-        assert_eq!(owned_profile(&aeam, &data), None);
+        assert_eq!(owned_profile(&elsewhere, &data), None);
         assert_eq!(owned_profile(&data.join("profiles/link"), &data), None);
         assert_eq!(owned_profile(&data.join("profiles/../.."), &data), None);
         assert_eq!(owned_profile(&data.join("profiles"), &data), None);
@@ -1437,8 +1428,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A launch writes only the files Mocktail reads under the roots Alyae gives it, and
-    /// takes away an fflags.json AEAM left.
+    /// A launch writes only the files Mocktail reads under the roots Alyae gives it.
     #[test]
     fn profile_has_only_what_mocktail_reads() {
         let root = std::env::temp_dir().join(format!("alyae-prep-{}", std::process::id()));
@@ -1450,8 +1440,6 @@ mod tests {
         };
         fs::create_dir_all(m.data.join("payloads")).unwrap();
         fs::write(m.data.join("current.json"), "{}").unwrap();
-        fs::create_dir_all(p.join("config")).unwrap();
-        fs::write(p.join("config/fflags.json"), r#"{"FFlagOld":true}"#).unwrap();
         prepare_profile(&m, &data, &p, Role::Main, Some(60), &window_plan("small", Role::Main));
         for made in [
             "config/config.yaml",
@@ -1528,7 +1516,7 @@ mod tests {
     /// Alyae's games, which name their nudge file.
     #[test]
     fn which_processes_are_games() {
-        for game in ["mocktail", "mocktail_acc_0082e9a91d9e", "mocktail_alyae_abc"] {
+        for game in ["mocktail", "mocktail_alyae_abc", "mocktail_XII", "mocktail_I"] {
             assert!(any_game(game), "{game}");
         }
         for other in [
@@ -1537,11 +1525,18 @@ mod tests {
             "mocktail_updater",
             "mocktail_failure_dialog",
             "mocktail.provision",
+            "mocktail_XII.provision",
+            "mocktail_",
+            "mocktail_xii",
             "alyae",
         ] {
             assert!(!any_game(other), "{other}");
         }
-        assert!(alyae_game("mocktail_alyae_abc") && !alyae_game("mocktail_acc_1"));
+        // the new name and the one from before numbers are both Alyae's; the plain program is not
+        for game in ["mocktail_alyae_abc", "mocktail_XLVI"] {
+            assert!(alyae_game(game), "{game}");
+        }
+        assert!(!alyae_game("mocktail"));
     }
 
     /// The shift-lock reference comes from the newest payload that has it, else from the file

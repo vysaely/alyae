@@ -1,6 +1,6 @@
 //! Colours from the desktop: Infynitae's theme when it runs (`LOOK_*` from
 //! `infynitae-edge-apps --print-theme`), Windows' light/dark mode and accent colour on Windows,
-//! another Linux desktop's through the desktop portal, else egui's dark look. The layout follows AEAM.
+//! another Linux desktop's through the desktop portal, else egui's dark look.
 
 use eframe::egui::{self, Color32, FontId, RichText, Stroke};
 use std::sync::OnceLock;
@@ -249,13 +249,13 @@ pub fn apply(ctx: &egui::Context) {
     ctx.global_style_mut(|style| style.interaction.selectable_labels = false);
 }
 
-/// The big button (AEAM's Join Server), in the accent.
+/// The big button (Join Server), in the accent.
 pub fn primary(label: &str) -> egui::Button<'static> {
     let c = colors();
     egui::Button::new(RichText::new(label.to_string()).strong().color(c.card)).fill(c.accent)
 }
 
-/// A small label, as AEAM's "GROUP:".
+/// A small label, as "GROUP:".
 pub fn tag(text: &str) -> RichText {
     RichText::new(text.to_uppercase())
         .color(colors().muted)

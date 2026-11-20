@@ -1,6 +1,5 @@
 //! Secrets at rest: XSalsa20-Poly1305 (NaCl secretbox) under a random 32-byte key kept in a file
-//! only the owner can read. A sealed blob is nonce (24 bytes) followed by the ciphertext, the same
-//! layout AEAM wrote with libsodium, so AEAM's blobs open here unchanged.
+//! only the owner can read. A sealed blob is nonce (24 bytes) followed by the ciphertext.
 
 use crypto_secretbox::aead::{Aead, KeyInit};
 use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};

@@ -139,14 +139,8 @@ struct Transfer {
 /// What the accounts file dialog's thread did.
 enum Work {
     Saved(usize),
-    Loaded(Loaded),
-}
-
-/// Accounts read from a file, not yet added.
-enum Loaded {
-    Accounts(Vec<Account>),
-    /// AEAM's data folder: its own import reads it
-    Aeam(std::path::PathBuf),
+    /// accounts read from a file, not yet added
+    Loaded(Vec<Account>),
 }
 
 const NO_GROUP: &str = "Ungrouped";
@@ -392,14 +386,6 @@ impl App {
         self.draft = None;
         self.search.clear();
         self.group_filter = None;
-    }
-
-    fn import_aeam(&mut self) {
-        let r = match crate::aeam::dir() {
-            Some(dir) => self.add_loaded(Loaded::Aeam(dir)),
-            None => Err("AEAM's data folder was not found".into()),
-        };
-        self.report_import(r);
     }
 
     fn focus_on(&mut self, id: &str) {
@@ -1013,23 +999,6 @@ impl App {
                     }
                 });
             }
-            let aeam_waiting = cfg!(unix)
-                && crate::aeam::dir().is_some()
-                && self
-                    .store
-                    .as_ref()
-                    .is_some_and(|s| s.setting("aeam_imported").is_none());
-            if aeam_waiting {
-                ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        "Your AEAM accounts can come along: they are copied, AEAM stays as it is.",
-                    );
-                    if ui.button("Bring in AEAM accounts").clicked() {
-                        self.import_aeam();
-                    }
-                });
-            }
             if self.store.is_some() {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
@@ -1072,7 +1041,7 @@ impl App {
             self.choose_game(None);
             return;
         };
-        // AEAM's layout: the status line along the bottom, the account's controls on the right,
+        // the layout: the status line along the bottom, the account's controls on the right,
         // the list on the left
         let frame = look::panel(ui.ctx());
         egui::Panel::bottom("status")
@@ -1082,7 +1051,7 @@ impl App {
                 look::grid(ui);
                 self.status_bar(ui, &m)
             });
-        // AEAM's look: no line between the sides, the list's own box parts them; the right side
+        // no line between the sides, the list's own box parts them; the right side
         // keeps no left margin, so the box and the right column are one margin apart
         egui::Panel::right("deck")
             .default_size(340.0)
@@ -1219,7 +1188,7 @@ impl App {
         }
     }
 
-    // --- left: group bar, table, buttons (AEAM's layout) -------------------------------------
+    // --- left: group bar, table, buttons -----------------------------------------------------
 
     fn visible(&self, m: &Module) -> Vec<&Account> {
         let q = self.search.to_lowercase();
@@ -1369,7 +1338,7 @@ impl App {
                     }
                 });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // AEAM's "1 selected" box, as tall as the boxes beside it
+                // the "1 selected" box, as tall as the boxes beside it
                 outlined(ui, &format!("{} selected", self.selected.len()));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
@@ -1385,7 +1354,7 @@ impl App {
         });
         // the table ends one gap over the buttons, which end on the panel's margin
         let table_h = (ui.available_height() - look::H - look::GAP).max(80.0);
-        // the list in a box of its own, as AEAM's
+        // the list in a box of its own
         egui::Frame::new()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(egui::Stroke::new(1.0, look::colors().edge))
@@ -1413,7 +1382,7 @@ impl App {
             } else {
                 "Add Account".to_string()
             };
-            // AEAM's Add Account: the button does the usual way (sign in on the game's page when
+            // Add Account: the button does the usual way (sign in on the game's page when
             // the game has one), its arrow and right-click hold the other ways
             let more = |ui: &mut egui::Ui, app: &mut App| {
                 if !flow.action.is_empty() && ui.button("Sign in with browser").clicked() {
@@ -1475,20 +1444,34 @@ impl App {
         });
     }
 
-    fn new_account(&self, m: &Module) -> Account {
-        Account {
+    /// A new account of `m`, with the next number; None (said in the message bar) when the
+    /// store cannot give one.
+    fn new_account(&mut self, m: &Module) -> Option<Account> {
+        let number = match self.store.as_ref().map(Store::next_number) {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => {
+                self.say(format!("Not added: {e}"), true);
+                return None;
+            }
+            None => {
+                self.say("Not added: no account store".to_string(), true);
+                return None;
+            }
+        };
+        Some(Account {
             id: store::new_id(),
             game: m.id.clone(),
             group: self.group_filter.clone().unwrap_or_default(),
             created: store::now(),
             sort: self.accounts.iter().map(|a| a.sort).max().unwrap_or(0) + 1,
+            number,
             ..Default::default()
-        }
+        })
     }
 
     /// Add account, by hand: an empty account in the form.
     fn add_account(&mut self, m: &Module) {
-        let a = self.new_account(m);
+        let Some(a) = self.new_account(m) else { return };
         self.focus = Some(a.id.clone());
         self.selected = [a.id.clone()].into();
         self.draft = Some(a);
@@ -1498,7 +1481,7 @@ impl App {
     /// Add account, through the module: a new account and its action (a login window) at once;
     /// what the action sends fills it in, and `finish_add` keeps it or drops it.
     fn add_via(&mut self, m: &Module, action: &str) {
-        let a = self.new_account(m);
+        let Some(a) = self.new_account(m) else { return };
         if self.save(&a) {
             self.adding.insert(a.id.clone());
             self.run_action(action, vec![a.id.clone()]);
@@ -1516,7 +1499,9 @@ impl App {
         let secret = m.is_secret(&flow.import_field);
         let mut ids = Vec::new();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let mut a = self.new_account(m);
+            let Some(mut a) = self.new_account(m) else {
+                break;
+            };
             set_value(
                 &mut a,
                 &flow.import_field,
@@ -1750,7 +1735,7 @@ impl App {
         if watch_column {
             table = table.column(Column::initial(90.0).at_least(60.0).clip(true));
         }
-        // AEAM's columns: Username, Alias, Group, Mode, Description
+        // the columns: Username, Alias, Group, Mode, Description
         table = table
             .column(Column::initial(130.0).at_least(80.0).clip(true))
             .column(Column::initial(100.0).at_least(50.0).clip(true));
@@ -2120,7 +2105,7 @@ impl App {
                         &mut a.fields
                     };
                     map.insert(key.clone(), value.clone());
-                    // a new mode drops a per-account FPS, as AEAM does
+                    // a new mode drops a per-account FPS
                     if key == "role" {
                         a.fields.remove("fps");
                     }
@@ -2245,8 +2230,8 @@ impl App {
                     self.say(format!("{} saved to {path}", plural(n)), false);
                     self.transfer = None;
                 }
-                Ok(Work::Loaded(l)) => {
-                    let r = self.add_loaded(l);
+                Ok(Work::Loaded(list)) => {
+                    let r = self.add_loaded(list);
                     if self.report_import(r) {
                         self.transfer = None;
                     }
@@ -2292,14 +2277,11 @@ impl App {
     }
 
     /// Adds what was read from a file.
-    fn add_loaded(&mut self, l: Loaded) -> Result<crate::transfer::Imported, String> {
+    fn add_loaded(&mut self, list: Vec<Account>) -> Result<crate::transfer::Imported, String> {
         let Some(s) = &self.store else {
             return Err("no account store".into());
         };
-        match l {
-            Loaded::Accounts(list) => crate::transfer::import(s, &self.accounts, list),
-            Loaded::Aeam(dir) => crate::aeam::import_from(&dir, s, &self.accounts),
-        }
+        crate::transfer::import(s, &self.accounts, list)
     }
 
     /// Says how an import went (one message for every kind of file); true when it went in.
@@ -2325,25 +2307,6 @@ impl App {
         if r.skipped > 0 {
             text += &format!(" ({} were here already)", r.skipped);
         }
-        let unreadable: usize = r.unreadable.iter().map(|(_, n)| *n).sum();
-        if unreadable > 0 {
-            let who: Vec<String> = r
-                .unreadable
-                .iter()
-                .map(|(name, n)| {
-                    if *n > 1 {
-                        format!("{name} ({n})")
-                    } else {
-                        name.clone()
-                    }
-                })
-                .collect();
-            text += &format!(
-                "; {unreadable} secret{} could not be decrypted ({})",
-                if unreadable == 1 { "" } else { "s" },
-                who.join(", ")
-            );
-        }
         if !r.with_command.is_empty() {
             text += &format!(
                 "; check the launch command of {} before launching: a file can carry any command",
@@ -2353,7 +2316,7 @@ impl App {
         if !problems.is_empty() {
             text += &format!("; {}", problems.join("; "));
         }
-        let warn = unreadable > 0 || !r.with_command.is_empty() || !problems.is_empty();
+        let warn = !r.with_command.is_empty() || !problems.is_empty();
         self.say(text, warn);
         true
     }
@@ -2377,10 +2340,7 @@ impl App {
             ui.heading(format!("Remove {}?", plural(n)));
             ui.label("Their logins and secrets are deleted from Alyae.");
             if with_files {
-                ui.label(
-                    "Their game files kept by Alyae are deleted too (folders shared with AEAM stay, \
-                     only the saved sign-in in them goes).",
-                );
+                ui.label("Their game files kept by Alyae are deleted too.");
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -2974,7 +2934,7 @@ impl App {
     }
     // --- right: launch and the chosen account -----------------------------------------------
 
-    /// The right side, as AEAM's: the join boxes and Join Server, Follow, Alias, Description,
+    /// The right side: the join boxes and Join Server, Follow, Alias, Description,
     /// and the four buttons under it.
     fn deck(&mut self, ui: &mut egui::Ui, m: &Module) {
         let ids: Vec<String> = self
@@ -3132,7 +3092,7 @@ impl App {
         let mut choice = None;
         let mut set_notes = false;
         let mut edit = false;
-        // a menu button of the grid: a half-width button with AEAM's arrow at its end
+        // a menu button of the grid: a half-width button with an arrow at its end
         let menu = |ui: &mut egui::Ui, label: &str| {
             let r = ui.add_sized([second, h], egui::Button::new(label));
             caret_at(ui, &r, r.rect.right() - 14.0);
@@ -3402,6 +3362,10 @@ impl App {
                     );
                 });
                 ui.end_row();
+                // the account's folder and game copy are named by its number; it never changes
+                ui.label(RichText::new("Folder").weak());
+                ui.label(store::numeral(d.number));
+                ui.end_row();
                 for f in &m.fields {
                     ui.label(RichText::new(&f.label).weak());
                     let map = if f.secret {
@@ -3650,8 +3614,8 @@ fn pick_file(save: bool, current: &str) -> std::sync::mpsc::Receiver<Option<std:
             }
             d.add_filter("Alyae accounts", &["alyae"]).save_file()
         } else {
-            // Alyae's own files, Roblox Account Manager's AccountData.json, AEAM's manager.db
-            d.add_filter("Accounts", &["alyae", "json", "backup", "bak", "db"])
+            // Alyae's own files, Roblox Account Manager's AccountData.json
+            d.add_filter("Accounts", &["alyae", "json", "backup", "bak"])
                 .add_filter("All files", &["*"])
                 .pick_file()
         };
@@ -3661,18 +3625,8 @@ fn pick_file(save: bool, current: &str) -> std::sync::mpsc::Receiver<Option<std:
 }
 
 /// The accounts in `path`: an Alyae accounts file, and quietly also Roblox Account Manager's
-/// AccountData.json (or its folder) or AEAM's data folder (or its manager.db). Touches no store,
-/// so it can run on a thread.
-fn load(path: &std::path::Path, password: &str) -> Result<Loaded, String> {
-    let named = |n: &str| path.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n));
-    if path.is_dir() && path.join("manager.db").is_file() {
-        return Ok(Loaded::Aeam(path.to_path_buf()));
-    }
-    if named("manager.db")
-        && let Some(dir) = path.parent()
-    {
-        return Ok(Loaded::Aeam(dir.to_path_buf()));
-    }
+/// AccountData.json (or its folder). Touches no store, so it can run on a thread.
+fn load(path: &std::path::Path, password: &str) -> Result<Vec<Account>, String> {
     let file = if path.is_dir() {
         path.join("AccountData.json")
     } else {
@@ -3686,7 +3640,7 @@ fn load(path: &std::path::Path, password: &str) -> Result<Loaded, String> {
         let text = String::from_utf8(bytes).map_err(|_| "this is not an accounts file")?;
         crate::transfer::read(&text, password)?
     };
-    Ok(Loaded::Accounts(list))
+    Ok(list)
 }
 
 /// A one-line box of the grid's height, its text centred up and down.
@@ -3750,7 +3704,7 @@ struct Job {
     inputs: Values,
 }
 
-/// A box of the grid's height with `text` in it, outlined (AEAM's "1 selected").
+/// A box of the grid's height with `text` in it, outlined (the "1 selected" box).
 fn outlined(ui: &mut egui::Ui, text: &str) {
     let galley = ui.painter().layout_no_wrap(
         text.to_string(),
@@ -3773,7 +3727,7 @@ fn outlined(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-/// Saved values for the main button's boxes (AEAM's Bookmarks), kept per game.
+/// Saved values for the main button's boxes (Bookmarks), kept per game.
 fn bookmarks_menu(
     ui: &mut egui::Ui,
     store: Option<&Store>,
@@ -3889,7 +3843,7 @@ fn bookmarks_menu(
     }
 }
 
-/// AEAM's small down arrow on a menu button, centred on `x` (drawn: the font has no arrow).
+/// A small down arrow on a menu button, centred on `x` (drawn: the font has no arrow).
 fn caret_at(ui: &egui::Ui, r: &egui::Response, x: f32) {
     let c = egui::pos2(x.round(), r.rect.center().y.round());
     let color = if r.enabled() {
@@ -4017,9 +3971,9 @@ mod tests {
     /// The Mode column names the role as the Role field does.
     #[test]
     fn mode_names_the_role() {
-        let (h, dir) = window("roblox");
+        let (mut h, dir) = window("roblox");
         let m = h.state().module("roblox").cloned().unwrap();
-        let mut a = h.state().new_account(&m);
+        let mut a = h.state_mut().new_account(&m).unwrap();
         set_value(&mut a, "role", "alt", false);
         assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
         set_value(&mut a, "role", "main", false);
@@ -4172,7 +4126,7 @@ mod tests {
         let mut ids = Vec::new();
         for g in ["t", "u"] {
             let m = h.state().module(g).cloned().unwrap();
-            let a = h.state().new_account(&m);
+            let a = h.state_mut().new_account(&m).unwrap();
             assert!(h.state_mut().save(&a));
             h.state_mut().game = Some(g.into());
             h.state_mut().run_action("play", vec![a.id.clone()]);
@@ -4217,7 +4171,10 @@ mod tests {
         .unwrap();
         let (mut h, dir) = window_with("t", mods.clone());
         let m = h.state().module("t").cloned().unwrap();
-        let (mut playing, idle) = (h.state().new_account(&m), h.state().new_account(&m));
+        let (mut playing, idle) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
         set_value(&mut playing, "login", "playing", false);
         assert!(h.state_mut().save(&playing) && h.state_mut().save(&idle));
         h.state_mut().run_action("play", vec![playing.id.clone()]);
@@ -4260,7 +4217,7 @@ mod tests {
         let m = h.state().module("t").cloned().unwrap();
         let mut ids = Vec::new();
         for name in ["a1", "a2", "a3"] {
-            let mut a = h.state_mut().new_account(&m);
+            let mut a = h.state_mut().new_account(&m).unwrap();
             set_value(&mut a, "login", name, false);
             assert!(h.state_mut().save(&a));
             ids.push(a.id);
@@ -4291,7 +4248,10 @@ mod tests {
     fn queue_gap_follows_the_job() {
         let (mut h, dir) = window("roblox");
         let m = h.state().module("roblox").cloned().unwrap();
-        let (a, next) = (h.state().new_account(&m), h.state().new_account(&m));
+        let (a, next) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
         assert!(h.state_mut().save(&a) && h.state_mut().save(&next));
         h.state_mut().queue_current = Some((a.id, "roblox".into(), "login".into(), false));
         h.state_mut().queue_ended = true;
@@ -4320,12 +4280,12 @@ mod tests {
         assert_eq!(h.state().queue_gap("roblox", "play"), Duration::from_secs(2));
         assert_eq!(h.state().queue_gap("roblox", "follow"), Duration::from_secs(2));
         let m = h.state().module("roblox").cloned().unwrap();
-        let a = h.state().new_account(&m);
+        let a = h.state_mut().new_account(&m).unwrap();
         assert!(h.state_mut().save(&a));
         let tx = h.state().tx.clone();
         h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "login".into(), false));
         // one more waiting, so the pause is announced rather than a plain error
-        let waiting = h.state().new_account(&m);
+        let waiting = h.state_mut().new_account(&m).unwrap();
         h.state_mut().queue.push_back(Job {
             game: "roblox".into(),
             action: "login".into(),
@@ -4382,7 +4342,10 @@ mod tests {
     fn one_account_skips_the_queue() {
         let (mut h, dir) = window("generic");
         let m = h.state().module("generic").cloned().unwrap();
-        let (a, b) = (h.state().new_account(&m), h.state().new_account(&m));
+        let (a, b) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
         assert!(h.state_mut().save(&a) && h.state_mut().save(&b));
         // a queue busy with another account, a and b waiting in it
         h.state_mut().queue_current = Some(("busy".into(), "roblox".into(), "play".into(), true));
@@ -4515,7 +4478,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// AEAM's right side: Set Alias and Set Description write to the chosen account, Edit
+    /// The right side: Set Alias and Set Description write to the chosen account, Edit
     /// Account opens every field in its own window.
     #[test]
     fn set_alias_description_and_edit() {
@@ -4562,9 +4525,8 @@ mod tests {
             r#"[{"SecurityToken":"tok1","Username":"Player1","UserID":77,"Alias":"Main","Group":"Alts"}]"#,
         )
         .unwrap();
-        let bring_in = |have: &[Account], path: &std::path::Path| match load(path, "").unwrap() {
-            Loaded::Accounts(list) => crate::transfer::import(&s, have, list).unwrap(),
-            Loaded::Aeam(_) => panic!("read as AEAM's"),
+        let bring_in = |have: &[Account], path: &std::path::Path| {
+            crate::transfer::import(&s, have, load(path, "").unwrap()).unwrap()
         };
         let r = bring_in(&[], &file);
         assert_eq!((r.added, r.skipped), (1, 0));

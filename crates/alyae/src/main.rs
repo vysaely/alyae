@@ -1,7 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 //! Alyae: game accounts in one small window. Games come as modules (see PLAN.md).
 
-mod aeam;
 mod log;
 mod look;
 mod module;

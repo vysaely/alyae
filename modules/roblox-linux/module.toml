@@ -11,8 +11,7 @@ close_all = "close_all"
 # Anti-AFK: every running game moves the pointer a pixel and back once (Alyae runs it every few minutes)
 anti_afk = "anti_afk"
 title_field = "username"
-# removing an account deletes its profile folder and its copy of Mocktail (a folder shared with
-# AEAM stays; only Mocktail's saved sign-in in it goes)
+# removing an account deletes its profile folder and its copy of Mocktail
 on_remove = "forget"
 
 # Add account opens Roblox's login page and adds the account once it signs in; Import takes

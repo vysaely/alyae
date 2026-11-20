@@ -1,5 +1,6 @@
 //! Alyae's Roblox helper. Alyae runs `alyae-roblox <action>` and writes one JSON line: the account
-//! (`account`: its fields and secrets), the button's `inputs` and a `data_dir` for this game.
+//! (`account`: its fields and secrets), the button's `inputs`, a `data_dir` for this game and the
+//! account's `folder` name (its number as a Roman numeral).
 //! Answers are JSON lines: `{"set":{...}}`, `{"status":"..."}`, `{"error":"..."}`, `{"warn":"..."}`
 //! (a line for Alyae's message bar). While a game runs the helper waits for it; a `stop` line
 //! on stdin closes the game.
@@ -21,12 +22,27 @@ use std::time::Duration;
 
 pub struct Request {
     pub id: String,
+    /// the name of the account's own files: its number as a Roman numeral ("XII")
+    folder: String,
     pub account: Map<String, Value>,
     pub inputs: Map<String, Value>,
     pub data_dir: PathBuf,
 }
 
 impl Request {
+    /// The account's folder name; an account without a number has none, and ends the helper.
+    pub fn folder(&self) -> &str {
+        if self.folder.is_empty() {
+            fail("this account has no number for its folder: restart Alyae");
+        }
+        &self.folder
+    }
+    /// The account's folder: `profiles/<numeral>`, or `profiles/<id>` while only that one is
+    /// there (the name Alyae gave it before numbers, until its next launch renames it).
+    pub fn profile(&self) -> PathBuf {
+        let profiles = self.data_dir.join("profiles");
+        files::current(&profiles.join(&self.id), &profiles.join(self.folder()))
+    }
     pub fn get(&self, key: &str) -> &str {
         self.account
             .get(key)
@@ -507,6 +523,11 @@ fn main() {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        folder: v
+            .get("folder")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         account: obj("account"),
         inputs: obj("inputs"),
         data_dir: PathBuf::from(v.get("data_dir").and_then(Value::as_str).unwrap_or(".")),
@@ -518,6 +539,9 @@ fn main() {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         fail("bad account id");
+    }
+    if !req.folder.chars().all(|c| "IVXLCDM".contains(c)) {
+        fail("bad folder name");
     }
     match action.as_str() {
         "check" => check(&req),

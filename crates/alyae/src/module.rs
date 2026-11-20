@@ -56,7 +56,7 @@ pub struct Action {
     /// the account counts as running while the action runs
     #[serde(default)]
     pub runs: bool,
-    /// shown as the big button (AEAM's Join Server)
+    /// shown as the big button (Join Server)
     #[serde(default)]
     pub primary: bool,
     #[serde(default, rename = "input")]
@@ -641,6 +641,8 @@ fn request_json(
     serde_json::json!({
         "id": account.id,
         "name": account.name,
+        // the name of the account's own folder (and game copy): its number as a Roman numeral
+        "folder": crate::store::numeral(account.number),
         "account": account_json(module, account),
         "inputs": inputs,
         "data_dir": dir,

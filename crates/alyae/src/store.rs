@@ -18,6 +18,9 @@ pub struct Account {
     pub sort: i64,
     pub created: f64,
     pub last_used: f64,
+    /// given once and never changed or reused: the account's folder is named by it, as a Roman
+    /// numeral (`numeral`), so no folder or program name carries an id or a username
+    pub number: u32,
     pub fields: Values,
     pub secrets: Values,
 }
@@ -48,12 +51,59 @@ pub fn new_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 type Migration = (u32, fn(&Connection) -> Result<(), String>);
 
 /// Ordered schema migrations after version 1; each entry moves from the previous version to `target`.
-const MIGRATIONS: &[Migration] = &[];
+const MIGRATIONS: &[Migration] = &[(2, add_numbers)];
+
+/// The settings key holding the highest number given, so a removed account's is not given again.
+const LAST_NUMBER: &str = "last_number";
+
+/// Version 2: every account gets a number, 1..N in the order the list shows them (game, then
+/// accounts in a group before the ungrouped, group, place in the list).
+fn add_numbers(db: &Connection) -> Result<(), String> {
+    db.execute_batch(
+        "ALTER TABLE accounts ADD COLUMN number INTEGER NOT NULL DEFAULT 0;
+         UPDATE accounts SET number = (
+             SELECT n FROM (
+                 SELECT id, row_number() OVER (
+                     ORDER BY game, grp = '', grp, sort, name COLLATE NOCASE, id) AS n
+                 FROM accounts) AS o
+             WHERE o.id = accounts.id);
+         INSERT INTO settings (key, value)
+             SELECT 'last_number', CAST(count(*) AS TEXT) FROM accounts;",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// `n` in Roman numerals (I, IV, IX, XLVI, MMMCMXCIX); 0 has none and gives "".
+pub fn numeral(mut n: u32) -> String {
+    const PARTS: [(u32, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut out = String::new();
+    for (value, part) in PARTS {
+        while n >= value {
+            out.push_str(part);
+            n -= value;
+        }
+    }
+    out
+}
 
 impl Store {
     pub fn open(db_path: &Path, vault: Vault) -> Result<Self, String> {
@@ -81,12 +131,7 @@ impl Store {
                     |r| r.get(0),
                 )
                 .map_err(|e| e.to_string())?;
-            if has_tables {
-                // Existing pre-versioned database uses the v1 layout.
-                db.pragma_update(None, "user_version", 1)
-                    .map_err(|e| e.to_string())?;
-                version = 1;
-            } else {
+            if !has_tables {
                 db.execute_batch(
                     "CREATE TABLE IF NOT EXISTS accounts (
                          id TEXT PRIMARY KEY, game TEXT NOT NULL, name TEXT NOT NULL,
@@ -97,10 +142,12 @@ impl Store {
                      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
                 )
                 .map_err(|e| e.to_string())?;
-                db.pragma_update(None, "user_version", SCHEMA_VERSION)
-                    .map_err(|e| e.to_string())?;
-                version = i64::from(SCHEMA_VERSION);
             }
+            // a new database, or one from before versions: the v1 layout, which the
+            // migrations below bring up to date
+            db.pragma_update(None, "user_version", 1)
+                .map_err(|e| e.to_string())?;
+            version = 1;
         }
         for &(target, migrate) in MIGRATIONS {
             if version < i64::from(target) {
@@ -118,7 +165,7 @@ impl Store {
     pub fn list(&self) -> Result<(Vec<Account>, Vec<String>), String> {
         let mut st = self
             .db
-            .prepare("SELECT id, game, name, grp, notes, sort, created, last_used, fields, secrets FROM accounts ORDER BY sort, name COLLATE NOCASE")
+            .prepare("SELECT id, game, name, grp, notes, sort, created, last_used, number, fields, secrets FROM accounts ORDER BY sort, name COLLATE NOCASE")
             .map_err(|e| e.to_string())?;
         let rows = st
             .query_map([], |r| {
@@ -132,11 +179,12 @@ impl Store {
                         sort: r.get(5)?,
                         created: r.get(6)?,
                         last_used: r.get(7)?,
+                        number: r.get(8)?,
                         fields: Values::new(),
                         secrets: Values::new(),
                     },
-                    r.get::<_, String>(8)?,
-                    r.get::<_, Option<Vec<u8>>>(9)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, Option<Vec<u8>>>(10)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -192,10 +240,10 @@ impl Store {
         });
         self.db
             .execute(
-                "INSERT INTO accounts (id, game, name, grp, notes, sort, created, last_used, fields, secrets)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO accounts (id, game, name, grp, notes, sort, created, last_used, fields, secrets, number)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(id) DO UPDATE SET game=?2, name=?3, grp=?4, notes=?5, sort=?6,
-                     created=?7, last_used=?8, fields=?9, secrets=?10",
+                     created=?7, last_used=?8, fields=?9, secrets=?10, number=?11",
                 params![
                     a.id,
                     a.game,
@@ -206,7 +254,8 @@ impl Store {
                     a.created,
                     a.last_used,
                     serde_json::to_string(&a.fields).expect("a string map serializes"),
-                    secrets
+                    secrets,
+                    a.number
                 ],
             )
             .map(|_| ())
@@ -218,6 +267,20 @@ impl Store {
             .execute("DELETE FROM accounts WHERE id = ?1", [id])
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    /// The next number no account has had, taken: it is never given again, also when the
+    /// account it was for is not kept.
+    pub fn next_number(&self) -> Result<u32, String> {
+        let last = match self.setting(LAST_NUMBER) {
+            Some(v) => v
+                .parse::<u32>()
+                .map_err(|_| format!("the setting {LAST_NUMBER} is not a number: {v}"))?,
+            None => 0,
+        };
+        let n = last + 1;
+        self.try_set_setting(LAST_NUMBER, &n.to_string())?;
+        Ok(n)
     }
 
     pub fn setting(&self, key: &str) -> Option<String> {
@@ -279,16 +342,16 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_sets_user_version_1() {
+    fn fresh_db_sets_the_current_user_version() {
         let dir = temp_dir("ver-fresh");
         let db_path = dir.join("t.db");
         let _s = Store::open(&db_path, Vault::from_key(&[1; 32])).unwrap();
-        assert_eq!(user_version(&db_path), 1);
+        assert_eq!(user_version(&db_path), i64::from(SCHEMA_VERSION));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn existing_v0_db_with_tables_upgrades_to_1() {
+    fn existing_v0_db_with_tables_upgrades() {
         let dir = temp_dir("ver-v0");
         let db_path = dir.join("t.db");
         {
@@ -307,7 +370,7 @@ mod tests {
         }
         assert_eq!(user_version(&db_path), 0);
         let s = Store::open(&db_path, Vault::from_key(&[1; 32])).unwrap();
-        assert_eq!(user_version(&db_path), 1);
+        assert_eq!(user_version(&db_path), i64::from(SCHEMA_VERSION));
         let (accounts, problems) = s.list().unwrap();
         assert!(problems.is_empty());
         assert_eq!(accounts.len(), 1);
@@ -370,6 +433,104 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn roman_numerals() {
+        for (n, r) in [
+            (1, "I"),
+            (4, "IV"),
+            (9, "IX"),
+            (12, "XII"),
+            (14, "XIV"),
+            (40, "XL"),
+            (46, "XLVI"),
+            (90, "XC"),
+            (400, "CD"),
+            (3999, "MMMCMXCIX"),
+        ] {
+            assert_eq!(numeral(n), r, "{n}");
+        }
+        assert_eq!(numeral(0), "");
+    }
+
+    /// The accounts of a version 1 database are numbered once, 1..N in the list's order (game,
+    /// grouped before ungrouped, group, place); a new account gets the next number, and the
+    /// number of a removed account is not given again, also after reopening.
+    #[test]
+    fn accounts_are_numbered_once_and_numbers_never_come_back() {
+        let dir = temp_dir("numbers");
+        let db_path = dir.join("t.db");
+        {
+            let db = Connection::open(&db_path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE accounts (
+                     id TEXT PRIMARY KEY, game TEXT NOT NULL, name TEXT NOT NULL,
+                     grp TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+                     sort INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL DEFAULT 0,
+                     last_used REAL NOT NULL DEFAULT 0, fields TEXT NOT NULL DEFAULT '{}',
+                     secrets BLOB);
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO accounts (id, game, name, grp, sort) VALUES
+                     ('ungrouped', 'roblox', 'u', '', 1),
+                     ('alts2', 'roblox', 'b', 'Alts', 3),
+                     ('alts1', 'roblox', 'a', 'Alts', 2),
+                     ('farm', 'roblox', 'f', 'Farm', 0),
+                     ('mail', 'generic', 'm', '', 5);",
+            )
+            .unwrap();
+            db.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let numbers = |s: &Store| -> Vec<(String, u32)> {
+            let mut v: Vec<_> = s
+                .list()
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|a| (a.id, a.number))
+                .collect();
+            v.sort_by_key(|(_, n)| *n);
+            v
+        };
+        let s = Store::open(&db_path, Vault::from_key(&[1; 32])).unwrap();
+        let want: Vec<(String, u32)> = [
+            ("mail", 1),
+            ("alts1", 2),
+            ("alts2", 3),
+            ("farm", 4),
+            ("ungrouped", 5),
+        ]
+        .iter()
+        .map(|(id, n)| (id.to_string(), *n))
+        .collect();
+        assert_eq!(numbers(&s), want);
+        assert_eq!(s.setting(LAST_NUMBER).as_deref(), Some("5"));
+        // a new account gets 6; removing it does not give 6 out again
+        let new = Account {
+            id: "new".into(),
+            game: "roblox".into(),
+            number: s.next_number().unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(new.number, 6);
+        s.save(&new).unwrap();
+        s.delete("new").unwrap();
+        drop(s);
+        // reopened: nothing is numbered again, and the next number is still a new one
+        let s = Store::open(&db_path, Vault::from_key(&[1; 32])).unwrap();
+        assert_eq!(numbers(&s), want);
+        assert_eq!(s.next_number().unwrap(), 7);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A new database starts numbering at 1.
+    #[test]
+    fn a_new_store_gives_number_one_first() {
+        let dir = temp_dir("numbers-new");
+        let s = Store::open(&dir.join("t.db"), Vault::from_key(&[1; 32])).unwrap();
+        assert_eq!(s.next_number().unwrap(), 1);
+        assert_eq!(s.next_number().unwrap(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

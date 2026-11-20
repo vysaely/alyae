@@ -1,17 +1,16 @@
 # Alyae plan
 
-Alyae is AEAM's successor: a small game account manager for Linux and Windows. The core knows
-nothing about any game; each game is a module. AEAM keeps working untouched until Alyae
-replaces it.
+Alyae is a small game account manager for Linux and Windows. The core knows nothing about any
+game; each game is a module.
 
 ## Shape
 
 - **Core (`alyae`)**: one Rust program with an egui window. It opens on a game picker and
-  remembers the last game. Each game uses AEAM's layout:
+  remembers the last game. Each game uses one layout:
   - group picker, account table (Username, Alias, Group, Mode, Description);
   - launch boxes and the main button on the right, with the active account below;
   - a right-click menu: the module's buttons, Stop, Mode, Move to group, Copy, Remove.
-- **Storage**: a 32-byte key file plus secretbox (AEAM's format), and SQLite holding plain fields
+- **Storage**: a 32-byte key file plus secretbox, and SQLite holding plain fields
   and one sealed blob of secret fields per account.
 - **Module**: a folder holding `module.toml`.
   - `[[field]]`: what an account of the game stores (secret, `totp`, `choice`).
@@ -33,15 +32,13 @@ replaces it.
 2. Roblox on Linux (Mocktail, main/alt, isolated profiles): done. Tested on one alt: sign-in
    check, launch, stop, cookie cleanup, saving a renewed cookie. A main, Join by place/job and
    Follow are not tested.
-3. AEAM import: done. Accounts keep AEAM's profile folders. Test: the real AEAM data reads
-   and decrypts.
-4. Windows: the code is written but not built. It needs `mingw-w64-gcc` here or a GitHub build,
+3. Windows: the code is written but not built. It needs `mingw-w64-gcc` here or a GitHub build,
    then a run on a Windows PC.
-5. Portable Windows copy: a file named `portable` beside alyae.exe keeps all data in `data`
+4. Portable Windows copy: a file named `portable` beside alyae.exe keeps all data in `data`
    beside it. CI publishes `Alyae-portable.zip` to the `portable` release on every main build.
-6. Still to do: README.
+5. Still to do: README.
 
-## Left out on purpose (AEAM had them)
+## Left out on purpose
 
 Each can come back as a module action if missed:
 

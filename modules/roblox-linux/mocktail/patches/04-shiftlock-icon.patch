@@ -6,7 +6,7 @@ index 55b9497..6d27655 100644
  
  add_library(mocktail_legacy_runtime STATIC
    src/legacy/legacy_runtime.cc
-+  src/legacy/aeam_texture_swap.cc
++  src/legacy/alyae_texture_swap.cc
    src/runtime/roblox_text_input_jni_bridge.cc
  )
  target_include_directories(mocktail_legacy_runtime PRIVATE include src)
@@ -18,13 +18,13 @@ index 55b9497..6d27655 100644
    mocktail_legacy_jnivm
    mocktail_compat
    mocktail_runtime
-diff --git a/src/legacy/aeam_texture_swap.cc b/src/legacy/aeam_texture_swap.cc
+diff --git a/src/legacy/alyae_texture_swap.cc b/src/legacy/alyae_texture_swap.cc
 new file mode 100644
 index 0000000..b7b34e8
 --- /dev/null
-+++ b/src/legacy/aeam_texture_swap.cc
++++ b/src/legacy/alyae_texture_swap.cc
 @@ -0,0 +1,203 @@
-+// AEAM: swaps one picture Roblox uploads to the GPU for another, at the upload.
++// Alyae: swaps one picture Roblox uploads to the GPU for another, at the upload.
 +//
 +// Roblox 2.742 no longer ships its shift-lock icon (textures/MouseLockedCursor.png): it downloads it into its
 +// checksummed rbx-storage cache, so neither the asset hook (0003) nor the cache can carry a custom one. The
@@ -35,7 +35,7 @@ index 0000000..b7b34e8
 +//
 +// MOCKTAIL_TEX_TRACE=1 logs small RGBA uploads (size, level, format, whether they matched).
 +
-+#include "legacy/aeam_texture_swap.h"
++#include "legacy/alyae_texture_swap.h"
 +
 +#include <SDL3/SDL.h>
 +
@@ -47,7 +47,7 @@ index 0000000..b7b34e8
 +#include <unordered_map>
 +#include <vector>
 +
-+namespace aeam_texture_swap {
++namespace alyae_texture_swap {
 +namespace {
 +
 +using GLenum = unsigned int;
@@ -83,7 +83,7 @@ index 0000000..b7b34e8
 +bool LoadRgba(const char* path, int* w, int* h, std::vector<uint8_t>* out) {
 +  SDL_Surface* loaded = SDL_LoadPNG(path);
 +  if (loaded == nullptr) {
-+    std::fprintf(stderr, "  [aeam-tex] %s unreadable: %s\n", path, SDL_GetError());
++    std::fprintf(stderr, "  [alyae-tex] %s unreadable: %s\n", path, SDL_GetError());
 +    return false;
 +  }
 +  SDL_Surface* rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_ABGR8888);  // bytes R,G,B,A
@@ -158,7 +158,7 @@ index 0000000..b7b34e8
 +    else if (Close(px, g_original_pm)) pm = 1;
 +    if (g_trace && g_traced < kMaxTrace) {
 +      ++g_traced;
-+      std::fprintf(stderr, "  [aeam-tex] %dx%d level 0 upload: %s\n", w, h,
++      std::fprintf(stderr, "  [alyae-tex] %dx%d level 0 upload: %s\n", w, h,
 +                   pm < 0 ? "other" : pm == 1 ? "shift-lock icon (premultiplied), swapped" : "shift-lock icon, swapped");
 +    }
 +    if (pm < 0) return nullptr;
@@ -176,7 +176,7 @@ index 0000000..b7b34e8
 +    }
 +  } else if (g_trace && small && g_traced < kMaxTrace) {
 +    ++g_traced;
-+    std::fprintf(stderr, "  [aeam-tex] %dx%d level %d upload\n", w, h, level);
++    std::fprintf(stderr, "  [alyae-tex] %dx%d level %d upload\n", w, h, level);
 +  }
 +  return nullptr;
 +}
@@ -222,28 +222,28 @@ index 0000000..b7b34e8
 +  g_real_get_integerv = reinterpret_cast<GetIntegervFn>(real_get_integerv);
 +  *tex_image = reinterpret_cast<void*>(&TexImage2D);
 +  *tex_sub_image = reinterpret_cast<void*>(&TexSubImage2D);
-+  std::fprintf(stderr, "  [aeam-tex] shift-lock icon swap armed (%dx%d, from %s)\n", g_size, g_size, custom);
++  std::fprintf(stderr, "  [alyae-tex] shift-lock icon swap armed (%dx%d, from %s)\n", g_size, g_size, custom);
 +  return true;
 +}
 +
-+}  // namespace aeam_texture_swap
-diff --git a/src/legacy/aeam_texture_swap.h b/src/legacy/aeam_texture_swap.h
++}  // namespace alyae_texture_swap
+diff --git a/src/legacy/alyae_texture_swap.h b/src/legacy/alyae_texture_swap.h
 new file mode 100644
 index 0000000..4510359
 --- /dev/null
-+++ b/src/legacy/aeam_texture_swap.h
++++ b/src/legacy/alyae_texture_swap.h
 @@ -0,0 +1,11 @@
-+// AEAM: swaps Roblox's shift-lock icon for a custom one as it is uploaded to the GPU (aeam_texture_swap.cc).
++// Alyae: swaps Roblox's shift-lock icon for a custom one as it is uploaded to the GPU (alyae_texture_swap.cc).
 +#pragma once
 +
-+namespace aeam_texture_swap {
++namespace alyae_texture_swap {
 +
 +// With MOCKTAIL_SHIFTLOCK_CURSOR and MOCKTAIL_SHIFTLOCK_ORIGINAL set and readable, arms the swap and returns the
 +// wrappers to register in place of glTexImage2D and glTexSubImage2D; false leaves Roblox's own functions.
 +bool Install(void* real_tex_image, void* real_tex_sub_image, void* real_get_integerv, void** tex_image,
 +             void** tex_sub_image);
 +
-+}  // namespace aeam_texture_swap
++}  // namespace alyae_texture_swap
 diff --git a/src/legacy/legacy_runtime.cc b/src/legacy/legacy_runtime.cc
 index 710275d..0eed8ef 100644
 --- a/src/legacy/legacy_runtime.cc
@@ -252,7 +252,7 @@ index 710275d..0eed8ef 100644
  #include <SDL3/SDL_video.h>
  
  #include "compat/bionic_abi_exports.h"
-+#include "legacy/aeam_texture_swap.h"
++#include "legacy/alyae_texture_swap.h"
  #include "compat/bionic_prctl_runtime.h"
  #include "compat/bionic_pthread_create_runtime.h"
  #include "compat/bionic_socket_runtime.h"
@@ -261,13 +261,13 @@ index 710275d..0eed8ef 100644
      }
    }
 +  {
-+    // AEAM: the custom shift-lock icon, swapped in as Roblox uploads its own
++    // Alyae: the custom shift-lock icon, swapped in as Roblox uploads its own
 +    void* tex_image = nullptr;
 +    void* tex_sub_image = nullptr;
 +    const auto resolve = [&](const char* name) {
 +      return ResolveSymbolForBionic(name, has_window, real_gles_handle, stub_handles).address;
 +    };
-+    if (aeam_texture_swap::Install(resolve("glTexImage2D"), resolve("glTexSubImage2D"),
++    if (alyae_texture_swap::Install(resolve("glTexImage2D"), resolve("glTexSubImage2D"),
 +                                   resolve("glGetIntegerv"), &tex_image, &tex_sub_image)) {
 +      linker::RegisterSymbol("glTexImage2D", tex_image);
 +      linker::RegisterSymbol("glTexSubImage2D", tex_sub_image);

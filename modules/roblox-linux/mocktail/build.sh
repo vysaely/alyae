@@ -15,6 +15,8 @@
 #   09 pointer-release         the right-button camera drag ends where it started, not at the window edge
 #   10 low-memory-profile      MOCKTAIL_LOW_MEMORY_PROFILE=0: no phone-sized memory caps (Alyae's mains)
 #   11 nudge-now               MOCKTAIL_NUDGE_FILE: writing that file asks for one nudge now (Anti-AFK)
+#   12 captcha-device-and-close the challenge window sends the game's device ID and closes 2 s
+#                              after success, so Roblox reads the result and retries the join
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

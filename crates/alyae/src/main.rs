@@ -58,7 +58,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let modules = module::load_all(&paths::module_dirs());
-            Ok(Box::new(ui::App::new(&cc.egui_ctx, opened, dir, modules)))
+            let mut app = ui::App::new(&cc.egui_ctx, opened, dir, modules);
+            app.check_builds(true);
+            Ok(Box::new(app))
         }),
     )
 }

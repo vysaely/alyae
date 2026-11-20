@@ -9,9 +9,9 @@ Run ./alyae from this folder (keep alyae-roblox, alyae-roblox-login and modules/
 Accounts and settings are kept in ~/.local/share/alyae. To keep them in ./data instead,
 create an empty file named "portable" beside alyae.
 
-To launch Roblox on Linux, Alyae uses Mocktail. Build and install Mocktail with Alyae's
-patches into ~/.local by running:
+To launch Roblox on Linux, Alyae uses Mocktail. Alyae's Build Mocktail button (bottom line)
+builds and installs Mocktail with Alyae's patches into ~/.local; by hand, run:
   modules/roblox-linux/mocktail/build.sh
-If Mocktail is already installed, Join Server works without running build.sh, but the
+If Mocktail is already installed, Join Server works without that build, but the
 shift-lock cursor, Anti-AFK, a main's low-memory profile and the camera-drag cursor fix need
 Alyae's build.

@@ -14,6 +14,13 @@ title_field = "username"
 # removing an account deletes its profile folder and its copy of Mocktail
 on_remove = "forget"
 
+# Mocktail with Alyae's patches (mocktail/build.sh): when the installed one is not that build, the
+# message bar says so with a Build Mocktail button; the install waits until no game runs
+[build]
+check = "mocktail_check"
+action = "mocktail_build"
+label = "Build Mocktail"
+
 # Add account opens Roblox's login page and adds the account once it signs in; Import takes
 # .ROBLOSECURITY cookies, one per line, and checks each. An account already here (same user ID)
 # gets the new sign-in instead of a second row.

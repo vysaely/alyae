@@ -274,6 +274,17 @@ pub fn servers_answer(v: &serde_json::Value, of: Option<&str>) -> Option<Servers
     )
 }
 
+/// `[build]`: a program the module's helper needs that Alyae can build itself (Roblox Linux:
+/// Mocktail with Alyae's patches). `check` runs when Alyae opens and after each build; its
+/// warning shows in the message bar with a button, `label`, that runs `action` in the
+/// background (see `build_check` and `build`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct Build {
+    pub check: String,
+    pub action: String,
+    pub label: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Module {
     /// the game's id: accounts belong to it, so the Linux and Windows modules of one game share them
@@ -317,6 +328,8 @@ pub struct Module {
     pub add: Option<AddFlow>,
     #[serde(default)]
     pub servers: Option<Servers>,
+    #[serde(default)]
+    pub build: Option<Build>,
     #[serde(skip)]
     pub dir: PathBuf,
 }
@@ -525,6 +538,9 @@ pub enum Event {
     Servers(ServersAnswer),
     /// a line for the window's message bar (bad: shown as a problem)
     Note { text: String, bad: bool },
+    /// what the module's build says it is doing (bad: it failed)
+    Build { text: String, bad: bool },
+    BuildEnded,
 }
 
 pub struct Running {
@@ -686,6 +702,90 @@ pub fn run_and_wait(
         return Err(format!("{} '{action}' failed ({status})", helper.display()));
     }
     Ok(said)
+}
+
+/// Runs the `[build]` check and waits for it: Some(warning, built) when the program is not the
+/// build the module needs, `built` when that build is finished and only its install is left.
+pub fn build_check(
+    module: &Module,
+    b: &Build,
+    data_dir: &Path,
+) -> Result<Option<(String, bool)>, String> {
+    let (mut child, dir, helper) = spawn_helper(module, &b.check, &b.label, data_dir)?;
+    let request = serde_json::json!({ "module_dir": module.dir, "data_dir": dir });
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let sent = stdin.write_all(format!("{request}\n").as_bytes());
+    drop(stdin);
+    let out = child.stdout.take().expect("piped stdout");
+    let (mut errors, mut warning) = (Vec::new(), None);
+    for v in BufReader::new(out)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+    {
+        if let Some(e) = v["error"].as_str() {
+            errors.push(e.to_string());
+        } else if let Some(w) = v["warn"].as_str() {
+            warning = Some((w.to_string(), v["built"].as_bool() == Some(true)));
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    sent.map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    if !status.success() {
+        return Err(format!(
+            "{} '{}' failed ({status})",
+            helper.display(),
+            b.check
+        ));
+    }
+    Ok(warning)
+}
+
+/// Starts the `[build]` action; its status lines and errors arrive as `Event::Build`, then
+/// `Event::BuildEnded`. `Running::stop` asks it to end.
+pub fn build(
+    module: &Module,
+    b: &Build,
+    data_dir: &Path,
+    tx: Sender<Event>,
+    wake: impl Fn() + Send + 'static,
+) -> Result<Running, String> {
+    let (mut child, dir, helper) = spawn_helper(module, &b.action, &b.label, data_dir)?;
+    let request = serde_json::json!({ "module_dir": module.dir, "data_dir": dir });
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(format!("{request}\n").as_bytes())
+        .and_then(|_| stdin.flush())
+        .map_err(|e| format!("{} did not take the request: {e}", helper.display()))?;
+    let out = child.stdout.take().expect("piped stdout");
+    std::thread::spawn(move || {
+        for v in BufReader::new(out)
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+        {
+            let (text, bad) = match (v["status"].as_str(), v["error"].as_str()) {
+                (Some(t), _) => (t, false),
+                (_, Some(e)) => (e, true),
+                _ => continue,
+            };
+            let _ = tx.send(Event::Build {
+                text: text.to_string(),
+                bad,
+            });
+            wake();
+        }
+        let _ = tx.send(Event::BuildEnded);
+        wake();
+    });
+    Ok(Running {
+        action: b.action.clone(),
+        child,
+        stdin: Some(stdin),
+    })
 }
 
 /// Runs the module's watch once for `accounts`; its values arrive as one `Event::Watch`, then

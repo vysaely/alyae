@@ -91,6 +91,9 @@ pub struct App {
     anti_afk: u64,
     /// when Anti-AFK last nudged (or was turned on)
     anti_afk_last: Instant,
+    /// the frame-rate limit the FPS choice gave a running game (0: no cap), by account; shown
+    /// while it runs, forgotten when the account's game starts again
+    live_fps: HashMap<String, u32>,
     /// the accounts-file dialog, when open
     transfer: Option<Transfer>,
     /// the Edit Account window (every field of the chosen account) is open
@@ -219,6 +222,7 @@ impl App {
             anti_afk: 0,
             watch_picked: None,
             anti_afk_last: Instant::now(),
+            live_fps: HashMap::new(),
             transfer: None,
             edit_open: false,
             side_for: None,
@@ -540,6 +544,10 @@ impl App {
                         ),
                     }
                 }
+                Event::LiveFps { account, fps } => {
+                    crate::log::line(&self.name_of(&account), &format!("live FPS {fps}"));
+                    self.live_fps.insert(account, fps);
+                }
                 Event::Error { account, text } => {
                     let name = self
                         .accounts
@@ -719,17 +727,8 @@ impl App {
         let Some(action) = m.actions.iter().find(|a| a.id == action_id).cloned() else {
             return;
         };
-        // only this button's own boxes: a Follow target must not ride along with Join Server
         let all = self.inputs.get(&game).cloned().unwrap_or_default();
-        let inputs: Values = action
-            .inputs
-            .iter()
-            .filter_map(|i| {
-                all.get(&i.key)
-                    .filter(|v| !v.trim().is_empty())
-                    .map(|v| (i.key.clone(), v.clone()))
-            })
-            .collect();
+        let inputs = action_inputs(&action, &all);
         if let Some(s) = &self.store {
             s.set_setting(
                 &format!("inputs.{game}"),
@@ -892,7 +891,9 @@ impl App {
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 // only a failure is worth a message; a nudge every few minutes is not
-                if let Err(e) = module::run_and_wait(&m, &m.anti_afk, &account, &dir) {
+                if let Err(e) =
+                    module::run_and_wait(&m, &m.anti_afk, &account, &Values::new(), &dir)
+                {
                     let _ = tx.send(Event::Note {
                         text: format!("Anti-AFK: {e}"),
                         bad: true,
@@ -932,6 +933,7 @@ impl App {
                 match r {
                     Some(r) if action.runs => {
                         self.running.insert(id.clone(), r);
+                        self.live_fps.remove(&id);
                     }
                     Some(r) => self.tasks.push((id.clone(), r)),
                     None => {}
@@ -1817,11 +1819,17 @@ impl App {
             r @ ("main" | "alt") => r,
             _ => "",
         };
-        let fps = match m.value_of(a, "fps").parse::<u32>() {
-            Ok(0) => "no cap".to_string(),
-            Ok(n) if n >= 1000 => "no cap".to_string(),
-            Ok(n) => format!("{n} FPS"),
-            Err(_) => String::new(),
+        let label = |n: u32| {
+            if n == 0 || n >= 1000 {
+                "no cap".to_string()
+            } else {
+                format!("{n} FPS")
+            }
+        };
+        // while the game runs with a limit from the FPS choice: that one
+        let fps = match self.live_fps.get(&a.id) {
+            Some(&n) if self.running.contains_key(&a.id) => format!("{} now", label(n)),
+            _ => m.value_of(a, "fps").parse().map(label).unwrap_or_default(),
         };
         [role, fps.as_str()]
             .into_iter()
@@ -2076,6 +2084,8 @@ impl App {
 
     // --- right-click menu ----------------------------------------------------------------------
 
+    /// The right-click menu: the buttons on the right (Join Server, Follow), then the Account
+    /// menu's entries, and More.
     fn account_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -2083,26 +2093,64 @@ impl App {
         ids: &[String],
     ) -> Option<MenuChoice> {
         let n = ids.len();
-        let count = |label: &str| {
-            if n > 1 {
-                format!("{label} ({n})")
-            } else {
-                label.to_string()
-            }
-        };
-        let mut choice = None;
         if n > 1 {
             ui.label(RichText::new(format!("{n} accounts")).weak());
         }
-        for a in &m.actions {
+        let mut choice = None;
+        for a in m.actions.iter().filter(|a| a.on_deck()) {
+            if ui.button(counted(&a.label, n)).clicked() {
+                choice = Some(MenuChoice::Run(a.id.clone()));
+            }
+        }
+        ui.separator();
+        choice = self.account_items(ui, m, ids).or(choice);
+        ui.separator();
+        ui.menu_button("More", |ui| {
+            choice = self.more_items(ui, m, ids).or(choice.take());
+        });
+        if choice.is_some() {
+            ui.close();
+        }
+        choice
+    }
+
+    /// The Account menu: Close game, the everyday buttons (Refresh, Log in, Open in browser,
+    /// Settings, Friends), Edit account, then Mode, Move to group and Copy.
+    fn account_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        m: &Module,
+        ids: &[String],
+    ) -> Option<MenuChoice> {
+        let n = ids.len();
+        let count = |label: &str| counted(label, n);
+        let mut choice = None;
+        let running = ids.iter().any(|id| self.running.contains_key(id));
+        if running && ui.button(count("Close game")).clicked() {
+            choice = Some(MenuChoice::Stop);
+        }
+        if running && !m.live_fps.is_empty() {
+            ui.menu_button("FPS", |ui| {
+                for (label, fps) in LIVE_FPS {
+                    if ui.button(label).clicked() {
+                        choice = Some(MenuChoice::LiveFps(fps));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("until the game closes; the FPS cap stays for the next start");
+        }
+        for a in m.actions.iter().filter(|a| !a.on_deck() && !a.in_more()) {
             if ui.button(count(&a.label)).clicked() {
                 choice = Some(MenuChoice::Run(a.id.clone()));
             }
         }
-        if ids.iter().any(|id| self.running.contains_key(id))
-            && ui.button(count("Close game")).clicked()
+        if ui
+            .add_enabled(n == 1, egui::Button::new("Edit account"))
+            .on_hover_text("every field: cookie, password, 2FA, mode, FPS")
+            .clicked()
         {
-            choice = Some(MenuChoice::Stop);
+            choice = Some(MenuChoice::Edit(ids[0].clone()));
         }
         ui.separator();
         if let Some(role) = m.field("role").filter(|f| !f.choices.is_empty()) {
@@ -2191,15 +2239,25 @@ impl App {
                 }
             }
         });
+        choice
+    }
+
+    /// The More menu: the rare buttons and the ones that change the account on the game's side
+    /// (`menu = "more"`; each asks first when its module says so), and Remove.
+    fn more_items(&mut self, ui: &mut egui::Ui, m: &Module, ids: &[String]) -> Option<MenuChoice> {
+        let n = ids.len();
+        let mut choice = None;
+        for a in m.actions.iter().filter(|a| !a.on_deck() && a.in_more()) {
+            if ui.button(counted(&a.label, n)).clicked() {
+                choice = Some(MenuChoice::Run(a.id.clone()));
+            }
+        }
         ui.separator();
         if ui
-            .button(RichText::new(count("Remove")).color(ui.visuals().error_fg_color))
+            .button(RichText::new(counted("Remove", n)).color(ui.visuals().error_fg_color))
             .clicked()
         {
             choice = Some(MenuChoice::Remove);
-        }
-        if choice.is_some() {
-            ui.close();
         }
         choice
     }
@@ -2223,6 +2281,11 @@ impl App {
                 }
             }
             MenuChoice::Remove => self.confirm_remove = ids,
+            MenuChoice::Edit(id) => {
+                self.focus_on(&id);
+                self.edit_open = true;
+            }
+            MenuChoice::LiveFps(fps) => self.set_live_fps(m, &ids, fps),
             MenuChoice::Group(g) => {
                 self.edit_all(&ids, |a| a.group = g.clone());
                 self.say(
@@ -2249,6 +2312,36 @@ impl App {
                     }
                 });
             }
+        }
+    }
+
+    /// The FPS choice: each chosen running game gets `fps` (0: no cap) from the module's
+    /// `live_fps` helper; the Mode column shows it once the helper says it was handed over.
+    fn set_live_fps(&mut self, m: &Module, ids: &[String], fps: u32) {
+        let inputs: Values = [("fps".to_string(), fps.to_string())].into();
+        for a in self
+            .accounts
+            .iter()
+            .filter(|a| ids.contains(&a.id) && self.running.contains_key(&a.id))
+        {
+            let (m, a, dir, tx) = (m.clone(), a.clone(), self.dir.clone(), self.tx.clone());
+            let (inputs, ctx, name) = (inputs.clone(), self.ctx.clone(), self.title(&a));
+            std::thread::spawn(move || {
+                let ev = match module::run_and_wait(&m, &m.live_fps, &a, &inputs, &dir) {
+                    Ok(_) => Event::LiveFps {
+                        account: a.id.clone(),
+                        fps,
+                    },
+                    Err(e) => Event::Note {
+                        text: format!("{name}: {e}"),
+                        bad: true,
+                    },
+                };
+                let _ = tx.send(ev);
+                if let Some(c) = ctx {
+                    c.request_repaint();
+                }
+            });
         }
     }
 
@@ -2538,7 +2631,8 @@ impl App {
                     (m.clone(), self.dir.clone(), self.tx.clone(), self.title(&a));
                 let ctx = self.ctx.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = module::run_and_wait(&m, &m.on_remove, &a, &dir) {
+                    if let Err(e) = module::run_and_wait(&m, &m.on_remove, &a, &Values::new(), &dir)
+                    {
                         let _ = tx.send(Event::Note {
                             text: format!("{title}: files not deleted: {e}"),
                             bad: true,
@@ -2605,10 +2699,11 @@ impl App {
             ..Default::default()
         };
         std::thread::spawn(move || {
-            let (text, bad) = match module::run_and_wait(&m, &m.close_all, &account, &dir) {
-                Ok(said) => (said.unwrap_or_else(|| "All games closed".into()), false),
-                Err(e) => (format!("Close all games: {e}"), true),
-            };
+            let (text, bad) =
+                match module::run_and_wait(&m, &m.close_all, &account, &Values::new(), &dir) {
+                    Ok(said) => (said.unwrap_or_else(|| "All games closed".into()), false),
+                    Err(e) => (format!("Close all games: {e}"), true),
+                };
             let _ = tx.send(Event::Note { text, bad });
             if let Some(c) = ctx {
                 c.request_repaint();
@@ -2642,12 +2737,24 @@ impl App {
             return;
         };
         let mut done = None;
+        let roles: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.accounts.iter().find(|a| &a.id == id))
+            .map(|a| a.value("role").to_string())
+            .collect();
+        let (greyed, note) = fixed_by_role(&action, &roles);
         let inputs = self.inputs.entry(game).or_default();
         egui::Modal::new(egui::Id::unique("form")).show(ctx, |ui| {
             ui.set_width(360.0);
             ui.heading(format!("{} for {}", action.label, plural(ids.len())));
             if !action.confirm.is_empty() {
                 ui.label(&action.confirm);
+            }
+            if !action.note.is_empty() {
+                ui.label(RichText::new(&action.note).weak());
+            }
+            if let Some(n) = &note {
+                ui.label(RichText::new(n).weak());
             }
             egui::Grid::new("form_inputs")
                 .num_columns(2)
@@ -2656,7 +2763,15 @@ impl App {
                     for i in &action.inputs {
                         ui.label(RichText::new(&i.label).weak());
                         let v = inputs.entry(i.key.clone()).or_default();
-                        if i.choices.is_empty() {
+                        if greyed.contains(&i.key.as_str()) {
+                            // what the launch sets anyway: shown as left alone, and sent so
+                            *v = i.choices.first().cloned().unwrap_or_default();
+                            ui.add_enabled_ui(false, |ui| {
+                                egui::ComboBox::from_id_salt(("form", &i.key))
+                                    .selected_text(v.as_str())
+                                    .show_ui(ui, |_| {});
+                            });
+                        } else if i.choices.is_empty() {
                             ui.add(
                                 egui::TextEdit::singleline(v)
                                     .hint_text(&i.hint)
@@ -3072,8 +3187,8 @@ impl App {
     }
     // --- right: launch and the chosen account -----------------------------------------------
 
-    /// The right side: the join boxes and Join Server, Follow, Alias, Description,
-    /// and the four buttons under it.
+    /// The right side: the join boxes and Join Server, Follow, Alias, Description, Set
+    /// Description, and the Account and More menus under it.
     fn deck(&mut self, ui: &mut egui::Ui, m: &Module) {
         let ids: Vec<String> = self
             .selected
@@ -3228,40 +3343,34 @@ impl App {
             });
         });
         let mut choice = None;
-        let mut set_notes = false;
-        let mut edit = false;
         // a menu button of the grid: a half-width button with an arrow at its end
-        let menu = |ui: &mut egui::Ui, label: &str| {
-            let r = ui.add_sized([second, h], egui::Button::new(label));
+        let menu = |ui: &mut egui::Ui, label: &str, w: f32| {
+            let r = ui.add_sized([w, h], egui::Button::new(label));
             caret_at(ui, &r, r.rect.right() - 14.0);
             r
         };
+        let set_notes = ui
+            .add_enabled_ui(one, |ui| {
+                ui.add_sized([full, h], egui::Button::new(count("Set Description")))
+            })
+            .inner
+            .clicked();
+        // Account: the everyday things; More: the rare and risky ones
         ui.horizontal(|ui| {
-            set_notes = ui
-                .add_enabled_ui(one, |ui| {
-                    ui.add_sized([half, h], egui::Button::new(count("Set Description")))
-                })
-                .inner
-                .clicked();
             ui.add_enabled_ui(!ids.is_empty(), |ui| {
-                let r = menu(ui, "Account Utilities");
+                let r = menu(ui, "Account", half);
                 egui::Popup::menu(&r).show(|ui| {
-                    choice = self.actions_menu(ui, m, &ids, false);
+                    choice = self.account_items(ui, m, &ids);
+                    if choice.is_some() {
+                        ui.close();
+                    }
                 });
-            });
-        });
-        ui.horizontal(|ui| {
-            edit = ui
-                .add_enabled_ui(ids.len() == 1, |ui| {
-                    ui.add_sized([half, h], egui::Button::new("Edit Account"))
-                })
-                .inner
-                .on_hover_text("every field: cookie, password, 2FA, mode, FPS")
-                .clicked();
-            ui.add_enabled_ui(!ids.is_empty(), |ui| {
-                let r = menu(ui, "Account Control");
+                let r = menu(ui, "More", second);
                 egui::Popup::menu(&r).show(|ui| {
-                    choice = choice.take().or(self.actions_menu(ui, m, &ids, true));
+                    choice = choice.take().or(self.more_items(ui, m, &ids));
+                    if choice.is_some() {
+                        ui.close();
+                    }
                 });
             });
         });
@@ -3270,90 +3379,9 @@ impl App {
             self.edit_all(&ids, |a| a.notes = v.clone());
             self.say(format!("Description set for {}", plural(ids.len())), false);
         }
-        if edit {
-            self.edit_open = true;
-        }
         if let Some(c) = choice {
             self.apply_menu(m, ids, c);
         }
-    }
-
-    /// Account Utilities (`control` false): the game's everyday buttons, Mode, groups, Copy.
-    /// Account Control (`control` true): Stop, the buttons that change the account on the
-    /// game's side (each asks first), Remove.
-    fn actions_menu(
-        &mut self,
-        ui: &mut egui::Ui,
-        m: &Module,
-        ids: &[String],
-        control: bool,
-    ) -> Option<MenuChoice> {
-        let n = ids.len();
-        let count = |label: &str| {
-            if n > 1 {
-                format!("{label} ({n})")
-            } else {
-                label.to_string()
-            }
-        };
-        let mut choice = None;
-        // the buttons already on the right (Join Server, Follow) and the left (Open Browser) stay off
-        let on_deck = |a: &module::Action| {
-            a.primary || a.id == "browser" || (a.inputs.len() == 1 && !a.needs_form())
-        };
-        for a in m
-            .actions
-            .iter()
-            .filter(|a| !on_deck(a) && a.confirm.is_empty() != control)
-        {
-            if ui.button(count(&a.label)).clicked() {
-                choice = Some(MenuChoice::Run(a.id.clone()));
-            }
-        }
-        if control {
-            if ids.iter().any(|id| self.running.contains_key(id))
-                && ui.button(count("Close game")).clicked()
-            {
-                choice = Some(MenuChoice::Stop);
-            }
-            ui.separator();
-            if ui
-                .button(RichText::new(count("Remove")).color(ui.visuals().error_fg_color))
-                .clicked()
-            {
-                choice = Some(MenuChoice::Remove);
-            }
-        } else {
-            ui.separator();
-            if let Some(role) = m.field("role").filter(|f| !f.choices.is_empty()) {
-                ui.menu_button("Mode", |ui| {
-                    for c in &role.choices {
-                        let label = match c.as_str() {
-                            "main" => "High (main)".to_string(),
-                            "alt" => "Low (alt)".to_string(),
-                            o => o.to_string(),
-                        };
-                        if ui.button(label).clicked() {
-                            choice = Some(MenuChoice::Set(role.key.clone(), c.clone()));
-                        }
-                    }
-                });
-            }
-            ui.menu_button("Move to group", |ui| {
-                for g in self.groups(&m.id) {
-                    if ui.button(&g).clicked() {
-                        choice = Some(MenuChoice::Group(g));
-                    }
-                }
-                if ui.button(RichText::new(NO_GROUP).weak()).clicked() {
-                    choice = Some(MenuChoice::Group(String::new()));
-                }
-            });
-        }
-        if choice.is_some() {
-            ui.close();
-        }
-        choice
     }
 
     /// Edit Account: every field of the chosen account in a window of its own (a new account
@@ -3670,8 +3698,82 @@ enum MenuChoice {
     Stop,
     Copy(String),
     Remove,
+    /// Edit account, for this one
+    Edit(String),
+    /// the FPS choice: a new frame-rate limit for the running games (0: no cap)
+    LiveFps(u32),
     Group(String),
     Set(String, String),
+}
+
+/// The inputs of `action` a role's launch sets itself (`fixed_for`): greyed out when every
+/// chosen account has that role (`roles`, one per account), and the line that says so when any
+/// has it.
+fn fixed_by_role<'a>(
+    action: &'a module::Action,
+    roles: &[String],
+) -> (Vec<&'a str>, Option<String>) {
+    let fixed: Vec<&module::Input> = action
+        .inputs
+        .iter()
+        .filter(|i| !i.fixed_for.is_empty() && roles.contains(&i.fixed_for))
+        .collect();
+    let Some(role) = fixed.first().map(|i| i.fixed_for.as_str()) else {
+        return (Vec::new(), None);
+    };
+    let labels: Vec<&str> = fixed
+        .iter()
+        .filter(|i| i.fixed_for == role)
+        .map(|i| i.label.as_str())
+        .collect();
+    let greyed = fixed
+        .iter()
+        .filter(|i| roles.iter().all(|r| *r == i.fixed_for))
+        .map(|i| i.key.as_str())
+        .collect();
+    (
+        greyed,
+        Some(format!(
+            "Set at each launch for {role} accounts: {}",
+            labels.join(", ")
+        )),
+    )
+}
+
+/// The boxes a button runs with: its own and the ones it names in `also`, those filled in. A
+/// Follow target must not ride along with Join Server.
+fn action_inputs(action: &module::Action, all: &Values) -> Values {
+    action
+        .inputs
+        .iter()
+        .map(|i| &i.key)
+        .chain(&action.also)
+        .filter_map(|k| {
+            all.get(k)
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| (k.clone(), v.clone()))
+        })
+        .collect()
+}
+
+/// The FPS choice of a running account: (label, frame-rate limit; 0: no cap).
+const LIVE_FPS: [(&str, u32); 7] = [
+    ("1", 1),
+    ("15", 15),
+    ("30", 30),
+    ("60", 60),
+    ("144", 144),
+    ("240", 240),
+    ("Max", 0),
+];
+
+/// A label for `n` accounts: "Log out (3)"; one account: the label alone.
+fn counted(label: &str, n: usize) -> String {
+    if n > 1 {
+        format!("{label} ({n})")
+    } else {
+        label.to_string()
+    }
 }
 
 fn plural(n: usize) -> String {
@@ -4106,6 +4208,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods);
     }
 
+    /// Follow on Linux gets the Place ID box too (for a user whose game is hidden); Join Server
+    /// never gets the Follow box.
+    #[test]
+    fn follow_gets_place_id() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let all: Values = [("place", "1818"), ("server", ""), ("follow", "Bob")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into();
+        let action = |id: &str| m.actions.iter().find(|a| a.id == id).unwrap();
+        let want: Values = [("place", "1818")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into();
+        assert_eq!(action_inputs(action("play"), &all), want);
+        let follow = action_inputs(action("follow"), &all);
+        assert_eq!(follow.get("follow").map(String::as_str), Some("Bob"));
+        assert_eq!(
+            follow.get("place").map(String::as_str),
+            cfg!(target_os = "linux").then_some("1818")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Settings has no FPS or window of its own (they are the account's FPS cap and Window);
+    /// for alts it greys out Graphics level and Volume, which their launch sets.
+    #[test]
+    fn settings_for_alts() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let settings = m.actions.iter().find(|a| a.id == "graphics").unwrap();
+        assert!(
+            !settings
+                .inputs
+                .iter()
+                .any(|i| i.key == "fps" || i.key == "window")
+        );
+        assert!(settings.note.contains("per account"));
+        let roles = |r: &[&str]| -> Vec<String> { r.iter().map(|s| s.to_string()).collect() };
+        let line = "Set at each launch for alt accounts: Graphics level, Volume".to_string();
+        assert_eq!(
+            fixed_by_role(settings, &roles(&["alt", "alt"])),
+            (vec!["quality", "volume"], Some(line.clone()))
+        );
+        // a main among them: still theirs to set, the line says what happens to the alts
+        assert_eq!(
+            fixed_by_role(settings, &roles(&["alt", "main"])),
+            (vec![], Some(line))
+        );
+        assert_eq!(
+            fixed_by_role(settings, &roles(&["main", ""])),
+            (vec![], None)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The Mode column names the role as the Role field does.
     #[test]
     fn mode_names_the_role() {
@@ -4388,6 +4545,69 @@ esac
         h.state_mut().check_builds(true);
         assert!(h.state().building.is_some(), "a pending install did not start at open");
         wait_ended(&mut h);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// The FPS choice is offered for a running game only; the Mode column shows the limit it
+    /// gave while the game runs, the account's FPS cap again once it starts anew.
+    #[test]
+    #[cfg(unix)]
+    fn live_fps_shows_while_running() {
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        std::fs::create_dir_all(mods.join("t")).unwrap();
+        std::fs::write(
+            mods.join("t/module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"login\"\nlive_fps = \"live_fps\"\n\
+             [[field]]\nkey = \"login\"\nlabel = \"Login\"\n\
+             [[field]]\nkey = \"role\"\nlabel = \"Role\"\nkind = \"choice\"\nchoices = [\"alt\", \"main\"]\n\
+             [[field]]\nkey = \"fps\"\nlabel = \"FPS cap\"\ndefault_by = \"role\"\ndefaults = { alt = \"1\" }\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\ncommand = 'sleep 30'\n",
+        )
+        .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut a = h.state_mut().new_account(&m).unwrap();
+        set_value(&mut a, "login", "bob", false);
+        set_value(&mut a, "role", "alt", false);
+        assert!(h.state_mut().save(&a));
+        h.run();
+        h.get_by_label("bob").click();
+        h.run();
+        h.get_by_label("Account").click();
+        h.run();
+        assert!(h.query_by_label("FPS").is_none(), "no game runs");
+        // closes the menu
+        h.get_by_label("Account").click();
+        h.run();
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        h.run();
+        h.get_by_label("Account").click();
+        h.run();
+        assert!(h.query_by_label("FPS").is_some());
+        let tx = h.state().tx.clone();
+        tx.send(Event::LiveFps {
+            account: a.id.clone(),
+            fps: 30,
+        })
+        .unwrap();
+        h.run();
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 30 FPS now");
+        // the saved FPS cap is not touched
+        let saved = h.state().accounts.iter().find(|x| x.id == a.id).unwrap();
+        assert_eq!(m.value_of(saved, "fps"), "1");
+        // the game ended: its own cap again
+        let mut r = h.state_mut().running.remove(&a.id).unwrap();
+        r.stop();
+        let _ = r.child.wait();
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
+        // a new start forgets the last run's limit
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        assert!(h.state().running.contains_key(&a.id));
+        assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
+        for r in h.state_mut().running.values_mut() {
+            r.stop();
+        }
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }
@@ -4714,7 +4934,7 @@ esac
     }
 
     /// The right side: Set Alias and Set Description write to the chosen account, Edit
-    /// Account opens every field in its own window.
+    /// account in the Account menu opens every field in its own window.
     #[test]
     fn set_alias_description_and_edit() {
         let (mut h, dir) = window("generic");
@@ -4739,12 +4959,58 @@ esac
             (saved[0].name.as_str(), saved[0].notes.as_str()),
             ("Main", "farm alt")
         );
-        h.get_by_label("Edit Account").click();
+        h.get_by_label("Account").click();
+        h.run();
+        h.get_by_label("Edit account").click();
         h.run();
         assert!(h.state().edit_open);
         h.get_by_label("Close").click();
         h.run();
         assert!(!h.state().edit_open);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// More holds the rare and risky buttons and Remove; Log out still asks first.
+    #[test]
+    fn more_menu_holds_the_risky_ones() {
+        let (mut h, dir) = window("roblox");
+        let mut a = Account {
+            id: "r1".into(),
+            game: "roblox".into(),
+            ..Default::default()
+        };
+        set_value(&mut a, "username", "Bob", false);
+        h.state_mut().save(&a);
+        h.run();
+        h.get_by_label("Bob").click();
+        h.run();
+        assert_eq!(h.get_all_by_label("Remove").count(), 1);
+        h.get_by_label("More").click();
+        h.run();
+        // the bar's Remove and the menu's
+        assert_eq!(h.get_all_by_label("Remove").count(), 2);
+        assert!(h.query_by_label("Who can join").is_some());
+        assert!(
+            h.query_by_label("Refresh").is_none(),
+            "Refresh is in Account"
+        );
+        h.get_by_label("Log out").click();
+        h.run();
+        assert_eq!(
+            h.state().form,
+            Some(("logout".to_string(), vec!["r1".to_string()]))
+        );
+        // the right-click menu: the buttons on the right, the Account menu's, and More
+        h.state_mut().form = None;
+        h.run();
+        h.get_by_label("Bob").click_secondary();
+        h.run();
+        // the deck's Follow and the menu's
+        assert_eq!(h.get_all_by_label("Follow").count(), 2);
+        assert!(h.query_by_label("Edit account").is_some());
+        h.get_all_by_label("More").last().unwrap().hover();
+        h.run();
+        assert!(h.query_by_label("Sign out everywhere").is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

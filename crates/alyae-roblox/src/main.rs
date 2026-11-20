@@ -224,22 +224,52 @@ pub fn join_from(req: &Request) -> Join {
             Ok(n) => n,
             Err(_) => api::user_id_of(follow).unwrap_or_else(|e| fail(&format!("Follow: {e}"))),
         };
-        // Mocktail joins only with a place: the user's own server, looked up first
-        match api::whereabouts(user, &req.cookie()) {
-            Ok(Some((place, server))) => {
-                status(&format!("{follow} is in place {place}"));
-                j.place = Some(place);
-                j.job = Some(server);
-                j.link_code = None;
-            }
-            Ok(None) => fail(&format!(
-                "{follow} is not in a game this account can see (offline, or their privacy hides it)"
-            )),
-            Err(e) => fail(&format!("Follow: {e}")),
+        let plan = follow_plan(follow, !cfg!(windows), j.place, || {
+            api::whereabouts(user, &req.cookie()).map_err(|e| format!("Follow: {e}"))
+        });
+        if let Some((place, said)) = plan.unwrap_or_else(|e| fail(&e)) {
+            status(&said);
+            j.place = Some(place);
         }
         j.follow = Some(user);
     }
     j
+}
+
+/// Follow's place, with the status line that says where it came from. Windows's
+/// RequestFollowUser joins by the user alone, as a profile's Join button does, so there presence
+/// is not asked (`needs_place` false: None). Mocktail wants a place beside the user (the join
+/// still goes by the user, so Roblox finds their server): the place presence shows them in
+/// (`look`), else their game's start place, else the one in Place ID (`typed`).
+fn follow_plan(
+    name: &str,
+    needs_place: bool,
+    typed: Option<u64>,
+    look: impl FnOnce() -> Result<api::Whereabouts, String>,
+) -> Result<Option<(u64, String)>, String> {
+    if !needs_place {
+        return Ok(None);
+    }
+    let seen = look()?;
+    if let Some(p) = seen.place {
+        return Ok(Some((p, format!("{name} is in place {p}"))));
+    }
+    if let Some(p) = seen.root {
+        return Ok(Some((
+            p,
+            format!("{name}'s place is hidden: joining them through their game's start place {p}"),
+        )));
+    }
+    match typed {
+        Some(p) => Ok(Some((
+            p,
+            format!("{name}'s game is hidden: joining them through Place ID {p}"),
+        ))),
+        None => Err(format!(
+            "{name}'s game is hidden from this account (offline, or their privacy hides it): \
+             put their game's place ID or link in Place ID and Follow again"
+        )),
+    }
 }
 
 /// Log in: Roblox's login page in `alyae-roblox-login`, filled in with the saved username,
@@ -567,6 +597,8 @@ fn main() {
         "close_all" => linux::close_all(),
         #[cfg(target_os = "linux")]
         "anti_afk" => linux::anti_afk(),
+        #[cfg(target_os = "linux")]
+        "live_fps" => linux::live_fps(&req),
         #[cfg(windows)]
         "close_all" => windows::close_all(),
         #[cfg(target_os = "linux")]
@@ -659,6 +691,43 @@ mod tests {
             Some("abcDEF123456789012")
         );
         assert_eq!(query_value(link, "linkCode"), None);
+    }
+
+    #[test]
+    fn follow_on_windows_asks_no_presence() {
+        let plan = follow_plan("Bob", false, Some(5), || panic!("presence asked"));
+        assert_eq!(plan, Ok(None));
+    }
+
+    #[test]
+    fn follow_place_order() {
+        let seen = |place, root| move || Ok(api::Whereabouts { place, root });
+        let plan = |place, root, typed| follow_plan("Bob", true, typed, seen(place, root));
+        // the place presence shows comes first, then the game's start place, then Place ID
+        assert_eq!(
+            plan(Some(10), Some(20), Some(30)),
+            Ok(Some((10, "Bob is in place 10".into())))
+        );
+        assert_eq!(
+            plan(None, Some(20), Some(30)),
+            Ok(Some((
+                20,
+                "Bob's place is hidden: joining them through their game's start place 20".into()
+            )))
+        );
+        assert_eq!(
+            plan(None, None, Some(30)),
+            Ok(Some((
+                30,
+                "Bob's game is hidden: joining them through Place ID 30".into()
+            )))
+        );
+        assert!(plan(None, None, None).unwrap_err().contains("Place ID"));
+        // a presence that failed is said as it is, not taken for hidden
+        assert_eq!(
+            follow_plan("Bob", true, Some(30), || Err("Follow: offline".into())),
+            Err("Follow: offline".into())
+        );
     }
 
     #[test]

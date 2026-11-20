@@ -44,6 +44,10 @@ pub struct Input {
     /// the values to pick from, when the input is a choice
     #[serde(default)]
     pub choices: Vec<String>,
+    /// a role (the `role` field's value) whose launch sets this itself: the form greys it out
+    /// when every chosen account has that role
+    #[serde(default)]
+    pub fixed_for: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -61,6 +65,9 @@ pub struct Action {
     pub primary: bool,
     #[serde(default, rename = "input")]
     pub inputs: Vec<Input>,
+    /// boxes of other buttons this one gets too, by key (Follow on Linux: Place ID)
+    #[serde(default)]
+    pub also: Vec<String>,
     /// asked before the action runs (it changes the accounts)
     #[serde(default)]
     pub confirm: String,
@@ -72,9 +79,26 @@ pub struct Action {
     /// runs for every chosen account at once instead of one at a time in the queue
     #[serde(default)]
     pub local: bool,
+    /// `menu = "more"`: in the More menu, with the rare and risky buttons; otherwise in the
+    /// Account menu (a button on the right, Join Server or one with its own box, is in neither)
+    #[serde(default)]
+    pub menu: String,
+    /// a line its form shows under the heading
+    #[serde(default)]
+    pub note: String,
 }
 
 impl Action {
+    /// A button of its own on the right: the big one, or one with its own box (Follow).
+    pub fn on_deck(&self) -> bool {
+        self.primary || (self.inputs.len() == 1 && !self.needs_form())
+    }
+
+    /// In the More menu (else in the Account menu, when not on the right).
+    pub fn in_more(&self) -> bool {
+        self.menu == "more"
+    }
+
     /// Asks for its values (or a confirmation) in a small form before running; one plain input
     /// is a box beside the button instead.
     pub fn needs_form(&self) -> bool {
@@ -323,6 +347,10 @@ pub struct Module {
     /// being idle: Anti-AFK runs it every few minutes
     #[serde(default)]
     pub anti_afk: String,
+    /// a helper action that gives one running game a new frame-rate limit (input `fps`: 1 to
+    /// 1000, 0 for no cap) without changing the account's FPS cap: the FPS choice
+    #[serde(default)]
+    pub live_fps: String,
     /// how Add account and Import fill in new accounts (`[add]`); without it Add opens the form
     #[serde(default)]
     pub add: Option<AddFlow>,
@@ -541,6 +569,8 @@ pub enum Event {
     /// what the module's build says it is doing (bad: it failed)
     Build { text: String, bad: bool },
     BuildEnded,
+    /// the account's running game took a new frame-rate limit (0: no cap)
+    LiveFps { account: String, fps: u32 },
 }
 
 pub struct Running {
@@ -666,16 +696,17 @@ fn request_json(
 }
 
 /// Runs the helper's `action` for `account` and waits for it to end, for short actions (the
-/// module's `on_remove`, `close_all`, `anti_afk`): Ok holds its last status line, if it said
-/// one; its errors are joined into the Err.
+/// module's `on_remove`, `close_all`, `anti_afk`, `live_fps`): Ok holds its last status line, if
+/// it said one; its errors are joined into the Err.
 pub fn run_and_wait(
     module: &Module,
     action: &str,
     account: &Account,
+    inputs: &crate::store::Values,
     data_dir: &Path,
 ) -> Result<Option<String>, String> {
     let (mut child, dir, helper) = spawn_helper(module, action, action, data_dir)?;
-    let request = request_json(module, account, &Default::default(), &dir);
+    let request = request_json(module, account, inputs, &dir);
     // stdin closes after the request: the helper sees no more lines
     let mut stdin = child.stdin.take().expect("piped stdin");
     let sent = stdin.write_all(format!("{request}\n").as_bytes());
@@ -967,6 +998,57 @@ defaults = { main = "330", alt = "6" }
         assert_eq!(account_json(&m, &a)["fps"], "6");
         a.fields.insert("fps".into(), "60".into());
         assert_eq!(m.value_of(&a, "fps"), "60");
+    }
+
+    /// The Roblox buttons by menu: on the right (Join Server, Follow), the Account menu (the
+    /// everyday ones), the More menu (rare, or changing the account on Roblox's side).
+    #[test]
+    fn roblox_buttons_by_menu() {
+        for file in ["roblox-linux", "roblox-windows"] {
+            let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules")).join(file);
+            let m = Module::parse(
+                &std::fs::read_to_string(dir.join("module.toml")).unwrap(),
+                &dir,
+            )
+            .unwrap();
+            let labels = |f: &dyn Fn(&Action) -> bool| -> Vec<&str> {
+                m.actions
+                    .iter()
+                    .filter(|a| f(a))
+                    .map(|a| a.label.as_str())
+                    .collect()
+            };
+            assert_eq!(
+                labels(&|a| a.on_deck()),
+                ["Join Server", "Follow"],
+                "{file}"
+            );
+            assert_eq!(
+                labels(&|a| !a.on_deck() && !a.in_more()),
+                [
+                    "Refresh",
+                    "Log in",
+                    "Open in browser",
+                    "Settings",
+                    "Friends"
+                ],
+                "{file}"
+            );
+            let mut more = labels(&|a| !a.on_deck() && a.in_more());
+            more.sort_unstable();
+            assert_eq!(
+                more,
+                [
+                    "Change password",
+                    "Log out",
+                    "Reset files",
+                    "Sign out everywhere",
+                    "Unblock everyone",
+                    "Who can join"
+                ],
+                "{file}"
+            );
+        }
     }
 
     /// On Windows a value ending in a backslash keeps its closing quote.

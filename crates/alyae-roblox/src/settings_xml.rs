@@ -150,15 +150,6 @@ pub fn window(mode: &str) -> Vec<Prop> {
     }
 }
 
-/// The Settings form's Window value: None for "keep" (or empty), else a choice `window` takes.
-pub fn window_input(v: &str) -> Result<Option<&str>, String> {
-    match v {
-        "" | "keep" => Ok(None),
-        "fullscreen" | "windowed" | "small" => Ok(Some(v)),
-        _ => Err(format!("Window: '{v}'")),
-    }
-}
-
 /// `text` (a settings file, or None: a new one as Roblox would write it) with `props` set.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn with_props(text: Option<&str>, props: &[Prop]) -> String {
@@ -314,26 +305,12 @@ const SETTINGS: &[Setting] = &[
     },
 ];
 
-/// The file entries the Settings form asks for, and the FPS cap it sets (0: none), or the first
-/// value that is not one Roblox takes.
-pub fn from_form(input: impl Fn(&str) -> String) -> Result<(Vec<Prop>, Option<u32>), String> {
+/// The file entries the Settings form asks for, or the first value that is not one Roblox takes.
+/// The frame cap and window are not among them: each launch sets them from the account's FPS cap
+/// and Window.
+pub fn from_form(input: impl Fn(&str) -> String) -> Result<Vec<Prop>, String> {
     let keep = |v: &str| v.is_empty() || v == "keep";
     let mut props = Vec::new();
-    let mut fps = None;
-    match input("fps").as_str() {
-        v if keep(v) => {}
-        "no cap" => {
-            fps = Some(0);
-            props.push(prop("int", "FramerateCap", 10000));
-        }
-        v => match v.parse::<u32>() {
-            Ok(n @ 1..=1000) => {
-                fps = Some(n);
-                props.push(prop("int", "FramerateCap", n));
-            }
-            _ => return Err(format!("FPS limit: '{v}'")),
-        },
-    }
     match input("quality").as_str() {
         v if keep(v) => {}
         "Automatic" => props.push(prop("token", "GraphicsOptimizationMode", 0)),
@@ -363,7 +340,7 @@ pub fn from_form(input: impl Fn(&str) -> String) -> Result<(Vec<Prop>, Option<u3
             None => return Err(format!("{}: '{v}'", st.name)),
         }
     }
-    Ok((props, fps))
+    Ok(props)
 }
 
 /// Camera sensitivity, everywhere Roblox reads it.
@@ -408,17 +385,16 @@ mod tests {
     #[test]
     fn form_to_entries() {
         let form = |k: &str| match k {
-            "fps" => "165".to_string(),
-            "quality" => "10".into(),
+            "quality" => "10".to_string(),
             "shift_lock" => "on".into(),
             "volume" => "5".into(),
             "camera_mode" => "Classic".into(),
             _ => "keep".into(),
         };
-        let (props, fps) = from_form(form).unwrap();
-        assert_eq!(fps, Some(165));
+        let props = from_form(form).unwrap();
         let out = set(ROBLOX, &props);
-        assert!(out.contains("<int name=\"FramerateCap\">165</int>"));
+        // the frame cap is the account's FPS cap, set at launch: the form leaves it
+        assert!(out.contains("<int name=\"FramerateCap\">60</int>"));
         // menu level 10 is 21 inside, as in a real file
         assert!(out.contains("<token name=\"SavedQualityLevel\">10</token>"));
         assert!(out.contains("<int name=\"GraphicsQualityLevel\">21</int>"));
@@ -433,7 +409,14 @@ mod tests {
             })
             .is_err()
         );
-        assert_eq!(from_form(|_| "keep".into()).unwrap().0.len(), 0);
+        assert!(from_form(|_| "keep".into()).unwrap().is_empty());
+        // an FPS or window value from before has no entry of its own any more
+        let old = |k: &str| match k {
+            "fps" => "165".to_string(),
+            "window" => "small".into(),
+            _ => "keep".into(),
+        };
+        assert!(from_form(old).unwrap().is_empty());
     }
 
     /// A small window: out of fullscreen, not maximized, its own X and Y; Vector2 pairs that
@@ -450,9 +433,6 @@ mod tests {
         assert!(added.contains("<X>800</X>\n\t\t\t\t<Y>600</Y>"));
         assert!(set(&out, &window("fullscreen")).contains("<bool name=\"Fullscreen\">true</bool>"));
         assert!(window("").is_empty());
-        assert_eq!(window_input("keep"), Ok(None));
-        assert_eq!(window_input("small"), Ok(Some("small")));
-        assert!(window_input("tiny").is_err());
     }
 
     /// The text a launch would put in place: the same for alts with the same settings (so the

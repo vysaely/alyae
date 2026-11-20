@@ -120,12 +120,25 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The file name of the account's own copy of the Mocktail program.
+/// The file name of the account's own copy of the Mocktail program: `mocktail_XII`.
 fn program_name(req: &Request) -> String {
+    format!("mocktail_{}", req.folder())
+}
+
+/// The name the copy had before accounts had numbers (from the account id); a game started
+/// then still runs under it.
+fn old_program_name(req: &Request) -> String {
     format!(
         "mocktail_alyae_{}",
         req.id.chars().take(12).collect::<String>()
     )
+}
+
+/// Whether the account's game runs, under either name of its program.
+fn game_running(req: &Request) -> bool {
+    [program_name(req), old_program_name(req)]
+        .iter()
+        .any(|n| already_running(Path::new(n)))
 }
 
 /// The account's own copy of the Mocktail program (a hard link where it can be one): Mocktail
@@ -146,9 +159,7 @@ fn account_program(m: &Mocktail, req: &Request, data_dir: &Path) -> PathBuf {
             for e in entries.flatten() {
                 let n = e.file_name();
                 let s = n.to_string_lossy();
-                if (s.contains(".so") || s.starts_with("mocktail_"))
-                    && !s.starts_with("mocktail_alyae_")
-                {
+                if (s.contains(".so") || s.starts_with("mocktail_")) && !alyae_game(&s) {
                     let dest = dir.join(&n);
                     if fs::symlink_metadata(&dest).is_err() {
                         let _ = symlink(e.path(), dest);
@@ -195,9 +206,13 @@ fn running_pid(program: &Path) -> Option<i32> {
     })
 }
 
-/// Alyae's copy of Mocktail for an account (`program_name`).
+/// Alyae's copy of Mocktail for an account: `mocktail_<numeral>` (`program_name`), or the
+/// `mocktail_alyae_<id>` it was before (`old_program_name`).
 fn alyae_game(name: &str) -> bool {
     name.starts_with("mocktail_alyae_")
+        || name
+            .strip_prefix("mocktail_")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| "IVXLCDM".contains(c)))
 }
 
 /// Any Mocktail game: Alyae's copies and the plain program; not Mocktail's helper programs
@@ -288,7 +303,9 @@ pub fn close_all() {
 pub fn resume(req: &Request) {
     let profile = req.profile();
     let cookie = req.cookie();
-    let pid = find_mocktail().and_then(|m| running_pid(&m.lib.join(program_name(req))));
+    let pid = [program_name(req), old_program_name(req)]
+        .iter()
+        .find_map(|n| running_pid(Path::new(n)));
     let Some(pid) = pid else {
         if profile.join(PICKUP).exists() {
             after_game(&profile, &cookie, false);
@@ -528,12 +545,8 @@ fn settings_file(profile: &Path) -> PathBuf {
 /// The Settings button: sets the graphics level, camera sensitivity, volume and the rest of its
 /// form in Roblox's own settings file. A value left at "keep" (or empty) stays as it is.
 pub fn graphics(req: &Request) {
-    let m = find_mocktail();
-    if let Some(m) = &m {
-        let program = m.lib.join(program_name(req));
-        if already_running(&program) {
-            fail("close this account's Roblox first: it rewrites its settings when it closes");
-        }
+    if game_running(req) {
+        fail("close this account's Roblox first: it rewrites its settings when it closes");
     }
     let (props, fps) =
         settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
@@ -580,11 +593,8 @@ fn reset_profile(profile: &Path) -> u64 {
 
 /// The Reset files button.
 pub fn reset(req: &Request) {
-    if let Some(m) = find_mocktail() {
-        let program = m.lib.join(program_name(req));
-        if already_running(&program) {
-            fail("close this account's Roblox first");
-        }
+    if game_running(req) {
+        fail("close this account's Roblox first");
     }
     let profile = req.profile();
     if !profile.is_dir() {
@@ -602,11 +612,10 @@ fn owned_profile(profile: &Path, data_dir: &Path) -> Option<PathBuf> {
     (p != root && p.starts_with(&root)).then_some(p)
 }
 
-/// Run before the account is removed from Alyae: its copy of the Mocktail program goes, and its
-/// profile folder when it is inside Alyae's profiles folder.
+/// Run before the account is removed from Alyae: its copy of the Mocktail program goes (under
+/// either name), and its profile folder when it is inside Alyae's profiles folder.
 pub fn forget(req: &Request) {
-    let name = program_name(req);
-    if already_running(Path::new(&name)) {
+    if game_running(req) {
         fail("close this account's Roblox first");
     }
     let mut problems = Vec::new();
@@ -619,9 +628,11 @@ pub fn forget(req: &Request) {
     let mut dirs = vec![req.data_dir.join("bin")];
     dirs.extend(find_mocktail().map(|m| m.lib));
     for d in dirs {
-        let program = d.join(&name);
-        gone(&program.with_extension("provision"));
-        gone(&program);
+        for name in [program_name(req), old_program_name(req)] {
+            let program = d.join(name);
+            gone(&program.with_extension("provision"));
+            gone(&program);
+        }
     }
     let profile = req.profile();
     if let Some(p) = owned_profile(&profile, &req.data_dir)
@@ -981,16 +992,20 @@ pub fn play(req: &Request) {
     let mut turn = LaunchTurn::take(data_dir, &mut stop);
     stop.end_if_asked();
     // a folder named by the account id (before accounts had numbers) gets its numeral, in the
-    // turn and only while no game of the account's uses it
+    // turn and only while no game of the account's uses it; the old copy of Mocktail goes
     let profiles = data_dir.join("profiles");
+    let old_running = already_running(Path::new(&old_program_name(req)));
     if let Err(e) = rename_old(
         &profiles.join(&req.id),
         &profiles.join(req.folder()),
-        already_running(&program),
+        old_running,
     ) {
         fail(&e);
     }
     let profile = req.profile();
+    if !old_running {
+        let _ = fs::remove_file(program.with_file_name(old_program_name(req)));
+    }
     status("starting");
     let window = window_plan(req.window(), role);
     prepare_profile(
@@ -1501,7 +1516,7 @@ mod tests {
     /// Alyae's games, which name their nudge file.
     #[test]
     fn which_processes_are_games() {
-        for game in ["mocktail", "mocktail_alyae_abc"] {
+        for game in ["mocktail", "mocktail_alyae_abc", "mocktail_XII", "mocktail_I"] {
             assert!(any_game(game), "{game}");
         }
         for other in [
@@ -1510,11 +1525,18 @@ mod tests {
             "mocktail_updater",
             "mocktail_failure_dialog",
             "mocktail.provision",
+            "mocktail_XII.provision",
+            "mocktail_",
+            "mocktail_xii",
             "alyae",
         ] {
             assert!(!any_game(other), "{other}");
         }
-        assert!(alyae_game("mocktail_alyae_abc") && !alyae_game("mocktail"));
+        // the new name and the one from before numbers are both Alyae's; the plain program is not
+        for game in ["mocktail_alyae_abc", "mocktail_XLVI"] {
+            assert!(alyae_game(game), "{game}");
+        }
+        assert!(!alyae_game("mocktail"));
     }
 
     /// The shift-lock reference comes from the newest payload that has it, else from the file

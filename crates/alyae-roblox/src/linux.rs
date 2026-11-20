@@ -1,7 +1,7 @@
 //! Roblox on Linux through Mocktail: one profile folder per account, a per-account copy of the
 //! Mocktail program (its single-instance lock follows the program's path), a main or alt role.
 
-use crate::files::{clear, remove};
+use crate::files::{clear, remove, rename_old};
 use crate::{Join, Request, Role, Stop, api, fail, join_from, say, settings_xml, status};
 use serde_json::json;
 use std::fs;
@@ -286,7 +286,7 @@ pub fn close_all() {
 /// ends it; at its end a renewed cookie is saved as after Join Server. No game: a renewed cookie
 /// a game left while Alyae was closed is saved; otherwise it ends at once, saying nothing.
 pub fn resume(req: &Request) {
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     let cookie = req.cookie();
     let pid = find_mocktail().and_then(|m| running_pid(&m.lib.join(program_name(req))));
     let Some(pid) = pid else {
@@ -553,7 +553,7 @@ pub fn graphics(req: &Request) {
         status("window set (used from the next start)");
         return;
     }
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     match settings_xml::apply(&settings_file(&profile), &props) {
         Ok(()) => status(&format!("{} settings set", props.len())),
         Err(e) => fail(&format!("cannot write Roblox's settings: {e}")),
@@ -586,7 +586,7 @@ pub fn reset(req: &Request) {
             fail("close this account's Roblox first");
         }
     }
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     if !profile.is_dir() {
         fail("this account has no files yet");
     }
@@ -623,7 +623,7 @@ pub fn forget(req: &Request) {
         gone(&program.with_extension("provision"));
         gone(&program);
     }
-    let profile = profile_dir(req, &req.data_dir);
+    let profile = req.profile();
     if let Some(p) = owned_profile(&profile, &req.data_dir)
         && let Err(e) = fs::remove_dir_all(&p)
     {
@@ -633,11 +633,6 @@ pub fn forget(req: &Request) {
         fail(&format!("cannot delete {}", problems.join("; ")));
     }
     status("files deleted");
-}
-
-/// The account's folder.
-fn profile_dir(req: &Request, data_dir: &Path) -> PathBuf {
-    data_dir.join("profiles").join(&req.id)
 }
 
 /// RAM that must be free (MemAvailable) before another client starts: many clients loading a
@@ -865,7 +860,7 @@ fn write_cookie(profile: &Path, cookie: &str, tracker: Option<&str>) -> PathBuf 
 fn runtime_dir(req: &Request, profile: &Path) -> PathBuf {
     let host = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let dir = match &host {
-        Some(h) if h.is_dir() => h.join("alyae").join(&req.id),
+        Some(h) if h.is_dir() => h.join("alyae").join(req.folder()),
         _ => profile.join("run"),
     };
     mkdir(&dir);
@@ -969,7 +964,7 @@ pub fn play(req: &Request) {
         fail("this account is already running");
     }
     let join = join_from(req);
-    let profile = profile_dir(req, data_dir);
+    let profile = req.profile();
     mkdir(&profile);
     // Mocktail's saved sign-in from a run whose helper was killed: the files written below do not
     // replace it, and at the end it would pass for a renewed cookie. (One left for pickup was
@@ -985,6 +980,17 @@ pub fn play(req: &Request) {
     }
     let mut turn = LaunchTurn::take(data_dir, &mut stop);
     stop.end_if_asked();
+    // a folder named by the account id (before accounts had numbers) gets its numeral, in the
+    // turn and only while no game of the account's uses it
+    let profiles = data_dir.join("profiles");
+    if let Err(e) = rename_old(
+        &profiles.join(&req.id),
+        &profiles.join(req.folder()),
+        already_running(&program),
+    ) {
+        fail(&e);
+    }
+    let profile = req.profile();
     status("starting");
     let window = window_plan(req.window(), role);
     prepare_profile(

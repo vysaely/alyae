@@ -13,16 +13,11 @@ fn session(req: &Request) -> Session {
         fail("no cookie: sign this account in first");
     }
     // the device ID Mocktail uses for this account, else a new one for this run
-    let tracker = std::fs::read_to_string(
-        req.data_dir
-            .join("profiles")
-            .join(&req.id)
-            .join("browser_tracker"),
-    )
-    .ok()
-    .map(|t| t.trim().to_string())
-    .filter(|t| api::browser_id(t).is_some())
-    .or_else(api::new_browser_tracker);
+    let tracker = std::fs::read_to_string(req.profile().join("browser_tracker"))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| api::browser_id(t).is_some())
+        .or_else(api::new_browser_tracker);
     Session {
         cookie,
         tracker,

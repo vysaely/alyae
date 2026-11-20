@@ -148,6 +148,8 @@ pub fn read(text: &str, password: &str) -> Result<Vec<Account>, String> {
             sort: i.sort,
             created: i.created,
             last_used: i.last_used,
+            // numbers are this PC's: an imported account gets the next one here
+            number: 0,
             fields: i.fields,
             secrets: i.secrets,
         })
@@ -178,11 +180,12 @@ pub fn import(store: &Store, have: &[Account], accounts: Vec<Account>) -> Result
     store.transaction(|| {
         let mut r = Imported::default();
         let mut seen: Vec<Account> = have.to_vec();
-        for a in accounts {
+        for mut a in accounts {
             if a.id.is_empty() || a.game.is_empty() || already(&seen, &a) {
                 r.skipped += 1;
                 continue;
             }
+            a.number = store.next_number()?;
             store.save(&a)?;
             if !a.value("launch").trim().is_empty() {
                 r.with_command.push(a.name.clone());

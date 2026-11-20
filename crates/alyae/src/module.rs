@@ -641,6 +641,8 @@ fn request_json(
     serde_json::json!({
         "id": account.id,
         "name": account.name,
+        // the name of the account's own folder (and game copy): its number as a Roman numeral
+        "folder": crate::store::numeral(account.number),
         "account": account_json(module, account),
         "inputs": inputs,
         "data_dir": dir,

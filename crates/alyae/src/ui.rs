@@ -1444,20 +1444,34 @@ impl App {
         });
     }
 
-    fn new_account(&self, m: &Module) -> Account {
-        Account {
+    /// A new account of `m`, with the next number; None (said in the message bar) when the
+    /// store cannot give one.
+    fn new_account(&mut self, m: &Module) -> Option<Account> {
+        let number = match self.store.as_ref().map(Store::next_number) {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => {
+                self.say(format!("Not added: {e}"), true);
+                return None;
+            }
+            None => {
+                self.say("Not added: no account store".to_string(), true);
+                return None;
+            }
+        };
+        Some(Account {
             id: store::new_id(),
             game: m.id.clone(),
             group: self.group_filter.clone().unwrap_or_default(),
             created: store::now(),
             sort: self.accounts.iter().map(|a| a.sort).max().unwrap_or(0) + 1,
+            number,
             ..Default::default()
-        }
+        })
     }
 
     /// Add account, by hand: an empty account in the form.
     fn add_account(&mut self, m: &Module) {
-        let a = self.new_account(m);
+        let Some(a) = self.new_account(m) else { return };
         self.focus = Some(a.id.clone());
         self.selected = [a.id.clone()].into();
         self.draft = Some(a);
@@ -1467,7 +1481,7 @@ impl App {
     /// Add account, through the module: a new account and its action (a login window) at once;
     /// what the action sends fills it in, and `finish_add` keeps it or drops it.
     fn add_via(&mut self, m: &Module, action: &str) {
-        let a = self.new_account(m);
+        let Some(a) = self.new_account(m) else { return };
         if self.save(&a) {
             self.adding.insert(a.id.clone());
             self.run_action(action, vec![a.id.clone()]);
@@ -1485,7 +1499,9 @@ impl App {
         let secret = m.is_secret(&flow.import_field);
         let mut ids = Vec::new();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let mut a = self.new_account(m);
+            let Some(mut a) = self.new_account(m) else {
+                break;
+            };
             set_value(
                 &mut a,
                 &flow.import_field,
@@ -3346,6 +3362,10 @@ impl App {
                     );
                 });
                 ui.end_row();
+                // the account's folder and game copy are named by its number; it never changes
+                ui.label(RichText::new("Folder").weak());
+                ui.label(store::numeral(d.number));
+                ui.end_row();
                 for f in &m.fields {
                     ui.label(RichText::new(&f.label).weak());
                     let map = if f.secret {
@@ -3951,9 +3971,9 @@ mod tests {
     /// The Mode column names the role as the Role field does.
     #[test]
     fn mode_names_the_role() {
-        let (h, dir) = window("roblox");
+        let (mut h, dir) = window("roblox");
         let m = h.state().module("roblox").cloned().unwrap();
-        let mut a = h.state().new_account(&m);
+        let mut a = h.state_mut().new_account(&m).unwrap();
         set_value(&mut a, "role", "alt", false);
         assert_eq!(h.state().mode(&m, &a), "alt \u{2022} 1 FPS");
         set_value(&mut a, "role", "main", false);
@@ -4106,7 +4126,7 @@ mod tests {
         let mut ids = Vec::new();
         for g in ["t", "u"] {
             let m = h.state().module(g).cloned().unwrap();
-            let a = h.state().new_account(&m);
+            let a = h.state_mut().new_account(&m).unwrap();
             assert!(h.state_mut().save(&a));
             h.state_mut().game = Some(g.into());
             h.state_mut().run_action("play", vec![a.id.clone()]);
@@ -4151,7 +4171,10 @@ mod tests {
         .unwrap();
         let (mut h, dir) = window_with("t", mods.clone());
         let m = h.state().module("t").cloned().unwrap();
-        let (mut playing, idle) = (h.state().new_account(&m), h.state().new_account(&m));
+        let (mut playing, idle) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
         set_value(&mut playing, "login", "playing", false);
         assert!(h.state_mut().save(&playing) && h.state_mut().save(&idle));
         h.state_mut().run_action("play", vec![playing.id.clone()]);
@@ -4194,7 +4217,7 @@ mod tests {
         let m = h.state().module("t").cloned().unwrap();
         let mut ids = Vec::new();
         for name in ["a1", "a2", "a3"] {
-            let mut a = h.state_mut().new_account(&m);
+            let mut a = h.state_mut().new_account(&m).unwrap();
             set_value(&mut a, "login", name, false);
             assert!(h.state_mut().save(&a));
             ids.push(a.id);
@@ -4225,7 +4248,10 @@ mod tests {
     fn queue_gap_follows_the_job() {
         let (mut h, dir) = window("roblox");
         let m = h.state().module("roblox").cloned().unwrap();
-        let (a, next) = (h.state().new_account(&m), h.state().new_account(&m));
+        let (a, next) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
         assert!(h.state_mut().save(&a) && h.state_mut().save(&next));
         h.state_mut().queue_current = Some((a.id, "roblox".into(), "login".into(), false));
         h.state_mut().queue_ended = true;
@@ -4254,12 +4280,12 @@ mod tests {
         assert_eq!(h.state().queue_gap("roblox", "play"), Duration::from_secs(2));
         assert_eq!(h.state().queue_gap("roblox", "follow"), Duration::from_secs(2));
         let m = h.state().module("roblox").cloned().unwrap();
-        let a = h.state().new_account(&m);
+        let a = h.state_mut().new_account(&m).unwrap();
         assert!(h.state_mut().save(&a));
         let tx = h.state().tx.clone();
         h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "login".into(), false));
         // one more waiting, so the pause is announced rather than a plain error
-        let waiting = h.state().new_account(&m);
+        let waiting = h.state_mut().new_account(&m).unwrap();
         h.state_mut().queue.push_back(Job {
             game: "roblox".into(),
             action: "login".into(),
@@ -4316,7 +4342,10 @@ mod tests {
     fn one_account_skips_the_queue() {
         let (mut h, dir) = window("generic");
         let m = h.state().module("generic").cloned().unwrap();
-        let (a, b) = (h.state().new_account(&m), h.state().new_account(&m));
+        let (a, b) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
         assert!(h.state_mut().save(&a) && h.state_mut().save(&b));
         // a queue busy with another account, a and b waiting in it
         h.state_mut().queue_current = Some(("busy".into(), "roblox".into(), "play".into(), true));

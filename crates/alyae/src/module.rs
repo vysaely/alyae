@@ -44,6 +44,10 @@ pub struct Input {
     /// the values to pick from, when the input is a choice
     #[serde(default)]
     pub choices: Vec<String>,
+    /// a role (the `role` field's value) whose launch sets this itself: the form greys it out
+    /// when every chosen account has that role
+    #[serde(default)]
+    pub fixed_for: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -79,6 +83,9 @@ pub struct Action {
     /// Account menu (a button on the right, Join Server or one with its own box, is in neither)
     #[serde(default)]
     pub menu: String,
+    /// a line its form shows under the heading
+    #[serde(default)]
+    pub note: String,
 }
 
 impl Action {
@@ -992,9 +999,11 @@ defaults = { main = "330", alt = "6" }
     fn roblox_buttons_by_menu() {
         for file in ["roblox-linux", "roblox-windows"] {
             let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../modules")).join(file);
-            let m =
-                Module::parse(&std::fs::read_to_string(dir.join("module.toml")).unwrap(), &dir)
-                    .unwrap();
+            let m = Module::parse(
+                &std::fs::read_to_string(dir.join("module.toml")).unwrap(),
+                &dir,
+            )
+            .unwrap();
             let labels = |f: &dyn Fn(&Action) -> bool| -> Vec<&str> {
                 m.actions
                     .iter()
@@ -1002,10 +1011,20 @@ defaults = { main = "330", alt = "6" }
                     .map(|a| a.label.as_str())
                     .collect()
             };
-            assert_eq!(labels(&|a| a.on_deck()), ["Join Server", "Follow"], "{file}");
+            assert_eq!(
+                labels(&|a| a.on_deck()),
+                ["Join Server", "Follow"],
+                "{file}"
+            );
             assert_eq!(
                 labels(&|a| !a.on_deck() && !a.in_more()),
-                ["Refresh", "Log in", "Open in browser", "Settings", "Friends"],
+                [
+                    "Refresh",
+                    "Log in",
+                    "Open in browser",
+                    "Settings",
+                    "Friends"
+                ],
                 "{file}"
             );
             let mut more = labels(&|a| !a.on_deck() && a.in_more());

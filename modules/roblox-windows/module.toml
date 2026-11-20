@@ -161,19 +161,13 @@ id = "graphics"
 label = "Settings"
 # only this computer's files: every chosen account at once, no queue
 local = true
-
-[[action.input]]
-key = "fps"
-label = "FPS limit"
-choices = ["keep", "1", "2", "3", "6", "10", "15", "20", "30", "60", "75", "120", "144", "165", "240", "330", "no cap"]
-
-[[action.input]]
-key = "window"
-label = "Window"
-choices = ["keep", "fullscreen", "windowed", "small"]
+# the frame cap and window are set at each launch from the account's own fields
+note = "FPS and window are per account: FPS cap and Window in Edit account."
 
 [[action.input]]
 key = "quality"
+# each launch sets an alt to graphics level 1 and muted
+fixed_for = "alt"
 label = "Graphics level"
 choices = ["keep", "Automatic", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
 
@@ -204,6 +198,8 @@ choices = ["keep", "Default", "Keyboard", "Click to move"]
 
 [[action.input]]
 key = "volume"
+# each launch sets an alt to graphics level 1 and muted
+fixed_for = "alt"
 label = "Volume"
 choices = ["keep", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
 

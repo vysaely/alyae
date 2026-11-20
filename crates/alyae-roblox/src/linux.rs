@@ -550,23 +550,9 @@ pub fn graphics(req: &Request) {
     if game_running(req) {
         fail("close this account's Roblox first: it rewrites its settings when it closes");
     }
-    let (props, fps) =
-        settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
-    let window = settings_xml::window_input(req.input("window")).unwrap_or_else(|e| fail(&e));
-    if props.is_empty() && window.is_none() {
-        fail("nothing to change: every value is \"keep\"");
-    }
-    // the launch sets FramerateCap from the account's FPS cap and the window from its Window:
-    // keep them in step
-    if let Some(f) = fps {
-        say(json!({ "set": { "fps": f.to_string() } }));
-    }
-    if let Some(w) = window {
-        say(json!({ "set": { "window": w } }));
-    }
+    let props = settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
     if props.is_empty() {
-        status("window set (used from the next start)");
-        return;
+        fail("nothing to change: every value is \"keep\"");
     }
     let profile = req.profile();
     match settings_xml::apply(&settings_file(&profile), &props) {

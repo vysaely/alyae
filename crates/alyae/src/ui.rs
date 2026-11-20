@@ -2677,12 +2677,24 @@ impl App {
             return;
         };
         let mut done = None;
+        let roles: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.accounts.iter().find(|a| &a.id == id))
+            .map(|a| a.value("role").to_string())
+            .collect();
+        let (greyed, note) = fixed_by_role(&action, &roles);
         let inputs = self.inputs.entry(game).or_default();
         egui::Modal::new(egui::Id::unique("form")).show(ctx, |ui| {
             ui.set_width(360.0);
             ui.heading(format!("{} for {}", action.label, plural(ids.len())));
             if !action.confirm.is_empty() {
                 ui.label(&action.confirm);
+            }
+            if !action.note.is_empty() {
+                ui.label(RichText::new(&action.note).weak());
+            }
+            if let Some(n) = &note {
+                ui.label(RichText::new(n).weak());
             }
             egui::Grid::new("form_inputs")
                 .num_columns(2)
@@ -2691,7 +2703,15 @@ impl App {
                     for i in &action.inputs {
                         ui.label(RichText::new(&i.label).weak());
                         let v = inputs.entry(i.key.clone()).or_default();
-                        if i.choices.is_empty() {
+                        if greyed.contains(&i.key.as_str()) {
+                            // what the launch sets anyway: shown as left alone, and sent so
+                            *v = i.choices.first().cloned().unwrap_or_default();
+                            ui.add_enabled_ui(false, |ui| {
+                                egui::ComboBox::from_id_salt(("form", &i.key))
+                                    .selected_text(v.as_str())
+                                    .show_ui(ui, |_| {});
+                            });
+                        } else if i.choices.is_empty() {
                             ui.add(
                                 egui::TextEdit::singleline(v)
                                     .hint_text(&i.hint)
@@ -3624,6 +3644,40 @@ enum MenuChoice {
     Set(String, String),
 }
 
+/// The inputs of `action` a role's launch sets itself (`fixed_for`): greyed out when every
+/// chosen account has that role (`roles`, one per account), and the line that says so when any
+/// has it.
+fn fixed_by_role<'a>(
+    action: &'a module::Action,
+    roles: &[String],
+) -> (Vec<&'a str>, Option<String>) {
+    let fixed: Vec<&module::Input> = action
+        .inputs
+        .iter()
+        .filter(|i| !i.fixed_for.is_empty() && roles.contains(&i.fixed_for))
+        .collect();
+    let Some(role) = fixed.first().map(|i| i.fixed_for.as_str()) else {
+        return (Vec::new(), None);
+    };
+    let labels: Vec<&str> = fixed
+        .iter()
+        .filter(|i| i.fixed_for == role)
+        .map(|i| i.label.as_str())
+        .collect();
+    let greyed = fixed
+        .iter()
+        .filter(|i| roles.iter().all(|r| *r == i.fixed_for))
+        .map(|i| i.key.as_str())
+        .collect();
+    (
+        greyed,
+        Some(format!(
+            "Set at each launch for {role} accounts: {}",
+            labels.join(", ")
+        )),
+    )
+}
+
 /// The boxes a button runs with: its own and the ones it names in `also`, those filled in. A
 /// Follow target must not ride along with Join Server.
 fn action_inputs(action: &module::Action, all: &Values) -> Values {
@@ -4100,6 +4154,38 @@ mod tests {
         assert_eq!(
             follow.get("place").map(String::as_str),
             cfg!(target_os = "linux").then_some("1818")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Settings has no FPS or window of its own (they are the account's FPS cap and Window);
+    /// for alts it greys out Graphics level and Volume, which their launch sets.
+    #[test]
+    fn settings_for_alts() {
+        let (h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let settings = m.actions.iter().find(|a| a.id == "graphics").unwrap();
+        assert!(
+            !settings
+                .inputs
+                .iter()
+                .any(|i| i.key == "fps" || i.key == "window")
+        );
+        assert!(settings.note.contains("per account"));
+        let roles = |r: &[&str]| -> Vec<String> { r.iter().map(|s| s.to_string()).collect() };
+        let line = "Set at each launch for alt accounts: Graphics level, Volume".to_string();
+        assert_eq!(
+            fixed_by_role(settings, &roles(&["alt", "alt"])),
+            (vec!["quality", "volume"], Some(line.clone()))
+        );
+        // a main among them: still theirs to set, the line says what happens to the alts
+        assert_eq!(
+            fixed_by_role(settings, &roles(&["alt", "main"])),
+            (vec![], Some(line))
+        );
+        assert_eq!(
+            fixed_by_role(settings, &roles(&["main", ""])),
+            (vec![], None)
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4768,7 +4854,10 @@ esac
         // the bar's Remove and the menu's
         assert_eq!(h.get_all_by_label("Remove").count(), 2);
         assert!(h.query_by_label("Who can join").is_some());
-        assert!(h.query_by_label("Refresh").is_none(), "Refresh is in Account");
+        assert!(
+            h.query_by_label("Refresh").is_none(),
+            "Refresh is in Account"
+        );
         h.get_by_label("Log out").click();
         h.run();
         assert_eq!(

@@ -8,8 +8,7 @@
 //! account's client starts, and taken back when it closes. Launches take turns, so the new client
 //! that appears belongs to the account that started it.
 
-use crate::{Request, Role, Stop, api, fail, join_from, say, settings_xml, status};
-use serde_json::json;
+use crate::{Request, Role, Stop, api, fail, join_from, settings_xml, status};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -413,23 +412,9 @@ pub fn graphics(req: &Request) {
     if running(req) {
         fail("close this account's Roblox first: its settings are taken back when it closes");
     }
-    let (props, fps) =
-        settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
-    let window = settings_xml::window_input(req.input("window")).unwrap_or_else(|e| fail(&e));
-    if props.is_empty() && window.is_none() {
-        fail("nothing to change: every value is \"keep\"");
-    }
-    // the launch sets FramerateCap from the account's FPS cap and the window from its Window:
-    // keep them in step
-    if let Some(f) = fps {
-        say(json!({ "set": { "fps": f.to_string() } }));
-    }
-    if let Some(w) = window {
-        say(json!({ "set": { "window": w } }));
-    }
+    let props = settings_xml::from_form(|k| req.input(k).to_string()).unwrap_or_else(|e| fail(&e));
     if props.is_empty() {
-        status("window set (used from the next start)");
-        return;
+        fail("nothing to change: every value is \"keep\"");
     }
     let own = own_settings(req);
     if let Some(d) = own.parent() {

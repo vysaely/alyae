@@ -121,6 +121,19 @@ pub struct App {
     servers_by_players: bool,
     /// an "image" field's picture being chosen in the system's picker: the field and the answer
     adding_image: Option<(String, std::sync::mpsc::Receiver<Option<std::path::PathBuf>>)>,
+    /// a module's `[build]` check said its program is not the build it needs: the module and the
+    /// warning
+    build_warning: Option<(String, String)>,
+    /// the build running (one at a time)
+    building: Option<Building>,
+}
+
+/// A module's `[build]` running.
+struct Building {
+    module: String,
+    run: Running,
+    /// its last line (bad: an error)
+    last: Option<(String, bool)>,
 }
 
 /// The accounts-file dialog: write all accounts to a file, or bring a file's accounts in.
@@ -224,6 +237,8 @@ impl App {
             servers_filter: None,
             servers_by_players: true,
             adding_image: None,
+            build_warning: None,
+            building: None,
         };
         match opened.and_then(|s| s.list().map(|l| (s, l))) {
             Ok((s, (list, problems))) => {
@@ -324,6 +339,59 @@ impl App {
             ) {
                 self.resuming.insert(a.id.clone(), r);
             }
+        }
+    }
+
+    /// Every module's `[build]` check, when Alyae opens and after a build. `start`: a finished
+    /// build whose install was left (the games were running) starts again, to install it or
+    /// wait for the games; after a build that stopped there it waits for the button.
+    pub fn check_builds(&mut self, start: bool) {
+        self.build_warning = None;
+        let list: Vec<(Module, module::Build)> = self
+            .modules
+            .iter()
+            .filter_map(|m| Some((m.clone(), m.build.clone()?)))
+            .collect();
+        for (m, b) in list {
+            match module::build_check(&m, &b, &self.dir) {
+                Ok(None) => {}
+                Ok(Some((text, built))) => {
+                    crate::log::line("", &text);
+                    self.build_warning = Some((m.id.clone(), text));
+                    if built && start {
+                        self.start_build(&m.id);
+                    }
+                }
+                Err(e) => self.say(format!("{}: {e}", b.label), true),
+            }
+        }
+    }
+
+    fn start_build(&mut self, id: &str) {
+        let Some((m, b)) = self
+            .module(id)
+            .and_then(|m| Some((m.clone(), m.build.clone()?)))
+        else {
+            return;
+        };
+        if self.building.is_some() {
+            return;
+        }
+        let ctx = self.ctx.clone();
+        match module::build(&m, &b, &self.dir, self.tx.clone(), move || {
+            if let Some(c) = &ctx {
+                c.request_repaint();
+            }
+        }) {
+            Ok(r) => {
+                crate::log::line("", &format!("{} started", b.label));
+                self.building = Some(Building {
+                    module: m.id.clone(),
+                    run: r,
+                    last: None,
+                });
+            }
+            Err(e) => self.say(format!("{}: {e}", b.label), true),
         }
     }
 
@@ -447,6 +515,30 @@ impl App {
                 Event::Note { text, bad } => {
                     crate::log::line("", &text);
                     self.message = Some((text, bad));
+                }
+                Event::Build { text, bad } => {
+                    crate::log::line("", &text);
+                    if let Some(b) = self.building.as_mut() {
+                        b.last = Some((text, bad));
+                    }
+                }
+                Event::BuildEnded => {
+                    let Some(mut b) = self.building.take() else {
+                        continue;
+                    };
+                    let ended = b.run.child.wait();
+                    // the program may have changed: its warning goes when it is the build now
+                    self.check_builds(false);
+                    match b.last {
+                        Some(said) => self.message = Some(said),
+                        None => self.say(
+                            format!(
+                                "The build ended without a word ({})",
+                                ended.map_or_else(|e| e.to_string(), |s| s.to_string())
+                            ),
+                            true,
+                        ),
+                    }
                 }
                 Event::Error { account, text } => {
                     let name = self
@@ -1169,8 +1261,10 @@ impl App {
         });
     }
 
-    /// The last message (an error in red); clicking it dismisses it.
+    /// The last message (an error in red); clicking it dismisses it. Before it, a module's build
+    /// warning or its build's last line, with the button that starts or cancels the build.
     fn message_line(&mut self, ui: &mut egui::Ui) {
+        self.build_line(ui);
         if let Some((text, bad)) = self.message.clone() {
             let color = if bad {
                 ui.visuals().error_fg_color
@@ -1186,6 +1280,50 @@ impl App {
                 self.message = None;
             }
         }
+    }
+
+    fn build_line(&mut self, ui: &mut egui::Ui) {
+        let (id, text, bad) = match (&self.building, &self.build_warning) {
+            (Some(b), _) => {
+                let (text, bad) = b.last.clone().unwrap_or_default();
+                (b.module.clone(), text, bad)
+            }
+            (None, Some((id, text))) => (id.clone(), text.clone(), true),
+            (None, None) => return,
+        };
+        let Some(label) = self
+            .module(&id)
+            .and_then(|m| m.build.as_ref())
+            .map(|b| b.label.clone())
+        else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            if let Some(b) = self.building.as_mut() {
+                if ui
+                    .button("Building…")
+                    .on_hover_text("Click to cancel the build")
+                    .clicked()
+                {
+                    b.run.stop();
+                }
+            } else if ui
+                .button(&label)
+                .on_hover_text(
+                    "Builds it in the background at low priority (a few minutes; the log has \
+                     its output); the install waits until no game runs",
+                )
+                .clicked()
+            {
+                self.start_build(&id);
+            }
+            let color = if bad {
+                ui.visuals().error_fg_color
+            } else {
+                look::colors().muted
+            };
+            ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
+        });
     }
 
     // --- left: group bar, table, buttons -----------------------------------------------------
@@ -4153,6 +4291,103 @@ mod tests {
         let (text, bad) = h.state().message.clone().unwrap();
         assert!(bad && text.starts_with("Close all games: t has no helper"), "{text}");
         h.state_mut().running.get_mut(&ids[1]).unwrap().stop();
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// A module's build warning gets its button; the build's lines replace the warning while it
+    /// runs, "Building…" cancels it, and after a build that worked the check finds nothing to
+    /// warn about. A finished build left to install starts again only when Alyae opens. The
+    /// helper here is a small script standing in for the module's.
+    #[test]
+    #[cfg(unix)]
+    fn build_button_builds_and_cancels() {
+        use std::os::unix::fs::PermissionsExt;
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\nhelper = \"helper.sh\"\n\
+             [build]\ncheck = \"check\"\naction = \"build\"\nlabel = \"Build tool\"\n",
+        )
+        .unwrap();
+        // check: a warning until the file "built" is there ("pending": built, not installed);
+        // build: waits for a stop unless "finish" is there
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r _
+case "$1" in
+check)
+    [ -e built ] && exit 0
+    [ -e pending ] && echo '{"warn":"Tool is built: it installs later","built":true}' && exit 0
+    echo '{"warn":"Tool is old","built":false}' ;;
+build)
+    echo '{"status":"Building tool: building 45%"}'
+    if [ -e finish ]; then touch built; echo '{"status":"Building tool: done"}'; exit 0; fi
+    read -r line
+    [ "$line" = stop ] && echo '{"status":"Building tool: cancelled"}' ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let wait_ended = |h: &mut Harness<'static, App>| {
+            for _ in 0..250 {
+                h.state_mut().poll();
+                if h.state().building.is_none() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("the build did not end");
+        };
+        h.state_mut().check_builds(true);
+        assert!(h.state().building.is_none(), "a build started by itself");
+        h.run();
+        h.get_by_label("Tool is old");
+        h.get_by_label("Build tool").click();
+        h.run();
+        for _ in 0..250 {
+            h.state_mut().poll();
+            if h.state().building.as_ref().is_some_and(|b| b.last.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.run();
+        h.get_by_label("Building tool: building 45%");
+        h.get_by_label("Building…").click();
+        h.run();
+        wait_ended(&mut h);
+        assert_eq!(
+            h.state().message,
+            Some(("Building tool: cancelled".into(), false))
+        );
+        assert!(h.state().build_warning.is_some(), "the warning went after a cancel");
+
+        std::fs::write(t.join("finish"), "").unwrap();
+        h.run();
+        h.get_by_label("Build tool").click();
+        h.run();
+        wait_ended(&mut h);
+        assert_eq!(h.state().build_warning, None);
+        assert_eq!(
+            h.state().message,
+            Some(("Building tool: done".into(), false))
+        );
+
+        std::fs::remove_file(t.join("built")).unwrap();
+        std::fs::write(t.join("pending"), "").unwrap();
+        h.state_mut().check_builds(false);
+        assert!(h.state().building.is_none(), "a pending install started after a build");
+        h.state_mut().check_builds(true);
+        assert!(h.state().building.is_some(), "a pending install did not start at open");
+        wait_ended(&mut h);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }

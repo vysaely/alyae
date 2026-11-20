@@ -34,6 +34,12 @@ for m in modules/*/; do
         mkdir -p "$SHARE/alyae/modules/$name/$sub"
         install -m644 "$pic" "$SHARE/alyae/modules/$name/$sub/"
     done
+    # Roblox: Mocktail's build.sh and patches, for Alyae's Build Mocktail button; the old copy goes
+    # first, so a patch removed here is not applied from there
+    if [ -d "$m/mocktail" ]; then
+        rm -rf "$SHARE/alyae/modules/$name/mocktail"
+        cp -R "$m/mocktail" "$SHARE/alyae/modules/$name/mocktail"
+    fi
 done
 mkdir -p "$SHARE/icons/hicolor/256x256/apps"
 install -m644 assets/alyae.png "$SHARE/icons/hicolor/256x256/apps/alyae.png"

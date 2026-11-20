@@ -18,7 +18,8 @@ More info, then Run anyway.
 
 Download [Alyae-linux-x86_64.tar.gz](https://github.com/vysaely/alyae/releases/tag/portable),
 unpack it and run `./alyae` (needs `webkit2gtk-4.1`; see `README-linux.txt` inside). Mocktail is
-not in the archive: build it with `modules/roblox-linux/mocktail/build.sh` inside the folder.
+not in the archive: Alyae's Build Mocktail button builds it (or run
+`modules/roblox-linux/mocktail/build.sh` inside the folder).
 
 Or build Alyae from source. Install the dependencies (Arch):
 
@@ -37,13 +38,15 @@ Then:
 git clone https://github.com/vysaely/alyae.git
 cd alyae
 ./install.sh
-modules/roblox-linux/mocktail/build.sh
 ```
 
-`build.sh` builds Mocktail with Alyae's patches. With a Mocktail installed otherwise Join Server
-works, but the shift-lock cursor, Anti-AFK, a main's low-memory profile and the camera-drag
-cursor fix need this build; Alyae says so when it starts a game on another one. To update, run
-`git pull` and both scripts again.
+Alyae builds Mocktail with its patches itself: when the installed Mocktail is not that build, the
+bottom line says so with a **Build Mocktail** button. The build runs in the background at low
+priority on half the cores (a few minutes; its output is in Alyae's log), and the install waits
+until no Roblox runs. With a Mocktail installed otherwise Join Server works, but the shift-lock
+cursor, Anti-AFK, a main's low-memory profile and the camera-drag cursor fix need this build.
+`modules/roblox-linux/mocktail/build.sh` does the same by hand. To update, run `git pull` and
+`./install.sh` again.
 
 To uninstall, run `./install.sh --uninstall`. Your accounts in `~/.local/share/alyae` are kept.
 

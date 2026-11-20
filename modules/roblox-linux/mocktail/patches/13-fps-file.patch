@@ -1,0 +1,195 @@
+diff --git a/include/runtime/frame_rate_policy.h b/include/runtime/frame_rate_policy.h
+index 7ce6ddc..519c08f 100644
+--- a/include/runtime/frame_rate_policy.h
++++ b/include/runtime/frame_rate_policy.h
+@@ -1,6 +1,7 @@
+ #ifndef MOCKTAIL_RUNTIME_FRAME_RATE_POLICY_H_
+ #define MOCKTAIL_RUNTIME_FRAME_RATE_POLICY_H_
+ 
++#include <optional>
+ #include <string>
+ #include <string_view>
+ 
+@@ -41,6 +42,14 @@ bool MergeFrameRateClientSettingsOverrides(const FrameRatePolicy &policy,
+                                            std::string *merged_json,
+                                            std::string *error);
+ 
++// Alyae: the highest frame-rate limit MOCKTAIL_FPS_FILE takes; 0 there (uncapped) means this.
++inline constexpr int kLiveFrameRateMaximum = 1000;
++
++// Alyae: the scheduler target the text of MOCKTAIL_FPS_FILE asks for: a whole number from 1 to
++// kLiveFrameRateMaximum, or 0 for kLiveFrameRateMaximum, with spaces and line breaks around it
++// allowed. Anything else asks for nothing.
++std::optional<int> ParseLiveFrameRateLimit(std::string_view text);
++
+ } // namespace runtime
+ } // namespace mocktail
+ 
+diff --git a/src/legacy/legacy_runtime.cc b/src/legacy/legacy_runtime.cc
+index 3c116f5..9bf5506 100644
+--- a/src/legacy/legacy_runtime.cc
++++ b/src/legacy/legacy_runtime.cc
+@@ -17,6 +17,7 @@
+ #include <netdb.h>
+ #include <memory>
+ #include <mutex>
++#include <optional>
+ #include <new>
+ #include <poll.h>
+ #include <unordered_map>
+@@ -64,6 +65,7 @@
+ #include "runtime/device_memory_profile.h"
+ #include "runtime/display_size.h"
+ #include "runtime/environment.h"
++#include "runtime/frame_rate_policy.h"
+ #include "runtime/discord_rpc.h"
+ #include "runtime/jnivm_platform_web_callbacks.h"
+ #include "runtime/owned_pthread.h"
+@@ -2061,6 +2063,81 @@ static void RaiseLibRobloxFrameRateClamps() {
+             << std::flush;
+ }
+ 
++// Alyae: MOCKTAIL_FPS_FILE names a file; a frame-rate limit written there (1-1000, 0 for
++// uncapped) replaces the running game's DFIntTaskSchedulerTargetFps, which Mocktail set from
++// MOCKTAIL_FRAME_RATE_LIMIT at start, so an account's cap changes without a restart (the
++// clamps raised above let it pass 240). Read once a second. The flag is written only while it
++// still holds the last target Mocktail set (the start limit, then each one written): a
++// different value means its storage was not found right, or Roblox changed it.
++static void ApplyLiveFrameRateLimit(uint64_t now_ns) {
++  static const char* const path = [] {
++    const char* value = std::getenv("MOCKTAIL_FPS_FILE");
++    return value != nullptr && value[0] != '\0' ? value : nullptr;
++  }();
++  static uint64_t checked_ns = 0;
++  if (path == nullptr ||
++      (checked_ns != 0 && now_ns - checked_ns < 1000000000ULL)) {
++    return;
++  }
++  checked_ns = now_ns;
++  std::ifstream in(path);
++  char buffer[32] = {};
++  in.read(buffer, sizeof(buffer));
++  const std::string text(buffer, static_cast<std::size_t>(in.gcount()));
++  static std::string last_text;
++  if (text == last_text) {
++    return;
++  }
++  last_text = text;
++  const std::optional<int> wanted =
++      mocktail::runtime::ParseLiveFrameRateLimit(text);
++  if (!wanted) {
++    std::cout << "  [runtime] MOCKTAIL_FPS_FILE: not a frame-rate limit (1-"
++              << mocktail::runtime::kLiveFrameRateMaximum
++              << ", 0 for uncapped); ignored\n"
++              << std::flush;
++    return;
++  }
++  static int current = [] {
++    const char* limit = std::getenv("MOCKTAIL_FRAME_RATE_LIMIT");
++    const mocktail::runtime::FrameRatePolicy policy =
++        mocktail::runtime::ParseFrameRatePolicy(limit != nullptr ? limit : "");
++    if (policy.mode == mocktail::runtime::FrameRateLimitMode::kFixed) {
++      return policy.fixed_fps;
++    }
++    return policy.mode == mocktail::runtime::FrameRateLimitMode::kUnlimited
++               ? mocktail::runtime::kMaximumSupportedRobloxSchedulerFps
++               : 0;
++  }();
++  if (*wanted == current) {
++    return;
++  }
++  if (current == 0) {
++    std::cout << "  [runtime] MOCKTAIL_FPS_FILE needs MOCKTAIL_FRAME_RATE_LIMIT "
++                 "set to a number or unlimited at start; ignored\n"
++              << std::flush;
++    return;
++  }
++  static int32_t* const value = reinterpret_cast<int32_t*>(
++      FindTaskSchedulerTargetFpsValue(LibRobloxMappings()));
++  const int32_t held =
++      value != nullptr ? __atomic_load_n(value, __ATOMIC_RELAXED) : 0;
++  if (value == nullptr || held != current) {
++    std::cout << "  [runtime] MOCKTAIL_FPS_FILE: TaskSchedulerTargetFps "
++              << (value == nullptr ? "not located"
++                                   : "holds " + std::to_string(held) +
++                                         ", not " + std::to_string(current))
++              << "; limit left at " << current << '\n'
++              << std::flush;
++    return;
++  }
++  __atomic_store_n(value, *wanted, __ATOMIC_RELAXED);
++  std::cout << "  [runtime] frame-rate limit " << current << " -> " << *wanted
++            << " (MOCKTAIL_FPS_FILE)\n"
++            << std::flush;
++  current = *wanted;
++}
++
+ extern "C" void mocktail_before_soinfo_constructors(const char* realpath,
+                                                     uintptr_t base) {
+   if (realpath == nullptr || std::strstr(realpath, "libroblox.so") == nullptr ||
+@@ -7295,6 +7372,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
+           break;
+         }
+       }
++      ApplyLiveFrameRateLimit(MonotonicNanos());
+       const uint64_t fps_after_platform_ns =
+           fps_trace ? MonotonicNanos() : 0;
+       PumpRobloxMainThreadMessagesOnce();
+diff --git a/src/runtime/frame_rate_policy.cc b/src/runtime/frame_rate_policy.cc
+index 6eb2946..9bf4dce 100644
+--- a/src/runtime/frame_rate_policy.cc
++++ b/src/runtime/frame_rate_policy.cc
+@@ -88,5 +88,22 @@ bool MergeFrameRateClientSettingsOverrides(const FrameRatePolicy &policy,
+   return true;
+ }
+ 
++std::optional<int> ParseLiveFrameRateLimit(std::string_view text) {
++  constexpr std::string_view kSpace = " \t\r\n";
++  const std::size_t first = text.find_first_not_of(kSpace);
++  if (first == std::string_view::npos) {
++    return std::nullopt;
++  }
++  text = text.substr(first, text.find_last_not_of(kSpace) - first + 1);
++  int fps = -1;
++  const auto parsed =
++      std::from_chars(text.data(), text.data() + text.size(), fps);
++  if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size() ||
++      fps < 0 || fps > kLiveFrameRateMaximum) {
++    return std::nullopt;
++  }
++  return fps == 0 ? kLiveFrameRateMaximum : fps;
++}
++
+ } // namespace runtime
+ } // namespace mocktail
+diff --git a/tests/frame_rate_policy_test.cc b/tests/frame_rate_policy_test.cc
+index 1a020b4..169dec7 100644
+--- a/tests/frame_rate_policy_test.cc
++++ b/tests/frame_rate_policy_test.cc
+@@ -4,11 +4,26 @@
+ #include <nlohmann/json.hpp>
+ 
+ #include <string>
++#include <string_view>
+ 
+ namespace mocktail {
+ namespace runtime {
+ namespace {
+ 
++// Alyae: what an account's MOCKTAIL_FPS_FILE may hold.
++TEST(FrameRatePolicyTest, ParsesLiveFrameRateLimit) {
++  EXPECT_EQ(ParseLiveFrameRateLimit("1"), 1);
++  EXPECT_EQ(ParseLiveFrameRateLimit("144\n"), 144);
++  EXPECT_EQ(ParseLiveFrameRateLimit("  60 \r\n"), 60);
++  EXPECT_EQ(ParseLiveFrameRateLimit("1000"), 1000);
++  EXPECT_EQ(ParseLiveFrameRateLimit("0\n"), kLiveFrameRateMaximum);
++  for (std::string_view rejected :
++       {"", "\n", "1001", "-1", "+5", "60fps", "6 0", "unlimited", "1.5",
++        "99999999999"}) {
++    EXPECT_FALSE(ParseLiveFrameRateLimit(rejected).has_value()) << rejected;
++  }
++}
++
+ TEST(FrameRatePolicyTest, ParsesSupportedModes) {
+   EXPECT_EQ(ParseFrameRatePolicy("").mode,
+             FrameRateLimitMode::kUnmanaged);

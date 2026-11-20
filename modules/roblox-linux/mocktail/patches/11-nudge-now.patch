@@ -1,5 +1,5 @@
 diff --git a/src/window/window.cc b/src/window/window.cc
-index 03d6974..76a6edb 100644
+index f1f051f..840924a 100644
 --- a/src/window/window.cc
 +++ b/src/window/window.cc
 @@ -4,6 +4,7 @@
@@ -10,7 +10,7 @@ index 03d6974..76a6edb 100644
  #include <unistd.h>
  
  #include <algorithm>
-@@ -2325,17 +2326,48 @@ bool PumpEvents() {
+@@ -2303,17 +2304,49 @@ bool PumpEvents() {
      }
      return AntiAfk(static_cast<uint64_t>(seconds) * 1000000000ULL);
    }();
@@ -23,6 +23,7 @@ index 03d6974..76a6edb 100644
 +    return nudge_file != nullptr && stat(nudge_file, &st) == 0 ? st.st_mtim
 +                                                                : timespec{};
 +  }();
++  const uint64_t now_ns = SDL_GetTicksNS();
 +  bool nudge_asked = false;
 +  if (nudge_file != nullptr && now_ns - nudge_checked_ns >= 1000000000ULL) {
 +    nudge_checked_ns = now_ns;
@@ -39,7 +40,7 @@ index 03d6974..76a6edb 100644
    if (g_state.sdl_window != nullptr &&
 -      anti_afk.Due(SDL_GetTicksNS(), g_text_input_owner != nullptr &&
 -                                         g_text_input_owner->active())) {
-+      (anti_afk.Due(SDL_GetTicksNS(), typing) || (nudge_asked && !typing))) {
++      (anti_afk.Due(now_ns, typing) || (nudge_asked && !typing))) {
 +    // One pixel and back from where the pointer is: Roblox moves its cursor (or, in shift
 +    // lock, the camera) by a pixel and straight back, which nobody sees. which = 0 marks it as
 +    // not the player's input.

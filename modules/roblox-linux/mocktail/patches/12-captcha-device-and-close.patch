@@ -1,0 +1,146 @@
+diff --git a/src/webview/mocktail_webview_helper.cc b/src/webview/mocktail_webview_helper.cc
+index 597ffe8..aca1bbd 100644
+--- a/src/webview/mocktail_webview_helper.cc
++++ b/src/webview/mocktail_webview_helper.cc
+@@ -20,6 +20,7 @@
+ #include <deque>
+ #include <fstream>
+ #include <iostream>
++#include <iterator>
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -42,6 +43,7 @@ using mocktail::webview::BuildRobloxAndroidUserAgent;
+ using mocktail::webview::CaptchaEvent;
+ using mocktail::webview::CaptchaEventName;
+ using mocktail::webview::CaptchaEventType;
++using mocktail::webview::DeviceTrackerFromCookieFile;
+ using mocktail::webview::EvaluateNavigationUri;
+ using mocktail::webview::ExtractExecuteRobloxCommand;
+ using mocktail::webview::ExtractRobloxWkHybridCommand;
+@@ -526,6 +528,24 @@ void ApplyPendingRobloxCookie(AppState* state) {
+   soup_cookie_set_same_site_policy(cookie, SOUP_SAME_SITE_POLICY_LAX);
+   WebKitCookieManager* manager =
+       webkit_network_session_get_cookie_manager(state->network_session);
++  // Alyae: the game's device identity (RBXEventTrackerV2 in MOCKTAIL_COOKIE_FILE) goes in too, so a
++  // challenge the game was given is answered from the same device; without it Roblox refused
++  // /challenge/v1/continue (403) and asked again and again
++  if (const char* file = std::getenv("MOCKTAIL_COOKIE_FILE"); file != nullptr && *file != '\0') {
++    std::ifstream in(file);
++    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
++    const std::string value = DeviceTrackerFromCookieFile(text);
++    SoupCookie* tracker =
++        value.empty() ? nullptr
++                      : soup_cookie_new("RBXEventTrackerV2", value.c_str(), ".roblox.com", "/", -1);
++    if (tracker != nullptr) {
++      soup_cookie_set_secure(tracker, TRUE);
++      soup_cookie_set_same_site_policy(tracker, SOUP_SAME_SITE_POLICY_LAX);
++      webkit_cookie_manager_add_cookie(manager, tracker, nullptr, nullptr, nullptr);
++      soup_cookie_free(tracker);
++      std::cerr << "[webview] device tracker installed\n";
++    }
++  }
+   state->cookie_install_in_flight = true;
+   auto* context = new CookieInstallContext{state, state->cookie_generation};
+   webkit_cookie_manager_add_cookie(manager, cookie, nullptr,
+@@ -559,6 +579,20 @@ gboolean OnTerminationSignal(gpointer user_data) {
+   return G_SOURCE_REMOVE;
+ }
+ 
++gboolean CloseWindowLater(gpointer data) {
++  auto* window = static_cast<GObject*>(g_weak_ref_get(static_cast<GWeakRef*>(data)));
++  if (window != nullptr) {
++    gtk_window_close(GTK_WINDOW(window));
++    g_object_unref(window);
++  }
++  return G_SOURCE_REMOVE;
++}
++
++void FreeWeakRef(gpointer data) {
++  g_weak_ref_clear(static_cast<GWeakRef*>(data));
++  g_free(data);
++}
++
+ void FinishCallbackConfirmation(GObject* source_object, GAsyncResult* result,
+                                 gpointer user_data) {
+   auto* confirmation = static_cast<CallbackConfirmation*>(user_data);
+@@ -587,7 +621,13 @@ void FinishCallbackConfirmation(GObject* source_object, GAsyncResult* result,
+       static_cast<GObject*>(g_weak_ref_get(&confirmation->window));
+   if (confirmed && confirmation->type == CaptchaEventType::kSuccess &&
+       window_object != nullptr) {
+-    gtk_window_close(GTK_WINDOW(window_object));
++    // Alyae: close a moment later, not now. The success command was only queued for Roblox;
++    // closing at once ended the helper before Roblox read it (a closed helper's events are
++    // dropped), so the join was never retried. Roblox usually closes the window itself first.
++    std::cerr << "[webview] success: closing in 2 s unless Roblox closes it first\n";
++    auto* ref = g_new0(GWeakRef, 1);
++    g_weak_ref_init(ref, window_object);
++    g_timeout_add_seconds_full(G_PRIORITY_DEFAULT, 2, CloseWindowLater, ref, FreeWeakRef);
+   }
+   if (window_object != nullptr) {
+     g_object_unref(window_object);
+diff --git a/src/webview/webview_helper_policy.cc b/src/webview/webview_helper_policy.cc
+index 1507a87..63a996d 100644
+--- a/src/webview/webview_helper_policy.cc
++++ b/src/webview/webview_helper_policy.cc
+@@ -325,5 +325,19 @@ std::string BuildCallbackScript(std::string_view callback_id) {
+          ", true, {}); return true; } } catch (_) {} return false; })();";
+ }
+ 
++std::string DeviceTrackerFromCookieFile(std::string_view text) {
++  constexpr std::string_view kName = "RBXEventTrackerV2=";
++  while (!text.empty()) {
++    const std::size_t end = text.find('\n');
++    std::string_view line = text.substr(0, end);
++    text = end == std::string_view::npos ? std::string_view() : text.substr(end + 1);
++    if (line.substr(0, kName.size()) != kName) continue;
++    line.remove_prefix(kName.size());
++    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.remove_suffix(1);
++    return line.size() > 512 ? std::string() : std::string(line);
++  }
++  return {};
++}
++
+ }  // namespace webview
+ }  // namespace mocktail
+diff --git a/src/webview/webview_helper_policy.h b/src/webview/webview_helper_policy.h
+index 4e3e783..b4c582c 100644
+--- a/src/webview/webview_helper_policy.h
++++ b/src/webview/webview_helper_policy.h
+@@ -49,6 +49,10 @@ bool ExtractExecuteRobloxCommand(JSCValue* value, std::string* command);
+ bool ExtractRobloxWkHybridCommand(JSCValue* value, std::string* command);
+ bool ParseCaptchaEvent(std::string_view command, CaptchaEvent* event);
+ std::string BuildCallbackScript(std::string_view callback_id);
++// Alyae: the RBXEventTrackerV2 value (the game's device identity) from the text of
++// MOCKTAIL_COOKIE_FILE, one "name=value" per line; empty when there is none or it is
++// longer than 512 bytes.
++std::string DeviceTrackerFromCookieFile(std::string_view text);
+ 
+ }  // namespace webview
+ }  // namespace mocktail
+diff --git a/tests/webview_helper_policy_test.cc b/tests/webview_helper_policy_test.cc
+index 3eb6285..f27c4e0 100644
+--- a/tests/webview_helper_policy_test.cc
++++ b/tests/webview_helper_policy_test.cc
+@@ -208,6 +208,21 @@ TEST(WebViewHelperPolicyTest, ParsesOnlyTypedCaptchaNavigationEvents) {
+   }
+ }
+ 
++// Alyae: the device identity line Alyae writes after .ROBLOSECURITY in MOCKTAIL_COOKIE_FILE.
++TEST(WebViewHelperPolicyTest, ReadsDeviceTrackerFromCookieFile) {
++  EXPECT_EQ(DeviceTrackerFromCookieFile(
++                ".ROBLOSECURITY=_|WARNING:secret\nRBXEventTrackerV2=CreateDate=1&rbxid=&browserid=42\n"),
++            "CreateDate=1&rbxid=&browserid=42");
++  EXPECT_EQ(DeviceTrackerFromCookieFile("RBXEventTrackerV2=browserid=7 \r\n"), "browserid=7");
++  EXPECT_EQ(DeviceTrackerFromCookieFile("RBXEventTrackerV2=browserid=7"), "browserid=7");
++  EXPECT_EQ(DeviceTrackerFromCookieFile(".ROBLOSECURITY=_|WARNING:secret\n"), "");
++  EXPECT_EQ(DeviceTrackerFromCookieFile("x RBXEventTrackerV2=browserid=7\n"), "");
++  EXPECT_EQ(DeviceTrackerFromCookieFile("RBXEventTrackerV2=\n"), "");
++  EXPECT_EQ(DeviceTrackerFromCookieFile("RBXEventTrackerV2=" + std::string(513, 'a')), "");
++  EXPECT_EQ(DeviceTrackerFromCookieFile("RBXEventTrackerV2=" + std::string(512, 'a')),
++            std::string(512, 'a'));
++}
++
+ TEST(WebViewHelperPolicyTest, AcceptsBothSoberHybridMessageShapes) {
+   JavaScriptContext context;
+   JSCValue* execute_roblox = Evaluate(context.get(), R"JS(({

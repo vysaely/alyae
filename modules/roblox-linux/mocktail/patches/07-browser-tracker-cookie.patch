@@ -104,7 +104,7 @@ index eee4d33..520a495 100644
    }
    if (std::strcmp(name, "nativeGetCookiesInNetscapeFormat") == 0) {
 diff --git a/src/legacy/legacy_runtime.cc b/src/legacy/legacy_runtime.cc
-index 0eed8ef..e62a17e 100644
+index a46308f..3c116f5 100644
 --- a/src/legacy/legacy_runtime.cc
 +++ b/src/legacy/legacy_runtime.cc
 @@ -9,6 +9,7 @@
@@ -115,7 +115,7 @@ index 0eed8ef..e62a17e 100644
  #include <link.h>
  #include <iomanip>
  #include <iostream>
-@@ -2332,6 +2333,47 @@ std::string MocktailCookiePath() {
+@@ -2331,6 +2332,47 @@ std::string MocktailCookiePath() {
    return MocktailConfigRoot() + "/cookie";
  }
  
@@ -163,7 +163,7 @@ index 0eed8ef..e62a17e 100644
  bool CookieHasAttribute(const std::string& cookie, const char* attribute) {
    std::string lower_cookie = cookie;
    std::string lower_attribute = attribute ? attribute : "";
-@@ -3216,8 +3258,15 @@ void ConfigureNativeSettings(JNIEnv* env, jclass settings_class,
+@@ -3215,8 +3257,15 @@ void ConfigureNativeSettings(JNIEnv* env, jclass settings_class,
    jstring http_proxy_host_string = env->NewStringUTF(http_proxy_host.c_str());
    jstring cookie_base_url_string = env->NewStringUTF(cookie_base_url.c_str());
    jstring cookie_domain_string = env->NewStringUTF(cookie_domain.c_str());

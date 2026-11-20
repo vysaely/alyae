@@ -1,8 +1,8 @@
 diff --git a/src/runtime/roblox_input_router.cc b/src/runtime/roblox_input_router.cc
-index 1b0eb8f..d8f80f0 100644
+index 5140697..16b2d08 100644
 --- a/src/runtime/roblox_input_router.cc
 +++ b/src/runtime/roblox_input_router.cc
-@@ -490,6 +490,15 @@ RobloxInputDispatchResult RobloxInputRouter::HandleEvent(
+@@ -491,6 +491,15 @@ RobloxInputDispatchResult RobloxInputRouter::HandleEvent(
        if (text_result.dispatched) {
          ++snapshot_.text_events;
        }
@@ -19,7 +19,7 @@ index 1b0eb8f..d8f80f0 100644
                          ? RobloxInputDispatchState::kDispatched
                          : RobloxInputDispatchState::kStateUpdated,
 diff --git a/tests/roblox_input_native_adapter_test.cc b/tests/roblox_input_native_adapter_test.cc
-index d9846c3..4a99478 100644
+index d9846c3..2c387e7 100644
 --- a/tests/roblox_input_native_adapter_test.cc
 +++ b/tests/roblox_input_native_adapter_test.cc
 @@ -396,7 +396,8 @@ TEST_F(RobloxInputNativeAdapterTest, RoutesUnicodeTextAndEnterInApkOrder) {
@@ -41,10 +41,10 @@ index d9846c3..4a99478 100644
  
  TEST_F(RobloxInputNativeAdapterTest,
 diff --git a/tests/roblox_input_router_test.cc b/tests/roblox_input_router_test.cc
-index 8e33684..c736080 100644
+index cc501a7..09bc357 100644
 --- a/tests/roblox_input_router_test.cc
 +++ b/tests/roblox_input_router_test.cc
-@@ -546,6 +546,28 @@ TEST_F(RobloxInputRouterTest, ReportsHostTextFocusCompletion) {
+@@ -620,6 +620,28 @@ TEST_F(RobloxInputRouterTest, ReportsHostTextFocusCompletion) {
    EXPECT_EQ(router_.Snapshot().text_focus_generation, 4U);
  }
  

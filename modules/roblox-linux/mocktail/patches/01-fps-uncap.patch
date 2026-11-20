@@ -1,5 +1,5 @@
 diff --git a/src/legacy/legacy_runtime.cc b/src/legacy/legacy_runtime.cc
-index e57e4de..04509af 100644
+index 93f9500..c12b04d 100644
 --- a/src/legacy/legacy_runtime.cc
 +++ b/src/legacy/legacy_runtime.cc
 @@ -1858,6 +1858,207 @@ extern "C" void MocktailConstructorWrapper() {
@@ -210,7 +210,7 @@ index e57e4de..04509af 100644
  extern "C" void mocktail_before_soinfo_constructors(const char* realpath,
                                                      uintptr_t base) {
    if (realpath == nullptr || std::strstr(realpath, "libroblox.so") == nullptr ||
-@@ -5734,6 +5935,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
+@@ -5726,6 +5927,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
      return EXIT_FAILURE;
    }
  

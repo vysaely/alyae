@@ -5,16 +5,21 @@
 #
 # The patches:
 #   01 fps-uncap               Roblox's Android build caps at 240 FPS; raise it to the FPS setting
-#   02 input-polling           read input every 1 ms instead of 4 ms when frames are unthrottled
-#   03 cpu-and-texture-loading less CPU between engine polls; faster texture conversion
+#   03 cpu-and-texture-loading texture writes on up to 8 threads; challengeCompleted closes the
+#                              challenge page; the login window gets 5 s to start, not 3
 #   04 shiftlock-icon          MOCKTAIL_SHIFTLOCK_CURSOR: a PNG in place of Roblox's shift-lock icon
 #   05 chat-enter              the Enter that sends a chat message also reaches the game
 #   06 shiftlock-zoom          the scroll wheel zooms in shift lock
 #   07 browser-tracker-cookie  the account's device ID reaches Roblox with its sign-in
 #   08 anti-afk                MOCKTAIL_ANTI_AFK_SECONDS: a 1 px nudge after that long without input
 #   09 pointer-release         the right-button camera drag ends where it started, not at the window edge
-#   10 low-memory-profile      MOCKTAIL_LOW_MEMORY_PROFILE=0: no phone-sized memory caps (Alyae's mains)
+#   10 low-memory-profile      MOCKTAIL_LOW_MEMORY_PROFILE=0 (Alyae's mains): no phone settings (memory
+#                              caps, mip bias, Luau GC caps, mesh compression); Roblox's defaults
 #   11 nudge-now               MOCKTAIL_NUDGE_FILE: writing that file asks for one nudge now (Anti-AFK)
+#   12 captcha-device-and-close the challenge window sends the game's device ID and closes 2 s
+#                              after success, so Roblox reads the result and retries the join
+#   13 fps-file                MOCKTAIL_FPS_FILE: a number written there (1-1000, 0 = 1000) becomes
+#                              the running game's frame-rate limit, read once a second
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

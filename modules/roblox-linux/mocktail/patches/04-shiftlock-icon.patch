@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 55b9497..6d27655 100644
+index b968742..c2504f5 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -573,6 +573,7 @@ target_link_libraries(mocktail_bionic_abi_exports PRIVATE
+@@ -578,6 +578,7 @@ target_link_libraries(mocktail_bionic_abi_exports PRIVATE
  
  add_library(mocktail_legacy_runtime STATIC
    src/legacy/legacy_runtime.cc
@@ -10,7 +10,7 @@ index 55b9497..6d27655 100644
    src/runtime/roblox_text_input_jni_bridge.cc
  )
  target_include_directories(mocktail_legacy_runtime PRIVATE include src)
-@@ -584,6 +585,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+@@ -589,6 +590,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
    )
  endif()
  target_link_libraries(mocktail_legacy_runtime PRIVATE
@@ -20,7 +20,7 @@ index 55b9497..6d27655 100644
    mocktail_runtime
 diff --git a/src/legacy/alyae_texture_swap.cc b/src/legacy/alyae_texture_swap.cc
 new file mode 100644
-index 0000000..b7b34e8
+index 0000000..630659e
 --- /dev/null
 +++ b/src/legacy/alyae_texture_swap.cc
 @@ -0,0 +1,203 @@
@@ -229,7 +229,7 @@ index 0000000..b7b34e8
 +}  // namespace alyae_texture_swap
 diff --git a/src/legacy/alyae_texture_swap.h b/src/legacy/alyae_texture_swap.h
 new file mode 100644
-index 0000000..4510359
+index 0000000..2a6fa9f
 --- /dev/null
 +++ b/src/legacy/alyae_texture_swap.h
 @@ -0,0 +1,11 @@
@@ -245,7 +245,7 @@ index 0000000..4510359
 +
 +}  // namespace alyae_texture_swap
 diff --git a/src/legacy/legacy_runtime.cc b/src/legacy/legacy_runtime.cc
-index 710275d..0eed8ef 100644
+index c12b04d..a46308f 100644
 --- a/src/legacy/legacy_runtime.cc
 +++ b/src/legacy/legacy_runtime.cc
 @@ -45,6 +45,7 @@
@@ -256,7 +256,7 @@ index 710275d..0eed8ef 100644
  #include "compat/bionic_prctl_runtime.h"
  #include "compat/bionic_pthread_create_runtime.h"
  #include "compat/bionic_socket_runtime.h"
-@@ -5679,6 +5680,19 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
+@@ -5670,6 +5671,19 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
        ++registered;
      }
    }
@@ -277,10 +277,10 @@ index 710275d..0eed8ef 100644
      static constexpr const char* kVulkanAdapterExports[] = {
          "vkCreateAndroidSurfaceKHR",
 diff --git a/stubs/libandroid_stub.cc b/stubs/libandroid_stub.cc
-index d5f41d3..82104f8 100644
+index e28bdf6..505ab36 100644
 --- a/stubs/libandroid_stub.cc
 +++ b/stubs/libandroid_stub.cc
-@@ -310,6 +310,29 @@ int MocktailWindowHeight() {
+@@ -311,6 +311,30 @@ int MocktailWindowHeight() {
    return fn != nullptr ? fn() : 720;
  }
  
@@ -303,6 +303,7 @@ index d5f41d3..82104f8 100644
 +    return false;
 +  }
 +  asset->path = override_path;
++  asset->loaded = true;
 +  std::fprintf(stderr, "  [asset] shift-lock cursor: %s\n", override_path);
 +  return true;
 +}
@@ -310,7 +311,7 @@ index d5f41d3..82104f8 100644
  bool MocktailUsesDirectVulkan() {
    using Fn = bool (*)();
    static Fn cached_fn = nullptr;
-@@ -330,6 +353,14 @@ AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename,
+@@ -347,6 +371,14 @@ AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename,
    if (mgr == nullptr) {
      return nullptr;
    }

@@ -1,8 +1,8 @@
 diff --git a/src/runtime/roblox_input_router.cc b/src/runtime/roblox_input_router.cc
-index d8f80f0..9e37040 100644
+index 16b2d08..085b2b9 100644
 --- a/src/runtime/roblox_input_router.cc
 +++ b/src/runtime/roblox_input_router.cc
-@@ -624,13 +624,24 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseWheelLocked(
+@@ -625,13 +625,24 @@ RobloxInputDispatchResult RobloxInputRouter::HandleMouseWheelLocked(
    }
    const platform::SurfaceCoordinateTransform transform =
        CoordinateTransform(snapshot_.viewport);
@@ -31,7 +31,7 @@ index d8f80f0..9e37040 100644
  }
  
 diff --git a/tests/roblox_input_router_test.cc b/tests/roblox_input_router_test.cc
-index c736080..f4543a6 100644
+index 09bc357..de96b24 100644
 --- a/tests/roblox_input_router_test.cc
 +++ b/tests/roblox_input_router_test.cc
 @@ -313,10 +313,12 @@ TEST_F(RobloxInputRouterTest, CapturedButtonsAndWheelPreserveVirtualPosition) {

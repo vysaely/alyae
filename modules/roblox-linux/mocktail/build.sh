@@ -5,8 +5,8 @@
 #
 # The patches:
 #   01 fps-uncap               Roblox's Android build caps at 240 FPS; raise it to the FPS setting
-#   02 input-polling           read input every 1 ms instead of 4 ms when frames are unthrottled
-#   03 cpu-and-texture-loading less CPU between engine polls; faster texture conversion
+#   03 cpu-and-texture-loading texture writes on up to 8 threads; challengeCompleted closes the
+#                              challenge page; the login window gets 5 s to start, not 3
 #   04 shiftlock-icon          MOCKTAIL_SHIFTLOCK_CURSOR: a PNG in place of Roblox's shift-lock icon
 #   05 chat-enter              the Enter that sends a chat message also reaches the game
 #   06 shiftlock-zoom          the scroll wheel zooms in shift lock

@@ -559,6 +559,12 @@ impl App {
                         .queue_current
                         .as_ref()
                         .is_some_and(|(a, ..)| *a == account);
+                    // a game's join or follow refused for a minute is not a throttled sign-in:
+                    // the queue goes on at its usual gap
+                    let signs_in = self
+                        .queue_current
+                        .as_ref()
+                        .is_some_and(|(a, _, _, runs)| *a == account && !runs);
                     // the computer has no room for more: the accounts after would only wait in
                     // vain too, so the queue stops (the running ones keep running)
                     if current && is_out_of_memory(&text) && !self.queue.is_empty() {
@@ -575,7 +581,7 @@ impl App {
                         self.status.insert(account, (text, true));
                         continue;
                     }
-                    if is_rate_limit(&text) && current {
+                    if is_rate_limit(&text) && signs_in {
                         self.queue_backoff = (self.queue_backoff * 2)
                             .clamp(Duration::from_secs(120), Duration::from_secs(600));
                         if !self.queue.is_empty() {
@@ -1171,7 +1177,8 @@ impl App {
         ui.spacing_mut().interact_size.y = look::SMALL;
         ui.spacing_mut().button_padding.x = 8.0;
         ui.horizontal_centered(|ui| {
-            self.message_line(ui);
+            // the buttons on the right first; the message takes the room left of them and is
+            // cut short there (drawn first, it took the whole bar and the buttons covered it)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Open log")
@@ -1259,6 +1266,9 @@ impl App {
                     look::colors().muted
                 };
                 ui.label(RichText::new(text).color(color));
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    self.message_line(ui);
+                });
             });
         });
     }
@@ -2007,7 +2017,9 @@ impl App {
                                 look::colors().accent
                             };
                             dot(ui, c);
-                            ui.label(RichText::new(s).color(c));
+                            // one line, cut at the column's edge; the whole text on hover
+                            ui.add(egui::Label::new(RichText::new(s).color(c)).truncate())
+                                .on_hover_text(s);
                         }
                         None => {
                             ui.label(notes);
@@ -4720,6 +4732,35 @@ esac
         h.state_mut().advance_queue();
         let wait = h.state().queue_next.unwrap() - std::time::Instant::now();
         assert!(wait > Duration::from_secs(14), "waited {wait:?}, not Log in's 15 s");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Filling a server: a join or follow refused for a minute does not hold the queue for
+    /// minutes like a throttled sign-in; the next account starts at the usual gap.
+    #[test]
+    fn refused_join_does_not_pause_the_queue() {
+        let (mut h, dir) = window("roblox");
+        let m = h.state().module("roblox").cloned().unwrap();
+        let (a, waiting) = (
+            h.state_mut().new_account(&m).unwrap(),
+            h.state_mut().new_account(&m).unwrap(),
+        );
+        assert!(h.state_mut().save(&a) && h.state_mut().save(&waiting));
+        h.state_mut().queue_current = Some((a.id.clone(), "roblox".into(), "follow".into(), true));
+        h.state_mut().queue.push_back(Job {
+            game: "roblox".into(),
+            action: "follow".into(),
+            account: waiting.id,
+            inputs: Values::default(),
+        });
+        let tx = h.state().tx.clone();
+        tx.send(Event::Error {
+            account: a.id.clone(),
+            text: "Follow: Roblox is rate limiting: try again in a minute".into(),
+        })
+        .unwrap();
+        h.state_mut().poll();
+        assert_eq!(h.state().queue_backoff, Duration::ZERO);
         let _ = std::fs::remove_dir_all(dir);
     }
 

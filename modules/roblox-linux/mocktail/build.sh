@@ -24,6 +24,8 @@
 #                              after success, so Roblox reads the result and retries the join
 #   13 fps-file                MOCKTAIL_FPS_FILE: a number written there (1-1000, 0 = 1000) becomes
 #                              the running game's frame-rate limit, read once a second
+#   14 challenge-frames        the challenge window lets a check build its inner frames from
+#                              about:srcdoc (the press-and-hold check); nothing loads from the network
 set -euo pipefail
 
 MODE="${1:-all}"

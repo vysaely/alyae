@@ -220,12 +220,15 @@ pub fn join_from(req: &Request) -> Join {
     }
     let follow = req.input("follow");
     if !follow.is_empty() {
+        let cache = FollowCache::at(&req.data_dir);
         let user = match follow.parse() {
             Ok(n) => n,
-            Err(_) => api::user_id_of(follow).unwrap_or_else(|e| fail(&format!("Follow: {e}"))),
+            Err(_) => cache.user_id(follow).unwrap_or_else(|e| fail(&format!("Follow: {e}"))),
         };
         let plan = follow_plan(follow, !cfg!(windows), j.place, || {
-            api::whereabouts(user, &req.cookie()).map_err(|e| format!("Follow: {e}"))
+            cache
+                .whereabouts(user, || api::whereabouts(user, &req.cookie()))
+                .map_err(|e| format!("Follow: {e}"))
         });
         if let Some((place, said)) = plan.unwrap_or_else(|e| fail(&e)) {
             status(&said);
@@ -235,6 +238,97 @@ pub fn join_from(req: &Request) -> Join {
     }
     j
 }
+
+/// What Follow looked up, shared by the accounts of one queue (a file in the data folder): a
+/// username's user ID for good, and where that user plays for [`FOLLOW_FRESH`]. Filling a server
+/// starts many accounts a few seconds apart; asking Roblox again for each one gets the lookups
+/// refused for a minute (429). Refused anyway: the last place seen, else none (Follow then joins
+/// through Place ID).
+struct FollowCache {
+    file: PathBuf,
+}
+
+/// How long a looked-up place counts as current for the next account in the queue.
+const FOLLOW_FRESH: u64 = 120;
+/// How old a place may be to stand in when Roblox refuses the lookup.
+const FOLLOW_STALE: u64 = 1800;
+
+impl FollowCache {
+    fn at(data_dir: &Path) -> Self {
+        Self {
+            file: data_dir.join("follow-cache.json"),
+        }
+    }
+
+    fn load(&self) -> Map<String, Value> {
+        std::fs::read_to_string(&self.file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn store(&self, v: &Map<String, Value>) {
+        let tmp = self.file.with_extension("json.tmp");
+        if std::fs::write(&tmp, Value::Object(v.clone()).to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.file);
+        }
+    }
+
+    fn user_id(&self, name: &str) -> Result<u64, String> {
+        let key = format!("name:{}", name.to_lowercase());
+        let mut v = self.load();
+        if let Some(id) = v.get(&key).and_then(Value::as_u64) {
+            return Ok(id);
+        }
+        let id = api::user_id_of(name)?;
+        v.insert(key, json!(id));
+        self.store(&v);
+        Ok(id)
+    }
+
+    fn whereabouts(
+        &self,
+        user: u64,
+        look: impl FnOnce() -> Result<api::Whereabouts, String>,
+    ) -> Result<api::Whereabouts, String> {
+        self.whereabouts_at(user, unix_secs(), look)
+    }
+
+    fn whereabouts_at(
+        &self,
+        user: u64,
+        now: u64,
+        look: impl FnOnce() -> Result<api::Whereabouts, String>,
+    ) -> Result<api::Whereabouts, String> {
+        let key = format!("seen:{user}");
+        let mut v = self.load();
+        let saved = v.get(&key).cloned();
+        let age = saved
+            .as_ref()
+            .and_then(|s| s["at"].as_u64())
+            .map(|at| now.saturating_sub(at));
+        let from = |s: &Value| api::Whereabouts {
+            place: s["place"].as_u64(),
+            root: s["root"].as_u64(),
+        };
+        if let Some(s) = saved.as_ref().filter(|_| age.is_some_and(|a| a < FOLLOW_FRESH)) {
+            return Ok(from(s));
+        }
+        match look() {
+            Ok(w) => {
+                v.insert(key, json!({ "place": w.place, "root": w.root, "at": now }));
+                self.store(&v);
+                Ok(w)
+            }
+            Err(e) if e.contains("rate limiting") => Ok(match (&saved, age) {
+                (Some(s), Some(a)) if a < FOLLOW_STALE => from(s),
+                _ => api::Whereabouts::default(),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 
 /// Follow's place, with the status line that says where it came from. Windows's
 /// RequestFollowUser joins by the user alone, as a profile's Join button does, so there presence
@@ -408,8 +502,12 @@ fn presence(v: &Value) {
     let public = if ids.is_empty() {
         Vec::new()
     } else {
+        // Roblox may refuse anonymous lookups (403): then every account is asked as itself only,
+        // in its turn, as for hidden ones
         api::presence(&ids, "").unwrap_or_else(|e| {
-            errors.push(e);
+            if !e.ends_with("Roblox answered 403") {
+                errors.push(e);
+            }
             Vec::new()
         })
     };
@@ -698,6 +796,48 @@ mod tests {
         let plan = follow_plan("Bob", false, Some(5), || panic!("presence asked"));
         assert_eq!(plan, Ok(None));
     }
+
+    /// Filling a server: the first account looks up where the user plays, the next ones within
+    /// two minutes reuse it without asking Roblox; refused (429), an older place still stands
+    /// in, and without one Follow goes on with no place (Place ID) instead of failing.
+    #[test]
+    fn follow_cache_asks_once_and_survives_rate_limits() {
+        let dir = std::env::temp_dir().join(format!("alyae-follow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = FollowCache::at(&dir);
+        let seen = api::Whereabouts {
+            place: Some(5208655184),
+            root: Some(3016661674),
+        };
+        let refused = || {
+            Err::<api::Whereabouts, _>("Roblox is rate limiting: try again in a minute".to_string())
+        };
+        assert_eq!(c.whereabouts_at(7, 1000, || Ok(seen)), Ok(seen));
+        // within FOLLOW_FRESH: no lookup at all
+        assert_eq!(
+            c.whereabouts_at(7, 1100, || panic!("asked Roblox again")),
+            Ok(seen)
+        );
+        // stale but refused: the last place stands in
+        assert_eq!(c.whereabouts_at(7, 1500, refused), Ok(seen));
+        // too old and refused: no place, Follow uses Place ID
+        assert_eq!(
+            c.whereabouts_at(7, 9000, refused),
+            Ok(api::Whereabouts::default())
+        );
+        // another user never seen, refused: no place either
+        assert_eq!(
+            c.whereabouts_at(8, 1000, refused),
+            Ok(api::Whereabouts::default())
+        );
+        // other errors still fail
+        assert!(
+            c.whereabouts_at(8, 1000, || Err("cannot reach Roblox".into()))
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
 
     #[test]
     fn follow_place_order() {

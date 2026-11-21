@@ -470,6 +470,11 @@ impl App {
     // --- events from running actions -------------------------------------------------------
 
     fn poll(&mut self) {
+        self.drain_events();
+        self.reap_exited();
+    }
+
+    fn drain_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Event::Set { account, values } => {
@@ -661,65 +666,134 @@ impl App {
                     action,
                     ok,
                 } => {
+                    let mut found = self.take_running(&account, &action, false);
+                    let exit = found.as_mut().map(|r| r.child.wait());
+                    if ok && let Some(ended) = exit {
+                        match ended {
+                            Ok(status) if !status.success() => {
+                                self.finish_without_word(&account, &action, status);
+                                continue;
+                            }
+                            Err(e) => {
+                                crate::log::line(
+                                    &self.name_of(&account),
+                                    &format!("{action} wait failed: {e}"),
+                                );
+                            }
+                            Ok(_) => {}
+                        }
+                    }
                     // a resume that found no game ends quietly
                     let quiet = ok && self.is_resume(&account, &action);
-                    if self
-                        .resuming
-                        .get(&account)
-                        .is_some_and(|r| r.action == action)
-                        && let Some(mut r) = self.resuming.remove(&account)
-                    {
-                        let _ = r.child.wait();
-                    }
                     if !quiet {
                         crate::log::line(
                             &self.name_of(&account),
                             &format!("{action} ended{}", if ok { "" } else { " with an error" }),
                         );
                     }
-                    if self
-                        .running
-                        .get(&account)
-                        .is_some_and(|r| r.action == action)
-                    {
-                        if let Some(mut r) = self.running.remove(&account) {
-                            let _ = r.child.wait();
-                        }
-                    } else if let Some(i) = self
-                        .tasks
-                        .iter()
-                        .position(|(a, r)| *a == account && r.action == action)
-                    {
-                        let _ = self.tasks.swap_remove(i).1.child.wait();
-                    }
                     if ok && self.status.get(&account).is_some_and(|(_, bad)| !bad) {
                         self.status.remove(&account);
                     }
-                    if self
-                        .queue_current
-                        .as_ref()
-                        .is_some_and(|(a, _, act, _)| *a == account && *act == action)
-                    {
-                        self.queue_ended = true;
-                        if ok {
-                            self.queue_backoff = Duration::ZERO;
-                        }
-                    }
-                    if self.adding.remove(&account) {
-                        self.finish_add(&account, ok);
-                    }
+                    self.finish_account_action(&account, &action, ok);
                 }
             }
         }
+    }
+
+    fn take_running(&mut self, id: &str, action: &str, silenced_only: bool) -> Option<Running> {
+        let matches = |r: &Running| r.action == action && (!silenced_only || r.is_silenced());
+        if self.resuming.get(id).is_some_and(matches) {
+            self.resuming.remove(id)
+        } else if self.running.get(id).is_some_and(matches) {
+            self.running.remove(id)
+        } else if let Some(i) = self.tasks.iter().position(|(a, r)| a == id && matches(r)) {
+            Some(self.tasks.swap_remove(i).1)
+        } else {
+            None
+        }
+    }
+
+    fn finish_account_action(&mut self, account: &str, action: &str, ok: bool) {
+        if self
+            .queue_current
+            .as_ref()
+            .is_some_and(|(a, _, act, _)| *a == account && *act == action)
+        {
+            self.queue_ended = true;
+            if ok {
+                self.queue_backoff = Duration::ZERO;
+            }
+        }
+        if self.adding.remove(account) {
+            self.finish_add(account, ok);
+        }
+    }
+
+    fn finish_without_word(
+        &mut self,
+        account: &str,
+        action: &str,
+        status: std::process::ExitStatus,
+    ) {
+        crate::log::line(
+            &self.name_of(account),
+            &format!("{action} ended without a word ({status})"),
+        );
+        let has_error = self.status.get(account).is_some_and(|(_, bad)| *bad);
+        if self
+            .status
+            .get(account)
+            .is_some_and(|(s, bad)| !bad && s == "stopping")
+        {
+            self.status.remove(account);
+        } else if !has_error {
+            self.status
+                .insert(account.to_string(), ("ended without a word".into(), true));
+        }
+        self.finish_account_action(account, action, false);
+    }
+
+    fn reap_exited(&mut self) {
         // a plain command has no output to end on: look at the process itself
-        let ended: Vec<String> = self
+        let cmds: Vec<String> = self
             .running
             .iter_mut()
             .filter(|(_, r)| r.is_command())
             .filter_map(|(id, r)| matches!(r.child.try_wait(), Ok(Some(_))).then(|| id.clone()))
             .collect();
-        for id in ended {
+        for id in cmds {
             self.running.remove(&id);
+            if self
+                .status
+                .get(&id)
+                .is_some_and(|(s, bad)| !bad && s == "stopping")
+            {
+                self.status.remove(&id);
+            }
+        }
+        loop {
+            let exited = self
+                .running
+                .iter_mut()
+                .map(|(id, r)| (id.as_str(), r))
+                .chain(self.resuming.iter_mut().map(|(id, r)| (id.as_str(), r)))
+                .chain(self.tasks.iter_mut().map(|(id, r)| (id.as_str(), r)))
+                .filter(|(_, r)| !r.is_command())
+                .find_map(|(id, r)| match r.child.try_wait() {
+                    Ok(Some(status)) => {
+                        r.finish_pipe(Duration::from_millis(50));
+                        Some((id.to_string(), r.action.clone(), status))
+                    }
+                    _ => None,
+                });
+            let Some((id, action, status)) = exited else {
+                break;
+            };
+            // buffered pipe lines (and Ended, if the pipe closed) arrive before checking again
+            self.drain_events();
+            if self.take_running(&id, &action, true).is_some() {
+                self.finish_without_word(&id, &action, status);
+            }
         }
     }
 
@@ -996,8 +1070,9 @@ impl eframe::App for App {
             });
             return;
         }
-        // helpers wake the window with their events; a plain command can only be looked at
-        if self.running.values().any(Running::is_command) {
+        // helpers wake the window with their events; plain commands (and dead helpers whose
+        // child kept stdout open) are looked at once a second
+        if !self.running.is_empty() || !self.tasks.is_empty() || !self.resuming.is_empty() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         self.tick_anti_afk(&ctx);

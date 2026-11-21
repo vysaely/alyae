@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Field {
@@ -577,6 +580,8 @@ pub struct Running {
     pub action: String,
     pub child: Child,
     stdin: Option<ChildStdin>,
+    reader: Option<JoinHandle<()>>,
+    silenced: Option<Arc<Mutex<bool>>>,
 }
 
 impl Running {
@@ -595,6 +600,26 @@ impl Running {
                 let _ = self.child.kill();
             }
         }
+    }
+
+    /// Waits briefly for the stdout reader thread to finish draining buffered lines after the
+    /// helper exited, then stops it from sending a stale `Ended` if a child kept stdout open.
+    pub fn finish_pipe(&mut self, wait: Duration) {
+        if let Some(h) = self.reader.as_ref() {
+            let until = Instant::now() + wait;
+            while !h.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if let Some(s) = &self.silenced {
+            *s.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        }
+    }
+
+    pub fn is_silenced(&self) -> bool {
+        self.silenced
+            .as_ref()
+            .is_some_and(|s| *s.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -816,6 +841,8 @@ pub fn build(
         action: b.action.clone(),
         child,
         stdin: Some(stdin),
+        reader: None,
+        silenced: None,
     })
 }
 
@@ -904,6 +931,8 @@ pub fn start(
             action: action.id.clone(),
             child,
             stdin: None,
+            reader: None,
+            silenced: None,
         }));
     }
     let (mut child, dir, helper) = spawn_helper(module, &action.id, &action.label, data_dir)?;
@@ -916,7 +945,9 @@ pub fn start(
     }
     let out = child.stdout.take().expect("piped stdout");
     let act = action.id.clone();
-    std::thread::spawn(move || {
+    let silenced = Arc::new(Mutex::new(false));
+    let silenced_bg = Arc::clone(&silenced);
+    let reader = std::thread::spawn(move || {
         let mut ok = true;
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -950,20 +981,32 @@ pub fn start(
             } else {
                 continue;
             };
+            let guard = silenced_bg.lock().unwrap_or_else(|e| e.into_inner());
+            if *guard {
+                return;
+            }
             let _ = tx.send(ev);
+            drop(guard);
             wake();
+        }
+        let guard = silenced_bg.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard {
+            return;
         }
         let _ = tx.send(Event::Ended {
             account: id,
             action: act,
             ok,
         });
+        drop(guard);
         wake();
     });
     Ok(Some(Running {
         action: action.id.clone(),
         child,
         stdin,
+        reader: Some(reader),
+        silenced: Some(silenced),
     }))
 }
 

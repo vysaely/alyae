@@ -1,0 +1,30 @@
+diff -ru a/src/webview/mocktail_webview_helper.cc b/src/webview/mocktail_webview_helper.cc
+--- a/src/webview/mocktail_webview_helper.cc	2026-11-21 14:07:27.249149107 +0200
++++ b/src/webview/mocktail_webview_helper.cc	2026-11-21 14:07:27.241407359 +0200
+@@ -1003,7 +1003,9 @@
+   const UriPolicyResult policy = EvaluateNavigationUri(uri);
+   if (!policy.allowed) {
+     std::cerr << "[webview] navigation blocked scheme=" << policy.scheme
+-              << " host=" << policy.host << '\n';
++              << " host=" << policy.host;
++    if (policy.scheme == "about") std::cerr << " uri=" << BoundedLogToken(uri, "none");
++    std::cerr << '\n';
+     webkit_policy_decision_ignore(decision);
+     return TRUE;
+   }
+diff -ru a/src/webview/webview_helper_policy.cc b/src/webview/webview_helper_policy.cc
+--- a/src/webview/webview_helper_policy.cc	2026-11-21 14:07:27.249022137 +0200
++++ b/src/webview/webview_helper_policy.cc	2026-11-21 14:07:27.241357354 +0200
+@@ -203,7 +203,11 @@
+   if (uri == nullptr) {
+     return result;
+   }
+-  if (std::string_view(uri) == "about:blank") {
++  // Alyae: a challenge page builds its inner frames from about:srcdoc or about:blank with a
++  // fragment (the press-and-hold check does); these load nothing from the network.
++  const std::string_view about(uri);
++  if (about == "about:blank" || about == "about:srcdoc" ||
++      about.substr(0, 12) == "about:blank#" || about.substr(0, 12) == "about:blank?") {
+     result.allowed = true;
+     result.scheme = "about";
+     result.host = "none";

@@ -472,6 +472,7 @@ impl App {
     fn poll(&mut self) {
         self.drain_events();
         self.reap_exited();
+        self.kill_stuck_stops();
     }
 
     fn drain_events(&mut self) {
@@ -667,11 +668,12 @@ impl App {
                     ok,
                 } => {
                     let mut found = self.take_running(&account, &action, false);
+                    let was_stopping = found.as_ref().is_some_and(|r| r.stopping_since().is_some());
                     let exit = found.as_mut().map(|r| r.child.wait());
                     if ok && let Some(ended) = exit {
                         match ended {
                             Ok(status) if !status.success() => {
-                                self.finish_without_word(&account, &action, status);
+                                self.finish_without_word(&account, &action, status, was_stopping);
                                 continue;
                             }
                             Err(e) => {
@@ -734,17 +736,19 @@ impl App {
         account: &str,
         action: &str,
         status: std::process::ExitStatus,
+        was_stopping: bool,
     ) {
         crate::log::line(
             &self.name_of(account),
             &format!("{action} ended without a word ({status})"),
         );
         let has_error = self.status.get(account).is_some_and(|(_, bad)| *bad);
-        if self
-            .status
-            .get(account)
-            .is_some_and(|(s, bad)| !bad && s == "stopping")
-        {
+        let stopping = was_stopping
+            || self
+                .status
+                .get(account)
+                .is_some_and(|(s, bad)| !bad && s == "stopping");
+        if stopping && !has_error {
             self.status.remove(account);
         } else if !has_error {
             self.status
@@ -791,8 +795,24 @@ impl App {
             };
             // buffered pipe lines (and Ended, if the pipe closed) arrive before checking again
             self.drain_events();
-            if self.take_running(&id, &action, true).is_some() {
-                self.finish_without_word(&id, &action, status);
+            if let Some(r) = self.take_running(&id, &action, true) {
+                self.finish_without_word(&id, &action, status, r.stopping_since().is_some());
+            }
+        }
+    }
+
+    fn kill_stuck_stops(&mut self) {
+        for r in self
+            .running
+            .values_mut()
+            .chain(self.resuming.values_mut())
+            .chain(self.tasks.iter_mut().map(|(_, r)| r))
+        {
+            if !r.is_command()
+                && r.stopping_since()
+                    .is_some_and(|t| t.elapsed() >= STOP_TIMEOUT)
+            {
+                let _ = r.child.kill();
             }
         }
     }
@@ -1070,9 +1090,26 @@ impl eframe::App for App {
             });
             return;
         }
-        // helpers wake the window with their events; plain commands (and dead helpers whose
-        // child kept stdout open) are looked at once a second
-        if !self.running.is_empty() || !self.tasks.is_empty() || !self.resuming.is_empty() {
+        // helpers wake the window with their events; plain commands, dead helpers whose child
+        // kept stdout open, and stuck stops are looked at on a short timer
+        let stop_wait = self
+            .running
+            .values()
+            .chain(self.resuming.values())
+            .chain(self.tasks.iter().map(|(_, r)| r))
+            .filter_map(Running::stopping_since)
+            .map(|t| {
+                let left = STOP_TIMEOUT.saturating_sub(t.elapsed());
+                if left.is_zero() {
+                    Duration::from_millis(20)
+                } else {
+                    left.min(Duration::from_secs(1))
+                }
+            })
+            .min();
+        if let Some(after) = stop_wait {
+            ctx.request_repaint_after(after);
+        } else if !self.running.is_empty() || !self.tasks.is_empty() || !self.resuming.is_empty() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         self.tick_anti_afk(&ctx);
@@ -4021,6 +4058,14 @@ const QUEUE_GAP: Duration = if cfg!(test) {
     Duration::from_millis(30)
 } else {
     Duration::from_secs(5)
+};
+
+/// How long "stopping" may stay before Alyae kills the stuck helper itself (the helper kills
+/// its game after 4 s, so 10 s means the helper is stuck).
+const STOP_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(10)
 };
 
 /// One account's turn in the queue: the action, its inputs, the account.

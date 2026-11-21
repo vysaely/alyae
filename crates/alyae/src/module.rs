@@ -582,6 +582,7 @@ pub struct Running {
     stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
     silenced: Option<Arc<Mutex<bool>>>,
+    stopping_since: Option<Instant>,
 }
 
 impl Running {
@@ -590,10 +591,16 @@ impl Running {
         self.stdin.is_none()
     }
 
+    /// When Stop was first asked of this helper, if it has been asked.
+    pub fn stopping_since(&self) -> Option<Instant> {
+        self.stopping_since
+    }
+
     /// Asks the helper to stop its game; a plain command is killed.
     pub fn stop(&mut self) {
         match self.stdin.as_mut() {
             Some(s) => {
+                self.stopping_since.get_or_insert_with(Instant::now);
                 let _ = s.write_all(b"stop\n").and_then(|_| s.flush());
             }
             None => {
@@ -843,6 +850,7 @@ pub fn build(
         stdin: Some(stdin),
         reader: None,
         silenced: None,
+        stopping_since: None,
     })
 }
 
@@ -933,6 +941,7 @@ pub fn start(
             stdin: None,
             reader: None,
             silenced: None,
+            stopping_since: None,
         }));
     }
     let (mut child, dir, helper) = spawn_helper(module, &action.id, &action.label, data_dir)?;
@@ -1007,6 +1016,7 @@ pub fn start(
         stdin,
         reader: Some(reader),
         silenced: Some(silenced),
+        stopping_since: None,
     }))
 }
 

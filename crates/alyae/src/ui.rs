@@ -4681,6 +4681,383 @@ esac
         let _ = std::fs::remove_dir_all(mods);
     }
 
+    /// Helper process cleanup for unix tests: kills any PIDs recorded in `file` when dropped.
+    #[cfg(unix)]
+    struct KillPids(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for KillPids {
+        fn drop(&mut self) {
+            if let Ok(pids) = std::fs::read_to_string(&self.0) {
+                for p in pids.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-9", &p.to_string()])
+                        .status();
+                }
+            }
+        }
+    }
+
+    /// A helper that exits without an Ended event (whether its child keeps stdout open or it
+    /// dies non-zero without saying an error) is cleaned up from running/tasks/queue/adding,
+    /// clears "stopping", and otherwise shows "ended without a word".
+    #[test]
+    #[cfg(unix)]
+    fn helper_exiting_without_ended_clears_status() {
+        use std::os::unix::fs::PermissionsExt;
+        let _log = crate::log::capture();
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let _kill = KillPids(t.join("pids"));
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\nhelper = \"helper.sh\"\n\
+             [add]\naction = \"login\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"Username\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\n\
+             [[action]]\nid = \"login\"\nlabel = \"Log in\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r req
+id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+case "$1" in
+play)
+    echo '{"status":"running"}'
+    if [ -e "hold-$id" ]; then
+        sleep 3 </dev/null &
+        echo $! >> pids
+        if [ -e "wait-stop-$id" ]; then
+            read -r _
+        fi
+        exit 1
+    fi
+    if [ -e "crash-$id" ]; then
+        exit 1
+    fi
+    ;;
+login)
+    if [ -e "hold-$id" ]; then
+        sleep 3 </dev/null &
+        echo $! >> pids
+        exit 1
+    fi
+    echo '{"set":{"username":"Player1"}}'
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut make = |name: &str| {
+            let mut a = h.state_mut().new_account(&m).unwrap();
+            a.name = name.into();
+            set_value(&mut a, "username", name, false);
+            assert!(h.state_mut().save(&a));
+            a
+        };
+        let a_run = make("Player1");
+        let a_stop = make("Alt1");
+        let a_crash = make("Alt2");
+        std::fs::write(t.join(format!("hold-{}", a_run.id)), "").unwrap();
+        std::fs::write(t.join(format!("hold-{}", a_stop.id)), "").unwrap();
+        std::fs::write(t.join(format!("wait-stop-{}", a_stop.id)), "").unwrap();
+        std::fs::write(t.join(format!("crash-{}", a_crash.id)), "").unwrap();
+
+        h.state_mut().run_action("play", vec![a_run.id.clone()]);
+        h.state_mut().run_action("play", vec![a_stop.id.clone()]);
+        h.state_mut().run_action("play", vec![a_crash.id.clone()]);
+        for _ in 0..100 {
+            h.state_mut().poll();
+            if h.state().status.contains_key(&a_stop.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // ask a_stop to stop; its helper spawns a child holding stdout and exits 1
+        h.state_mut().stop(std::slice::from_ref(&a_stop.id));
+        assert_eq!(
+            h.state().status.get(&a_stop.id),
+            Some(&("stopping".into(), false))
+        );
+
+        for _ in 0..150 {
+            h.state_mut().poll();
+            if !h.state().running.contains_key(&a_run.id)
+                && !h.state().running.contains_key(&a_stop.id)
+                && !h.state().running.contains_key(&a_crash.id)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !h.state().running.contains_key(&a_run.id),
+            "running helper exited without Ended stayed in running"
+        );
+        assert!(
+            !h.state().running.contains_key(&a_stop.id),
+            "stopping helper exited without Ended stayed in running"
+        );
+        assert!(
+            !h.state().running.contains_key(&a_crash.id),
+            "crashed helper stayed in running"
+        );
+        assert_eq!(
+            h.state().status.get(&a_run.id),
+            Some(&("ended without a word".into(), true))
+        );
+        assert_eq!(
+            h.state().status.get(&a_stop.id),
+            None,
+            "stopping status was not cleared"
+        );
+        assert_eq!(
+            h.state().status.get(&a_crash.id),
+            Some(&("ended without a word".into(), true))
+        );
+
+        // also check self.tasks, queue advancement, and adding
+        let a_task_fail = h.state_mut().new_account(&m).unwrap();
+        assert!(h.state_mut().save(&a_task_fail));
+        let a_task_ok = h.state_mut().new_account(&m).unwrap();
+        assert!(h.state_mut().save(&a_task_ok));
+        std::fs::write(t.join(format!("hold-{}", a_task_fail.id)), "").unwrap();
+        h.state_mut().adding.insert(a_task_fail.id.clone());
+        h.state_mut().adding.insert(a_task_ok.id.clone());
+        h.state_mut()
+            .run_action("login", vec![a_task_fail.id.clone(), a_task_ok.id.clone()]);
+        for _ in 0..200 {
+            h.state_mut().poll();
+            h.state_mut().advance_queue();
+            if h.state().adding.is_empty()
+                && h.state().tasks.is_empty()
+                && h.state().queue.is_empty()
+                && h.state().queue_ended
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(h.state().tasks.is_empty(), "tasks kept exited helper");
+        assert!(h.state().adding.is_empty(), "adding was not finished");
+        assert!(
+            !h.state().accounts.iter().any(|a| a.id == a_task_fail.id),
+            "failed add account was not dropped"
+        );
+        assert!(
+            h.state().accounts.iter().any(|a| a.id == a_task_ok.id),
+            "next queued account did not succeed"
+        );
+
+        let logs = crate::log::captured();
+        assert!(
+            logs.iter()
+                .any(|l| l == "Player1: play ended without a word (exit status: 1)"),
+            "missing log for Player1: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l == "Alt1: play ended without a word (exit status: 1)"),
+            "missing log for Alt1: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l == "Alt2: play ended without a word (exit status: 1)"),
+            "missing log for Alt2: {logs:?}"
+        );
+
+        drop(_kill);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// A helper that ignores "stop" past the timeout is killed and cleaned up (both when
+    /// closing its pipe and when a grandchild keeps stdout open).
+    #[test]
+    #[cfg(unix)]
+    fn stuck_stopping_helper_is_killed_after_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let _log = crate::log::capture();
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let _kill = KillPids(t.join("pids"));
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\nhelper = \"helper.sh\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"Username\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r req
+id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+echo '{"status":"running"}'
+if [ -e "hold-$id" ]; then
+    sleep 3 </dev/null &
+    echo $! >> pids
+fi
+while read -r _; do :; done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut make = |name: &str| {
+            let mut a = h.state_mut().new_account(&m).unwrap();
+            a.name = name.into();
+            assert!(h.state_mut().save(&a));
+            a
+        };
+        let a = make("Player1");
+        let a_hold = make("Alt1");
+        std::fs::write(t.join(format!("hold-{}", a_hold.id)), "").unwrap();
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        h.state_mut().run_action("play", vec![a_hold.id.clone()]);
+        for _ in 0..100 {
+            h.state_mut().poll();
+            if h.state().status.contains_key(&a.id) && h.state().status.contains_key(&a_hold.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        h.state_mut().stop(&[a.id.clone(), a_hold.id.clone()]);
+        h.state_mut().poll();
+        assert!(h.state().running.contains_key(&a.id));
+        assert!(h.state().running.contains_key(&a_hold.id));
+        assert_eq!(
+            h.state().status.get(&a.id),
+            Some(&("stopping".into(), false))
+        );
+        assert_eq!(
+            h.state().status.get(&a_hold.id),
+            Some(&("stopping".into(), false))
+        );
+        for _ in 0..100 {
+            h.run();
+            if !h.state().running.contains_key(&a.id) && !h.state().running.contains_key(&a_hold.id)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !h.state().running.contains_key(&a.id),
+            "stuck helper was not killed after stop timeout ({STOP_TIMEOUT:?})"
+        );
+        assert!(
+            !h.state().running.contains_key(&a_hold.id),
+            "stuck helper with held stdout was not killed after stop timeout ({STOP_TIMEOUT:?})"
+        );
+        assert_eq!(h.state().status.get(&a.id), None);
+        assert_eq!(h.state().status.get(&a_hold.id), None);
+        let logs = crate::log::captured();
+        assert!(
+            logs.iter()
+                .any(|l| l.starts_with("Player1: play ended without a word (")),
+            "expected ended-without-a-word log for Player1: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l.starts_with("Alt1: play ended without a word (")),
+            "expected ended-without-a-word log for Alt1: {logs:?}"
+        );
+        for r in h.state_mut().running.values_mut() {
+            let _ = r.child.kill();
+        }
+        drop(_kill);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// Output still buffered when a helper exits normally is read first, and Ended logs once.
+    #[test]
+    #[cfg(unix)]
+    fn normal_ended_logs_once_and_reads_buffered_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let _log = crate::log::capture();
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\nhelper = \"helper.sh\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"Username\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r _
+echo '{"status":"running"}'
+while [ ! -e exit_now ]; do sleep 0.01; done
+echo '{"set":{"username":"Player1"}}'
+echo '{"status":"closing"}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut a = h.state_mut().new_account(&m).unwrap();
+        a.name = "Main".into();
+        assert!(h.state_mut().save(&a));
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        for _ in 0..100 {
+            h.state_mut().poll();
+            if h.state().status.contains_key(&a.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(t.join("exit_now"), "").unwrap();
+        for _ in 0..400 {
+            h.state_mut().poll();
+            if !h.state().running.contains_key(&a.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        h.state_mut().poll();
+        assert!(!h.state().running.contains_key(&a.id));
+        assert_eq!(h.state().status.get(&a.id), None);
+        let saved = h.state().accounts.iter().find(|x| x.id == a.id).unwrap();
+        assert_eq!(saved.value("username"), "Player1");
+        let logs = crate::log::captured();
+        assert_eq!(
+            logs.iter().filter(|l| *l == "Main: play ended").count(),
+            1,
+            "expected exactly one ended log: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l == "Main: closing"),
+            "missing buffered status log: {logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.contains("ended without a word")),
+            "unexpected without-a-word log: {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
     /// The FPS choice is offered for a running game only; the Mode column shows the limit it
     /// gave while the game runs, the account's FPS cap again once it starts anew.
     #[test]

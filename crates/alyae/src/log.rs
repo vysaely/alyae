@@ -56,10 +56,47 @@ pub fn civil(z: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
+#[cfg(test)]
+thread_local! {
+    static CAPTURE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Captures `line()` calls on this thread until dropped (tests run concurrently).
+#[cfg(test)]
+pub struct Capture(());
+
+#[cfg(test)]
+impl Drop for Capture {
+    fn drop(&mut self) {
+        CAPTURE.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub fn capture() -> Capture {
+    CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    Capture(())
+}
+
+#[cfg(test)]
+pub fn captured() -> Vec<String> {
+    CAPTURE.with(|c| c.borrow().clone().unwrap_or_default())
+}
+
 /// Appends one line; `who` is an account name, or empty for Alyae itself.
 pub fn line(who: &str, text: &str) {
-    let Some(mut f) = file() else { return };
     let text = text.replace('\n', " ");
+    #[cfg(test)]
+    CAPTURE.with(|c| {
+        if let Some(lines) = c.borrow_mut().as_mut() {
+            lines.push(if who.is_empty() {
+                text.clone()
+            } else {
+                format!("{who}: {text}")
+            });
+        }
+    });
+    let Some(mut f) = file() else { return };
     let _ = if who.is_empty() {
         writeln!(f, "{} {text}", now())
     } else {

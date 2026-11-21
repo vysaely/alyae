@@ -470,6 +470,12 @@ impl App {
     // --- events from running actions -------------------------------------------------------
 
     fn poll(&mut self) {
+        self.drain_events();
+        self.reap_exited();
+        self.kill_stuck_stops();
+    }
+
+    fn drain_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 Event::Set { account, values } => {
@@ -661,65 +667,153 @@ impl App {
                     action,
                     ok,
                 } => {
+                    let mut found = self.take_running(&account, &action, false);
+                    let was_stopping = found.as_ref().is_some_and(|r| r.stopping_since().is_some());
+                    let exit = found.as_mut().map(|r| r.child.wait());
+                    if ok && let Some(ended) = exit {
+                        match ended {
+                            Ok(status) if !status.success() => {
+                                self.finish_without_word(&account, &action, status, was_stopping);
+                                continue;
+                            }
+                            Err(e) => {
+                                crate::log::line(
+                                    &self.name_of(&account),
+                                    &format!("{action} wait failed: {e}"),
+                                );
+                            }
+                            Ok(_) => {}
+                        }
+                    }
                     // a resume that found no game ends quietly
                     let quiet = ok && self.is_resume(&account, &action);
-                    if self
-                        .resuming
-                        .get(&account)
-                        .is_some_and(|r| r.action == action)
-                        && let Some(mut r) = self.resuming.remove(&account)
-                    {
-                        let _ = r.child.wait();
-                    }
                     if !quiet {
                         crate::log::line(
                             &self.name_of(&account),
                             &format!("{action} ended{}", if ok { "" } else { " with an error" }),
                         );
                     }
-                    if self
-                        .running
-                        .get(&account)
-                        .is_some_and(|r| r.action == action)
-                    {
-                        if let Some(mut r) = self.running.remove(&account) {
-                            let _ = r.child.wait();
-                        }
-                    } else if let Some(i) = self
-                        .tasks
-                        .iter()
-                        .position(|(a, r)| *a == account && r.action == action)
-                    {
-                        let _ = self.tasks.swap_remove(i).1.child.wait();
-                    }
                     if ok && self.status.get(&account).is_some_and(|(_, bad)| !bad) {
                         self.status.remove(&account);
                     }
-                    if self
-                        .queue_current
-                        .as_ref()
-                        .is_some_and(|(a, _, act, _)| *a == account && *act == action)
-                    {
-                        self.queue_ended = true;
-                        if ok {
-                            self.queue_backoff = Duration::ZERO;
-                        }
-                    }
-                    if self.adding.remove(&account) {
-                        self.finish_add(&account, ok);
-                    }
+                    self.finish_account_action(&account, &action, ok);
                 }
             }
         }
+    }
+
+    fn take_running(&mut self, id: &str, action: &str, silenced_only: bool) -> Option<Running> {
+        let matches = |r: &Running| r.action == action && (!silenced_only || r.is_silenced());
+        if self.resuming.get(id).is_some_and(matches) {
+            self.resuming.remove(id)
+        } else if self.running.get(id).is_some_and(matches) {
+            self.running.remove(id)
+        } else if let Some(i) = self.tasks.iter().position(|(a, r)| a == id && matches(r)) {
+            Some(self.tasks.swap_remove(i).1)
+        } else {
+            None
+        }
+    }
+
+    fn finish_account_action(&mut self, account: &str, action: &str, ok: bool) {
+        if self
+            .queue_current
+            .as_ref()
+            .is_some_and(|(a, _, act, _)| *a == account && *act == action)
+        {
+            self.queue_ended = true;
+            if ok {
+                self.queue_backoff = Duration::ZERO;
+            }
+        }
+        if self.adding.remove(account) {
+            self.finish_add(account, ok);
+        }
+    }
+
+    fn finish_without_word(
+        &mut self,
+        account: &str,
+        action: &str,
+        status: std::process::ExitStatus,
+        was_stopping: bool,
+    ) {
+        crate::log::line(
+            &self.name_of(account),
+            &format!("{action} ended without a word ({status})"),
+        );
+        let has_error = self.status.get(account).is_some_and(|(_, bad)| *bad);
+        let stopping = was_stopping
+            || self
+                .status
+                .get(account)
+                .is_some_and(|(s, bad)| !bad && s == "stopping");
+        if stopping && !has_error {
+            self.status.remove(account);
+        } else if !has_error {
+            self.status
+                .insert(account.to_string(), ("ended without a word".into(), true));
+        }
+        self.finish_account_action(account, action, false);
+    }
+
+    fn reap_exited(&mut self) {
         // a plain command has no output to end on: look at the process itself
-        let ended: Vec<String> = self
+        let cmds: Vec<String> = self
             .running
             .iter_mut()
             .filter(|(_, r)| r.is_command())
             .filter_map(|(id, r)| matches!(r.child.try_wait(), Ok(Some(_))).then(|| id.clone()))
             .collect();
-        for id in ended {
+        for id in cmds {
             self.running.remove(&id);
+            if self
+                .status
+                .get(&id)
+                .is_some_and(|(s, bad)| !bad && s == "stopping")
+            {
+                self.status.remove(&id);
+            }
+        }
+        loop {
+            let exited = self
+                .running
+                .iter_mut()
+                .map(|(id, r)| (id.as_str(), r))
+                .chain(self.resuming.iter_mut().map(|(id, r)| (id.as_str(), r)))
+                .chain(self.tasks.iter_mut().map(|(id, r)| (id.as_str(), r)))
+                .filter(|(_, r)| !r.is_command())
+                .find_map(|(id, r)| match r.child.try_wait() {
+                    Ok(Some(status)) => {
+                        r.finish_pipe(Duration::from_millis(50));
+                        Some((id.to_string(), r.action.clone(), status))
+                    }
+                    _ => None,
+                });
+            let Some((id, action, status)) = exited else {
+                break;
+            };
+            // buffered pipe lines (and Ended, if the pipe closed) arrive before checking again
+            self.drain_events();
+            if let Some(r) = self.take_running(&id, &action, true) {
+                self.finish_without_word(&id, &action, status, r.stopping_since().is_some());
+            }
+        }
+    }
+
+    fn kill_stuck_stops(&mut self) {
+        for r in self
+            .running
+            .values_mut()
+            .chain(self.resuming.values_mut())
+            .chain(self.tasks.iter_mut().map(|(_, r)| r))
+        {
+            if !r.is_command()
+                && r.stopping_since()
+                    .is_some_and(|t| t.elapsed() >= STOP_TIMEOUT)
+            {
+                let _ = r.child.kill();
+            }
         }
     }
 
@@ -996,8 +1090,26 @@ impl eframe::App for App {
             });
             return;
         }
-        // helpers wake the window with their events; a plain command can only be looked at
-        if self.running.values().any(Running::is_command) {
+        // helpers wake the window with their events; plain commands, dead helpers whose child
+        // kept stdout open, and stuck stops are looked at on a short timer
+        let stop_wait = self
+            .running
+            .values()
+            .chain(self.resuming.values())
+            .chain(self.tasks.iter().map(|(_, r)| r))
+            .filter_map(Running::stopping_since)
+            .map(|t| {
+                let left = STOP_TIMEOUT.saturating_sub(t.elapsed());
+                if left.is_zero() {
+                    Duration::from_millis(20)
+                } else {
+                    left.min(Duration::from_secs(1))
+                }
+            })
+            .min();
+        if let Some(after) = stop_wait {
+            ctx.request_repaint_after(after);
+        } else if !self.running.is_empty() || !self.tasks.is_empty() || !self.resuming.is_empty() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         self.tick_anti_afk(&ctx);
@@ -3948,6 +4060,14 @@ const QUEUE_GAP: Duration = if cfg!(test) {
     Duration::from_secs(5)
 };
 
+/// How long "stopping" may stay before Alyae kills the stuck helper itself (the helper kills
+/// its game after 4 s, so 10 s means the helper is stuck).
+const STOP_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(10)
+};
+
 /// One account's turn in the queue: the action, its inputs, the account.
 struct Job {
     game: String,
@@ -4557,6 +4677,383 @@ esac
         h.state_mut().check_builds(true);
         assert!(h.state().building.is_some(), "a pending install did not start at open");
         wait_ended(&mut h);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// Helper process cleanup for unix tests: kills any PIDs recorded in `file` when dropped.
+    #[cfg(unix)]
+    struct KillPids(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for KillPids {
+        fn drop(&mut self) {
+            if let Ok(pids) = std::fs::read_to_string(&self.0) {
+                for p in pids.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-9", &p.to_string()])
+                        .status();
+                }
+            }
+        }
+    }
+
+    /// A helper that exits without an Ended event (whether its child keeps stdout open or it
+    /// dies non-zero without saying an error) is cleaned up from running/tasks/queue/adding,
+    /// clears "stopping", and otherwise shows "ended without a word".
+    #[test]
+    #[cfg(unix)]
+    fn helper_exiting_without_ended_clears_status() {
+        use std::os::unix::fs::PermissionsExt;
+        let _log = crate::log::capture();
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let _kill = KillPids(t.join("pids"));
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\nhelper = \"helper.sh\"\n\
+             [add]\naction = \"login\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"Username\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\n\
+             [[action]]\nid = \"login\"\nlabel = \"Log in\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r req
+id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+case "$1" in
+play)
+    echo '{"status":"running"}'
+    if [ -e "hold-$id" ]; then
+        sleep 3 </dev/null &
+        echo $! >> pids
+        if [ -e "wait-stop-$id" ]; then
+            read -r _
+        fi
+        exit 1
+    fi
+    if [ -e "crash-$id" ]; then
+        exit 1
+    fi
+    ;;
+login)
+    if [ -e "hold-$id" ]; then
+        sleep 3 </dev/null &
+        echo $! >> pids
+        exit 1
+    fi
+    echo '{"set":{"username":"Player1"}}'
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut make = |name: &str| {
+            let mut a = h.state_mut().new_account(&m).unwrap();
+            a.name = name.into();
+            set_value(&mut a, "username", name, false);
+            assert!(h.state_mut().save(&a));
+            a
+        };
+        let a_run = make("Player1");
+        let a_stop = make("Alt1");
+        let a_crash = make("Alt2");
+        std::fs::write(t.join(format!("hold-{}", a_run.id)), "").unwrap();
+        std::fs::write(t.join(format!("hold-{}", a_stop.id)), "").unwrap();
+        std::fs::write(t.join(format!("wait-stop-{}", a_stop.id)), "").unwrap();
+        std::fs::write(t.join(format!("crash-{}", a_crash.id)), "").unwrap();
+
+        h.state_mut().run_action("play", vec![a_run.id.clone()]);
+        h.state_mut().run_action("play", vec![a_stop.id.clone()]);
+        h.state_mut().run_action("play", vec![a_crash.id.clone()]);
+        for _ in 0..100 {
+            h.state_mut().poll();
+            if h.state().status.contains_key(&a_stop.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // ask a_stop to stop; its helper spawns a child holding stdout and exits 1
+        h.state_mut().stop(std::slice::from_ref(&a_stop.id));
+        assert_eq!(
+            h.state().status.get(&a_stop.id),
+            Some(&("stopping".into(), false))
+        );
+
+        for _ in 0..150 {
+            h.state_mut().poll();
+            if !h.state().running.contains_key(&a_run.id)
+                && !h.state().running.contains_key(&a_stop.id)
+                && !h.state().running.contains_key(&a_crash.id)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !h.state().running.contains_key(&a_run.id),
+            "running helper exited without Ended stayed in running"
+        );
+        assert!(
+            !h.state().running.contains_key(&a_stop.id),
+            "stopping helper exited without Ended stayed in running"
+        );
+        assert!(
+            !h.state().running.contains_key(&a_crash.id),
+            "crashed helper stayed in running"
+        );
+        assert_eq!(
+            h.state().status.get(&a_run.id),
+            Some(&("ended without a word".into(), true))
+        );
+        assert_eq!(
+            h.state().status.get(&a_stop.id),
+            None,
+            "stopping status was not cleared"
+        );
+        assert_eq!(
+            h.state().status.get(&a_crash.id),
+            Some(&("ended without a word".into(), true))
+        );
+
+        // also check self.tasks, queue advancement, and adding
+        let a_task_fail = h.state_mut().new_account(&m).unwrap();
+        assert!(h.state_mut().save(&a_task_fail));
+        let a_task_ok = h.state_mut().new_account(&m).unwrap();
+        assert!(h.state_mut().save(&a_task_ok));
+        std::fs::write(t.join(format!("hold-{}", a_task_fail.id)), "").unwrap();
+        h.state_mut().adding.insert(a_task_fail.id.clone());
+        h.state_mut().adding.insert(a_task_ok.id.clone());
+        h.state_mut()
+            .run_action("login", vec![a_task_fail.id.clone(), a_task_ok.id.clone()]);
+        for _ in 0..200 {
+            h.state_mut().poll();
+            h.state_mut().advance_queue();
+            if h.state().adding.is_empty()
+                && h.state().tasks.is_empty()
+                && h.state().queue.is_empty()
+                && h.state().queue_ended
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(h.state().tasks.is_empty(), "tasks kept exited helper");
+        assert!(h.state().adding.is_empty(), "adding was not finished");
+        assert!(
+            !h.state().accounts.iter().any(|a| a.id == a_task_fail.id),
+            "failed add account was not dropped"
+        );
+        assert!(
+            h.state().accounts.iter().any(|a| a.id == a_task_ok.id),
+            "next queued account did not succeed"
+        );
+
+        let logs = crate::log::captured();
+        assert!(
+            logs.iter()
+                .any(|l| l == "Player1: play ended without a word (exit status: 1)"),
+            "missing log for Player1: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l == "Alt1: play ended without a word (exit status: 1)"),
+            "missing log for Alt1: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l == "Alt2: play ended without a word (exit status: 1)"),
+            "missing log for Alt2: {logs:?}"
+        );
+
+        drop(_kill);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// A helper that ignores "stop" past the timeout is killed and cleaned up (both when
+    /// closing its pipe and when a grandchild keeps stdout open).
+    #[test]
+    #[cfg(unix)]
+    fn stuck_stopping_helper_is_killed_after_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let _log = crate::log::capture();
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let _kill = KillPids(t.join("pids"));
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\nhelper = \"helper.sh\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"Username\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r req
+id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+echo '{"status":"running"}'
+if [ -e "hold-$id" ]; then
+    sleep 3 </dev/null &
+    echo $! >> pids
+fi
+while read -r _; do :; done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut make = |name: &str| {
+            let mut a = h.state_mut().new_account(&m).unwrap();
+            a.name = name.into();
+            assert!(h.state_mut().save(&a));
+            a
+        };
+        let a = make("Player1");
+        let a_hold = make("Alt1");
+        std::fs::write(t.join(format!("hold-{}", a_hold.id)), "").unwrap();
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        h.state_mut().run_action("play", vec![a_hold.id.clone()]);
+        for _ in 0..100 {
+            h.state_mut().poll();
+            if h.state().status.contains_key(&a.id) && h.state().status.contains_key(&a_hold.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        h.state_mut().stop(&[a.id.clone(), a_hold.id.clone()]);
+        h.state_mut().poll();
+        assert!(h.state().running.contains_key(&a.id));
+        assert!(h.state().running.contains_key(&a_hold.id));
+        assert_eq!(
+            h.state().status.get(&a.id),
+            Some(&("stopping".into(), false))
+        );
+        assert_eq!(
+            h.state().status.get(&a_hold.id),
+            Some(&("stopping".into(), false))
+        );
+        for _ in 0..100 {
+            h.run();
+            if !h.state().running.contains_key(&a.id) && !h.state().running.contains_key(&a_hold.id)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !h.state().running.contains_key(&a.id),
+            "stuck helper was not killed after stop timeout ({STOP_TIMEOUT:?})"
+        );
+        assert!(
+            !h.state().running.contains_key(&a_hold.id),
+            "stuck helper with held stdout was not killed after stop timeout ({STOP_TIMEOUT:?})"
+        );
+        assert_eq!(h.state().status.get(&a.id), None);
+        assert_eq!(h.state().status.get(&a_hold.id), None);
+        let logs = crate::log::captured();
+        assert!(
+            logs.iter()
+                .any(|l| l.starts_with("Player1: play ended without a word (")),
+            "expected ended-without-a-word log for Player1: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l.starts_with("Alt1: play ended without a word (")),
+            "expected ended-without-a-word log for Alt1: {logs:?}"
+        );
+        for r in h.state_mut().running.values_mut() {
+            let _ = r.child.kill();
+        }
+        drop(_kill);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// Output still buffered when a helper exits normally is read first, and Ended logs once.
+    #[test]
+    #[cfg(unix)]
+    fn normal_ended_logs_once_and_reads_buffered_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let _log = crate::log::capture();
+        let mods = std::env::temp_dir().join(format!("alyae-mods-{}", store::new_id()));
+        let t = mods.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(
+            t.join("module.toml"),
+            "id = \"t\"\nname = \"T\"\ntitle_field = \"username\"\nhelper = \"helper.sh\"\n\
+             [[field]]\nkey = \"username\"\nlabel = \"Username\"\n\
+             [[action]]\nid = \"play\"\nlabel = \"Play\"\nruns = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            t.join("helper.sh"),
+            r#"#!/bin/sh
+cd "$(dirname "$0")"
+read -r _
+echo '{"status":"running"}'
+while [ ! -e exit_now ]; do sleep 0.01; done
+echo '{"set":{"username":"Player1"}}'
+echo '{"status":"closing"}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(t.join("helper.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (mut h, dir) = window_with("t", mods.clone());
+        let m = h.state().module("t").cloned().unwrap();
+        let mut a = h.state_mut().new_account(&m).unwrap();
+        a.name = "Main".into();
+        assert!(h.state_mut().save(&a));
+        h.state_mut().run_action("play", vec![a.id.clone()]);
+        for _ in 0..100 {
+            h.state_mut().poll();
+            if h.state().status.contains_key(&a.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(t.join("exit_now"), "").unwrap();
+        for _ in 0..400 {
+            h.state_mut().poll();
+            if !h.state().running.contains_key(&a.id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        h.state_mut().poll();
+        assert!(!h.state().running.contains_key(&a.id));
+        assert_eq!(h.state().status.get(&a.id), None);
+        let saved = h.state().accounts.iter().find(|x| x.id == a.id).unwrap();
+        assert_eq!(saved.value("username"), "Player1");
+        let logs = crate::log::captured();
+        assert_eq!(
+            logs.iter().filter(|l| *l == "Main: play ended").count(),
+            1,
+            "expected exactly one ended log: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l == "Main: closing"),
+            "missing buffered status log: {logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.contains("ended without a word")),
+            "unexpected without-a-word log: {logs:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(mods);
     }

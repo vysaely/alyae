@@ -101,16 +101,17 @@ pub fn status(text: &str) {
     say(json!({ "status": text }));
 }
 
-/// How long a launch waits for free memory before it gives up (meanwhile running alts trim).
-pub const MEMORY_WAIT: Duration = Duration::from_secs(180);
+/// How long a launch waits for free memory before it starts anyway (meanwhile running alts
+/// trim). Owner 2026-11-23: wait a little, never refuse; swap takes the rest.
+pub const MEMORY_WAIT: Duration = Duration::from_secs(15);
 
-/// How a launch that gave up for memory starts its error: Alyae stops the queue on it, as the
-/// accounts after would wait in vain too.
+/// How a launch refused for memory starts its error (Windows: the commit all but used up by a
+/// game started on its own); Alyae stops the queue on it.
 pub const NO_MEMORY: &str = "not enough free memory for another Roblox";
 
 /// Waits until `free()` (MB) reaches `need()` MB, saying so while it waits and calling
-/// `waiting()` every round (Windows asks the running alts to trim then); gives up after
-/// `MEMORY_WAIT` with a `NO_MEMORY` error.
+/// `waiting()` every round (Windows asks the running alts to trim then); after `MEMORY_WAIT`
+/// it returns anyway and the launch goes on.
 pub fn wait_for_memory(free: impl Fn() -> u64, need: impl Fn() -> u64, mut waiting: impl FnMut()) {
     let until = std::time::Instant::now() + MEMORY_WAIT;
     let mut said = (0, 0);
@@ -120,12 +121,13 @@ pub fn wait_for_memory(free: impl Fn() -> u64, need: impl Fn() -> u64, mut waiti
             return;
         }
         if std::time::Instant::now() >= until {
-            fail(&format!(
-                "{NO_MEMORY}: {:.1} GB free after {} min, {:.1} GB needed. Close something or start fewer accounts",
+            status(&format!(
+                "starting with {:.1} GB free after {} s ({:.1} GB wanted)",
                 now as f64 / 1024.0,
-                MEMORY_WAIT.as_secs() / 60,
+                MEMORY_WAIT.as_secs(),
                 need as f64 / 1024.0
             ));
+            return;
         }
         waiting();
         // a new line only when it changed by half a GB or more

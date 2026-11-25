@@ -1128,13 +1128,14 @@ pub fn play(req: &Request) {
     let alt = role == Role::Alt;
     let affinity = affinity(alt);
     let mut cmd = if alt && on_path("systemd-run") {
-        // alts in a low-weight scope: the desktop and the main come first
+        // alts in a low-weight scope: the desktop and the main come first.
+        // No memory cap: a per-client MemoryHigh forced hot memory into swap,
+        // clients stalled and got kicked (error 277); the kernel picks cold memory better.
         let mut c = Command::new("systemd-run");
         c.args([
             "--user",
             "--scope",
             "--quiet",
-            "-pMemoryHigh=900M",
             "-pCPUWeight=1",
             "-pIOWeight=1",
         ]);
